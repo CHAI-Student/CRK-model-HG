@@ -1,0 +1,19 @@
+[project]
+name = "crk-model-hg"
+version = "0.1.0"
+description = "CRK 스마트 자판기 모델 서비스 — 그린필드 재설계 (GREENFIELD_DESIGN_GUIDE D1~D10 권장안 구현)"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["crk_model*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -1,0 +1,113 @@
+"""gateway: 상태기계 + 인과 배리어 확정(I17), 타임아웃 fail-closed(D9), I10·I11."""
+import pytest
+
+from crk_model.core.profiles import REFRIGERATOR
+from crk_model.core.types import JudgmentResult, JudgmentStatus, ProductCount
+from crk_model.gateway import DoorState, MultiZoneGateway, build_payment_payload
+from crk_model.ledger import CloseSettler, EventLog, TriggerEvent
+
+
+class FakeClock:
+    def __init__(self):
+        self.t = 0.0
+
+    def __call__(self):
+        return self.t
+
+
+def removal(sid, zone, ts, product, count=1):
+    j = JudgmentResult(JudgmentStatus.COMPLETE, (ProductCount(product, count),), 0.9, "strict")
+    return TriggerEvent(sid, zone, ts, -product.unit_weight * count, (), j)
+
+
+def make_gateway(clock=None):
+    clock = clock or FakeClock()
+    gw = MultiZoneGateway(
+        CloseSettler(), EventLog(), {1: REFRIGERATOR}, clock=clock, close_timeout_s=10.0
+    )
+    return gw, clock
+
+
+class TestBarrierDrivenClose:
+    def test_close_finalizes_immediately_when_barrier_satisfied(self, cola):
+        # I17: 큐가 비어 있으면 debounce 대기 없이 즉시 확정 (지연 단축 부수 효과)
+        gw, _ = make_gateway()
+        gw.handle_open("s1")
+        gw.notify_enqueued(1)
+        gw.record_trigger(removal("s1", 1, 1.0, cola))
+        gw.notify_processed(1)
+        resp = gw.handle_close()
+        assert resp.state is DoorState.FINALIZED
+        payload = build_payment_payload(resp.payload)
+        assert payload["totalPrice"] == 1500
+        assert payload["productCount"] == 1
+
+    def test_pending_queue_blocks_finalize(self, cola):
+        # I17: 큐 미정합 동안 시간이 아무리 지나도(타임아웃 전) 확정 금지
+        gw, _ = make_gateway()
+        gw.handle_open("s1")
+        gw.notify_enqueued(1)  # 아직 미처리
+        resp = gw.handle_close()
+        assert resp.state is DoorState.PENDING_CLOSE
+        assert "queue_pending" in resp.detail
+        # late trigger가 처리됨 → 배리어 충족 → 확정
+        gw.record_trigger(removal("s1", 1, 2.0, cola))
+        gw.notify_processed(1)
+        resp = gw.poll()
+        assert resp.state is DoorState.FINALIZED
+        assert resp.payload.total_price == 1500  # late trigger 유실 없음
+
+    def test_timeout_with_unsatisfied_barrier_is_error_not_finalize(self):
+        # I17 + D9: 상한 타임아웃 만료 = 에러 세션 (fail-closed), 부분 확정 금지
+        gw, clock = make_gateway()
+        gw.handle_open("s1")
+        gw.notify_enqueued(1)  # 영원히 미처리 (카메라/워커 장애 시뮬레이션)
+        gw.handle_close()
+        clock.t = 11.0
+        resp = gw.poll()
+        assert resp.state is DoorState.ERROR
+        assert resp.payload is None  # 결제로 아무것도 안 나감
+        assert "barrier_timeout" in resp.detail
+
+    def test_seq_watermark_gates_close(self, cola):
+        # D2/I17 ③: close 이전 seq 전원 도착까지 확정 보류
+        gw, _ = make_gateway()
+        gw.handle_open("s1")
+        resp = gw.handle_close(seq_watermark={1: 2})
+        assert resp.state is DoorState.PENDING_CLOSE
+        gw.barrier.note_seq(1, 2)
+        assert gw.poll().state is DoorState.FINALIZED
+
+
+class TestPaymentContract:
+    def test_interim_rejected_by_payment_builder(self, cola):
+        # I10: ACTIVE 중 잠정치는 타입으로 결제 차단
+        gw, _ = make_gateway()
+        gw.handle_open("s1")
+        gw.record_trigger(removal("s1", 1, 1.0, cola))
+        resp = gw.poll()
+        assert resp.state is DoorState.ACTIVE
+        with pytest.raises(TypeError):
+            build_payment_payload(resp.payload)
+
+    def test_repoll_after_finalize_is_idempotent(self, cola):
+        # I11: 재폴링해도 동일 정산 객체 (이중 과금 불가)
+        gw, _ = make_gateway()
+        gw.handle_open("s1")
+        gw.notify_enqueued(1)
+        gw.record_trigger(removal("s1", 1, 1.0, cola))
+        gw.notify_processed(1)
+        first = gw.handle_close()
+        second = gw.poll()
+        assert first.payload is second.payload
+
+    def test_new_session_resets_barrier(self, cola):
+        gw, clock = make_gateway()
+        gw.handle_open("s1")
+        gw.notify_enqueued(1)  # s1에서 미해소
+        gw.handle_close()
+        clock.t = 11.0
+        assert gw.poll().state is DoorState.ERROR
+        # 새 세션 OPEN → 새 배리어 (이전 세션 잔재가 다음 세션을 막지 않음)
+        gw.handle_open("s2")
+        assert gw.handle_close().state is DoorState.FINALIZED
