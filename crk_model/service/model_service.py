@@ -1,0 +1,148 @@
+"""ModelService — 외부 계약(C4/C5) 파사드. 원본 api/routes의 프레임워크 중립 대응.
+
+HTTP 바인딩(FastAPI 등)은 이 파사드를 감싸는 얇은 어댑터로 둔다 —
+계약·불변식은 전부 여기서 끝나므로 어댑터에는 로직이 없다.
+
+- handle_trigger  ← POST /trigger      (202 {status: queued} 의미론)
+- handle_multi_zone ← POST /api/judge/multi-zone (OPEN/CLOSE 폴링)
+- process_pending ← 워커 drain (장치에서는 전용 스레드가 호출)
+
+기동 fail-fast (이관 리뷰 #1): startup_probe_frame을 주면 생성 시 detector를
+1회 실행해 로드 실패를 기동 실패로 만든다 (무증상 기동 금지).
+"""
+from __future__ import annotations
+
+import time
+from typing import Callable, Mapping
+
+from crk_model.core.config import Settings
+from crk_model.core.profiles import FREEZER, REFRIGERATOR, SensorProfile
+from crk_model.core.types import ActiveProduct, InterimSummary
+from crk_model.gateway.state_machine import (
+    DoorState,
+    MultiZoneGateway,
+    build_payment_payload,
+)
+from crk_model.ingest.idempotency import IdempotencyRegistry
+from crk_model.ledger.events import EventLog
+from crk_model.ledger.journal import EventJournal
+from crk_model.ledger.settler import CloseSettler
+from crk_model.perception.detector import Detector
+from crk_model.service.pipeline import TriggerPipeline, TriggerRequest
+from crk_model.service.snapshot import ActiveProductStore
+from crk_model.service.worker import SerialTriggerWorker
+
+
+def _profiles_from_settings(settings: Settings) -> dict[int, SensorProfile]:
+    profiles: dict[int, SensorProfile] = {}
+    for zone in settings.freezer_zones:
+        profiles[zone] = FREEZER
+    return profiles
+
+
+class ModelService:
+    def __init__(
+        self,
+        detector: Detector,
+        *,
+        settings: Settings | None = None,
+        profiles: Mapping[int, SensorProfile] | None = None,
+        journal: EventJournal | None = None,
+        clock: Callable[[], float] = time.monotonic,
+        startup_probe_frame=None,
+    ):
+        if startup_probe_frame is not None:
+            # 이관 리뷰 #1: YOLO 로드 실패 = 기동 실패 (예외 전파, 무증상 기동 금지)
+            detector.detect(startup_probe_frame)
+
+        self.settings = settings or Settings()
+        self._profiles = dict(profiles) if profiles is not None else _profiles_from_settings(self.settings)
+        self.snapshots = ActiveProductStore()
+        self.event_log = EventLog()
+        self.settler = CloseSettler(self.settings.error_policy)
+        self.gateway = MultiZoneGateway(
+            self.settler,
+            self.event_log,
+            self._profiles,
+            clock=clock,
+            close_timeout_s=self.settings.close_timeout_s,
+        )
+        self.pipeline = TriggerPipeline(detector, self._profiles, self.snapshots)
+        self.worker = SerialTriggerWorker(self.pipeline, self.gateway, journal)
+        self._idempotency = IdempotencyRegistry(self.settings.idempotency_ttl_s, clock)
+        self._trigger_counter = 0
+
+    # ---- POST /trigger (C4) ----
+    def handle_trigger(self, payload: dict) -> dict:
+        zone = payload["zone"]
+        video_paths = payload.get("video_paths") or {"_ts": str(payload.get("ts", ""))}
+        key = IdempotencyRegistry.key_for(zone, video_paths)
+        self._trigger_counter += 1
+        trigger_id = f"trg-{self._trigger_counter}"
+        reg = self._idempotency.register(key, trigger_id)
+        if reg.duplicate:
+            return {"status": "duplicate", "trigger_id": reg.session_id}  # I7 드롭
+
+        session_id = self.gateway.session_id or "no-session"
+        req = TriggerRequest(
+            zone=zone,
+            frames=payload.get("frames", {}),
+            loadcells=payload.get("loadcells", ()),
+            ts=payload.get("ts", 0.0),
+            seq=payload.get("seq"),
+        )
+        if req.seq is not None:
+            self.gateway.barrier.note_seq(zone, req.seq)  # D2
+        self.worker.submit(session_id, req)
+        return {"status": "queued", "trigger_id": trigger_id}  # 202 의미론
+
+    # ---- POST /api/judge/multi-zone (C5) ----
+    def handle_multi_zone(self, payload: dict) -> dict:
+        session_id = payload["session_id"]
+        state = payload["state"]  # "OPEN" | "CLOSE"
+        if state == "OPEN":
+            products = tuple(
+                ActiveProduct(**p) for p in payload.get("active_products", ())
+            )
+            self.snapshots.update(products)  # OPEN마다 스냅샷 갱신 (I2)
+            resp = self.gateway.handle_open(session_id)
+            return self._to_response(resp)
+        if state == "CLOSE":
+            if self.gateway.state is DoorState.ACTIVE:
+                resp = self.gateway.handle_close(payload.get("seq_watermark"))
+            else:
+                resp = self.gateway.poll()  # 재폴링 (I11: 확정 후에도 동일 응답)
+            return self._to_response(resp)
+        raise ValueError(f"unknown state: {state}")
+
+    def process_pending(self) -> int:
+        """워커 drain — 장치에서는 전용 스레드/태스크가 주기 호출."""
+        return self.worker.drain()
+
+    @staticmethod
+    def _to_response(resp) -> dict:
+        if resp.state is DoorState.FINALIZED:
+            payload = build_payment_payload(resp.payload)  # I10: 확정 타입만 통과
+            return {"status": "complete", **payload}
+        if resp.state is DoorState.ERROR:
+            # I13: 에러 세션은 결제 필드 없이 에러로 응답 (무성 확정 금지)
+            return {"status": "error", "detail": resp.detail}
+        body: dict = {"status": "processing", "provisional": True}  # I10: 잠정 명시
+        if isinstance(resp.payload, InterimSummary):
+            body["zones"] = [
+                {
+                    "zone": z.zone,
+                    "products": [
+                        {
+                            "product_id": pc.product.product_id,
+                            "name": pc.product.name,
+                            "count": pc.count,
+                        }
+                        for pc in z.products
+                    ],
+                }
+                for z in resp.payload.zones
+            ]
+        if resp.detail:
+            body["detail"] = resp.detail
+        return body
