@@ -7,6 +7,12 @@ dependencies = []
 
 [project.optional-dependencies]
 dev = ["pytest"]
+# Jetson 서버 어댑터용 — ultralytics/torch/cv2/numpy는 여기 두지 않는다
+# (JetPack system-site 사용, CPU wheel 오염 방지: scripts/setup_jetson.sh 참조)
+jetson = ["fastapi>=0.100.0", "uvicorn[standard]>=0.23.0"]
+
+[project.scripts]
+model-service-hg = "crk_model.adapters.serve:main"
 
 [build-system]
 requires = ["setuptools>=68"]

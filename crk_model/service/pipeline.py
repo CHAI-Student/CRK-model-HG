@@ -157,10 +157,13 @@ class TriggerPipeline:
             for frame in frames:
                 if stopped:
                     break  # L2: 추론만 중단 (프레임 공급은 이미 완료 상태)
-                decision = gate.evaluate(frame)
+                # FrameBundle이면 게이트는 다운스케일 뷰, 검출기는 풀 프레임
+                decision = gate.evaluate(getattr(frame, "gate_view", frame))
                 if not decision.infer:
                     continue
-                detections = self._filters.apply(camera, list(self._detector.detect(frame)))
+                detections = self._filters.apply(
+                    camera, list(self._detector.detect(getattr(frame, "full", frame)))
+                )
                 trace.yolo_calls += 1
                 voting.add_frame(camera, detections)
                 latch.update_after_inference(any(d.is_hand for d in detections))
