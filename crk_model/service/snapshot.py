@@ -6,8 +6,8 @@ fail-closed 차단 + snapshot_source=last_valid 폴백. OPEN마다 스냅샷 갱
 """
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Sequence
 
 from crk_model.core.types import ActiveProduct
 

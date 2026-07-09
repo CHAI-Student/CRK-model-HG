@@ -13,7 +13,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from typing import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 
 from crk_model.core.policy import ErrorSessionPolicy
 from crk_model.core.profiles import REFRIGERATOR, SensorProfile
@@ -164,6 +164,14 @@ class CloseSettler:
         if event_log is not None:
             event_log.mark_finalized(session_id)
         return settlement
+
+    def prune(self, keep_session_ids: set[str]) -> None:
+        """무한 성장 방지 (24h+ soak): _finalized 멱등 캐시(I11)를 최근
+        keep_session_ids만 남기고 정리한다. 호출측이 현재+직전 K개 세션을
+        넘겨야 하며, 여기서는 교집합만 수행한다 (현재 활성 세션은 아직
+        _finalized에 없을 수 있으므로 삭제 대상이 아니다)."""
+        for sid in [s for s in self._finalized if s not in keep_session_ids]:
+            del self._finalized[sid]
 
     @staticmethod
     def _pass_net_delta(

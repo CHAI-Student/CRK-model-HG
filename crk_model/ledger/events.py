@@ -38,3 +38,12 @@ class EventLog:
 
     def mark_finalized(self, session_id: str) -> None:
         self._finalized.add(session_id)
+
+    def prune(self, keep_session_ids: set[str]) -> None:
+        """무한 성장 방지 (24h+ soak): keep_session_ids 밖의 세션 이벤트·확정
+        마커를 제거한다. 호출측(ModelService)이 최근 K개 세션(I11: 현재+직전
+        보존)만 keep_session_ids로 넘겨야 한다 — 여기서는 순수하게 교집합만
+        수행한다."""
+        for sid in [s for s in self._events if s not in keep_session_ids]:
+            del self._events[sid]
+        self._finalized &= keep_session_ids

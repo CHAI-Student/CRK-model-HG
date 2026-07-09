@@ -12,8 +12,8 @@ stabilization_wait 이상 지속) 완료 후에만 구간화한다. 미완이면
 """
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Sequence
 
 from crk_model.core.profiles import SensorProfile
 from crk_model.core.types import WeightSegment
@@ -78,7 +78,7 @@ class LoadcellAnalyzer:
                 return LoadcellAnalysis(delta, (), False, baseline, "needs_return_stabilization")
 
         segments: list[WeightSegment] = []
-        for prev, cur in zip(plateaus, plateaus[1:]):
+        for prev, cur in zip(plateaus, plateaus[1:], strict=False):
             step = cur.mean - prev.mean
             if abs(step) >= self._profile.segment_step_grams:
                 segments.append(

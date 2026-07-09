@@ -13,8 +13,8 @@ yolo_calls / early_terminated / reason_codes.
 """
 from __future__ import annotations
 
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Mapping, Sequence
 
 from crk_model.core.profiles import REFRIGERATOR, SensorProfile
 from crk_model.core.types import JudgmentResult, JudgmentStatus, VisionCandidate
@@ -35,7 +35,7 @@ CAMERAS = ("top", "side")
 @dataclass(frozen=True)
 class TriggerRequest:
     zone: int
-    frames: Mapping[str, Sequence[Frame]]  # 카메라별 디코드된 프레임 (frames/ 산출)
+    frames: Mapping[str, Iterable[Frame]]  # 카메라별 프레임 스트림 (frames/ 산출, 1회 순회)
     loadcells: Sequence[LoadcellSample]
     ts: float
     seq: int | None = None  # D2: 카메라 시퀀스 (선택)
@@ -150,30 +150,39 @@ class TriggerPipeline:
         stopped = False
         for camera in CAMERAS:
             frames = req.frames.get(camera)
-            if not frames:
-                continue
+            if frames is None:
+                continue  # 빈 스트림(list)/미제공 모두 아래 for가 0회 순회
             latch = HandLatch()  # 카메라별 래치 (hand-path는 카메라별, L3 계약과 동형)
             gate = MotionGate(profile, latch)
-            for frame in frames:
-                if stopped:
-                    break  # L2: 추론만 중단 (프레임 공급은 이미 완료 상태)
-                # FrameBundle이면 게이트는 다운스케일 뷰, 검출기는 풀 프레임
-                decision = gate.evaluate(getattr(frame, "gate_view", frame))
-                if not decision.infer:
-                    continue
-                detections = self._filters.apply(
-                    camera, list(self._detector.detect(getattr(frame, "full", frame)))
-                )
-                trace.yolo_calls += 1
-                voting.add_frame(camera, detections)
-                latch.update_after_inference(any(d.is_hand for d in detections))
-                if terminator.should_stop(
-                    delta_weight=delta,
-                    candidates=voting.combine(),
-                    active_products=snapshot.products,
-                    frames_since_hand_exit=latch.frames_since_exit,
-                ):
-                    stopped = True
+            frame_iter = iter(frames)
+            try:
+                for frame in frame_iter:
+                    if stopped:
+                        break  # L2: 추론만 중단 (프레임 공급은 이미 완료 상태)
+                    # FrameBundle이면 게이트는 다운스케일 뷰, 검출기는 풀 프레임
+                    decision = gate.evaluate(getattr(frame, "gate_view", frame))
+                    if not decision.infer:
+                        continue
+                    detections = self._filters.apply(
+                        camera, list(self._detector.detect(getattr(frame, "full", frame)))
+                    )
+                    trace.yolo_calls += 1
+                    voting.add_frame(camera, detections)
+                    latch.update_after_inference(any(d.is_hand for d in detections))
+                    if terminator.should_stop(
+                        delta_weight=delta,
+                        candidates=voting.combine(),
+                        active_products=snapshot.products,
+                        frames_since_hand_exit=latch.frames_since_exit,
+                    ):
+                        stopped = True
+            finally:
+                # 조기 종료로 스트림을 버릴 때도 cv2/subprocess 리소스가 즉시
+                # 해제되도록 제너레이터를 명시적으로 닫는다 (list 등 close 없는
+                # 이터레이터는 getattr로 안전 무시).
+                closer = getattr(frame_iter, "close", None)
+                if closer is not None:
+                    closer()
             trace.processed_frames[camera] = gate.processed_frames
             trace.gate_skipped_frames[camera] = gate.gate_skipped_frames
         trace.early_terminated = stopped

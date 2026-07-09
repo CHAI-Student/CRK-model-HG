@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: "pip"
+
+      - name: Install system deps (ffmpeg — 스트리밍 디코드 테스트용)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+
+      # jetson extra(fastapi/uvicorn) + numpy까지 설치해야 어댑터 wire 계약·
+      # 스트리밍 디코드 테스트가 skip되지 않고 실제로 돈다 (Jetson 전용인
+      # ultralytics/torch는 dev CI에 불필요 — 테스트가 Detector를 주입함).
+      - name: Install dependencies
+        run: pip install -e ".[dev,jetson]" numpy
+
+      - name: Lint (ruff)
+        run: ruff check .
+
+      - name: Test (pytest)
+        run: pytest -q

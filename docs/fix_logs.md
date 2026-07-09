@@ -92,3 +92,48 @@
     (동일 결과 반복 시 `[MULTI-ZONE CLOSE] ... -> finalized` 로그가 1회만 찍히는지 검증).
 
 - 테스트: `python -m pytest -q` (86 passed, 3 skipped).
+
+---
+
+## 2026-07-09 환경 완성 웨이브 — Jetson 4GB 실환경 결함 4종 일괄 수정
+
+깊은 판정 로직 착수 전 인프라 계층 완성 작업(3개 병렬 트랙)에서 수정된 결함들.
+기능 추가(NVDEC 디코더, wire 계약 필드, ruff/CI)는 결함이 아니므로 여기선 생략.
+
+- 증상/원인 ① **OOM 위험**: `decode_avi`가 영상 전체를 `list[FrameBundle]`로 메모리에
+  상주 — 480×480×3 × ~400프레임 ≈ 카메라당 ~276MB, 두 카메라 동시 처리 시 4GB Jetson에서
+  OOM 위험. `LazyAviFrames`도 전체 리스트를 캐시.
+- 해결 ①: 제너레이터 스트리밍으로 전환(프레임 1장씩만 상주), 조기 종료 시
+  `finally`/`close()`로 cv2/ffmpeg 리소스 즉시 해제. 0프레임/열기 실패는 첫 `next()`에서
+  IOError 판정(I1 유지).
+
+- 증상/원인 ② **동시성 무방비**: FastAPI sync 엔드포인트는 anyio threadpool에서 병렬
+  실행되고 별도 워커 스레드가 상시 drain을 도는데, 게이트웨이 상태·배리어 카운터·
+  EventLog·스냅샷에 락이 전혀 없었음 (원본 DoorSessionStore는 `self._lock` 사용).
+- 해결 ②: `ModelService` 소유 단일 RLock — handle_trigger/handle_multi_zone의 상태 변이
+  구간 보호, 워커는 이벤트 1건 단위로만 락(파이프라인 추론은 락 밖 → 수 초짜리 추론이
+  폴링을 블록하지 않음).
+
+- 증상/원인 ③ **무한 성장(24h+ soak 불가)**: `worker.outcomes` list 무한 append,
+  EventLog/settler 멱등 캐시 세션 무한 누적, 저널 JSONL 단일 파일 무한 성장.
+- 해결 ③: outcomes `deque(maxlen)`, 새 세션 OPEN 시 최근 K세션만 남기고 prune
+  (I11: 현재+직전 세션 캐시는 보존 — CLOSE 재폴링 멱등성 유지 검증 테스트 포함),
+  저널 일자별 로테이션 + 보존기간 삭제. 알려진 잔여: `EventLog.rejected`는 아직 무상한
+  (거부 이벤트는 드물어 후속 트랙으로 이관).
+
+- 증상/원인 ④ **모션 게이트 파이썬 병목**: `_diff_ratio`가 120×120=14,400픽셀을 순수
+  파이썬 이중 루프로 순회 — 트리거당 ~700프레임이면 루프 1천만 회로, L1 설계가 가정한
+  프레임당 1~2ms를 크게 초과해 게이트 이득을 잠식.
+- 해결 ④: numpy ndarray 입력이면 벡터화 fast path(int16 승격으로 uint8 오버플로 방지),
+  numpy 부재/리스트 입력은 기존 순수 파이썬 폴백 — 판정 등가성 테스트 포함.
+
+- 관련 파일: `crk_model/adapters/avi_frames.py`(전면 재작성),
+  `crk_model/frames/motion_gate.py`, `crk_model/service/pipeline.py`(frames 계약
+  Iterable화), `crk_model/service/{model_service,worker}.py`(락·상한),
+  `crk_model/ledger/{events,settler,journal}.py`(prune·로테이션),
+  `crk_model/core/config.py`(신규 설정), `crk_model/adapters/http_app.py`(wire 계약),
+  `tests/test_frames_streaming.py`·`tests/test_lifecycle.py`·`tests/test_wire_contract.py`(신규).
+
+- 테스트: `python -m pytest -q` → 122 passed (numpy/ffmpeg/fastapi 설치 환경 기준.
+  미설치 환경은 해당 테스트 skip으로 114 passed). Jetson 실기(G4: NVDEC 경로,
+  24h soak)는 미검증으로 남음.

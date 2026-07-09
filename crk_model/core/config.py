@@ -41,9 +41,16 @@ class Settings:
     error_policy: ErrorSessionPolicy = ErrorSessionPolicy.BLOCK_PAYMENT
     # I7: 트리거 멱등성 TTL
     idempotency_ttl_s: float = 5.0
+    # 무한 성장 방지: worker.outcomes 트레이스 보존 개수 상한 (I8, 24h+ soak 대비)
+    outcomes_keep: int = 256
+    # 무한 성장 방지: EventLog/settler 멱등 캐시에서 보존할 최근 세션 개수
+    # (I11: 현재+직전 세션은 항상 보존 — CLOSE 재폴링이 새 OPEN 직후 섞여 들어올 수 있음)
+    keep_sessions: int = 4
+    # 무한 성장 방지: EventJournal 일자별 로테이션 파일 보존기간(일)
+    journal_retention_days: int = 14
 
     @classmethod
-    def from_env(cls) -> "Settings":
+    def from_env(cls) -> Settings:
         policy_raw = os.environ.get("MODEL__SESSION__ERROR_POLICY", "block_payment")
         return cls(
             close_timeout_s=_env_float("MODEL__CLOSE__BARRIER_TIMEOUT_S", 10.0),
@@ -52,4 +59,7 @@ class Settings:
             freezer_zones=_env_zones("MODEL__ZONES__FREEZER"),
             error_policy=ErrorSessionPolicy(policy_raw),
             idempotency_ttl_s=_env_float("MODEL__TRIGGER__IDEMPOTENCY_TTL_S", 5.0),
+            outcomes_keep=_env_int("MODEL__TRIGGER__OUTCOMES_KEEP", 256),
+            keep_sessions=_env_int("MODEL__LEDGER__KEEP_SESSIONS", 4),
+            journal_retention_days=_env_int("MODEL__LEDGER__JOURNAL_RETENTION_DAYS", 14),
         )

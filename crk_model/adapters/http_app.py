@@ -2,18 +2,22 @@
 
 원본 라우트 대응:
 - POST /trigger                 → ModelService.handle_trigger (202 의미론)
+                                   + REFERENCE.md wire 필드 보강(success/session_id/
+                                   door_session_id/message/waiting_for) + 비디오 사전 검증
 - POST /api/judge/multi-zone    → ModelService.handle_multi_zone
-- GET  /api/health              → 상태·큐 잔량·배리어 상태
+- GET  /api/health              → REFERENCE.md 계약 필드 + 상태·큐 잔량·배리어 상태(진단용)
 
 워커: start_worker_thread()가 단일 데몬 스레드에서 drain 루프를 돈다 (I7·C2).
 """
 from __future__ import annotations
 
 import logging
+import os
 import threading
 import time
+from collections.abc import Callable, Mapping
 from datetime import datetime
-from typing import Any, Callable, Mapping
+from typing import Any
 
 from crk_model.ingest.loadcell import LoadcellSample
 from crk_model.service.model_service import ModelService
@@ -115,15 +119,52 @@ def _normalize_multi_zone(body: Any) -> dict:
     }
 
 
-def create_app(service: ModelService, *, decode: Callable | None = None):
-    from fastapi import Body, FastAPI  # lazy
+def _wire_trigger_response(resp: dict, service: ModelService) -> dict:
+    """ModelService.handle_trigger 결과 → REFERENCE.md wire 계약(75-112행) 보강.
 
+    기존 필드(status/trigger_id)는 하위호환을 위해 그대로 유지하고,
+    원본 계약 필드(success/session_id/door_session_id/message/waiting_for)를
+    덧붙인다 — 필드 매핑은 어댑터 소관, ModelService에는 로직을 두지 않는다.
+    """
+    status = resp.get("status")
+    trigger_id = resp.get("trigger_id")
+    door_session_id = service.gateway.session_id
+    return {
+        **resp,
+        "success": status in ("queued", "duplicate"),
+        "session_id": trigger_id,
+        "door_session_id": door_session_id if door_session_id is not None else None,
+        "message": "Trigger accepted" if status == "queued" else "Trigger duplicate (dropped)",
+        "waiting_for": None,
+    }
+
+
+def create_app(
+    service: ModelService,
+    *,
+    decode: Callable | None = None,
+    validate_video_paths: bool | None = None,
+):
+    from fastapi import Body, FastAPI, HTTPException  # lazy
+
+    # decode가 주입되면(테스트 등) 실 파일 경로가 아닐 수 있으므로 기본으로 검증을
+    # 끈다. 기본 실디코더(_default_decode)일 때만 기본으로 검증을 켠다.
+    # 명시적으로 validate_video_paths를 주면 그 값이 항상 우선한다.
+    if validate_video_paths is None:
+        validate_video_paths = decode is None
     decode = decode or _default_decode
     app = FastAPI(title="CRK-model-HG")
 
     @app.post("/trigger")
     def trigger(payload: dict = Body(...)) -> dict:
         video_paths = payload.get("videos", {})
+        if validate_video_paths:
+            missing = [p for p in video_paths.values() if not os.path.isfile(p)]
+            if missing:
+                raise HTTPException(
+                    status_code=400,
+                    detail={"error_code": "VIDEO_FILE_NOT_FOUND", "missing": missing},
+                )
         loadcells = [
             _loadcell_from_wire(s) for s in payload.get("loadcells", [])
         ]
@@ -142,6 +183,7 @@ def create_app(service: ModelService, *, decode: Callable | None = None):
                 "seq": payload.get("seq"),
             }
         )
+        resp = _wire_trigger_response(resp, service)
         logger.info(
             "[TRIGGER] response: %s (queue_pending=%d)", resp, service.worker.pending
         )
@@ -173,7 +215,16 @@ def create_app(service: ModelService, *, decode: Callable | None = None):
     def health() -> dict:
         barrier = service.gateway.barrier.status()
         return {
+            # REFERENCE.md(7-21행) 계약 필드. yolo_loaded/model은 항상 true/"HEALTHY"
+            # 로 고정한다 — ModelService 생성 시 startup_probe_frame으로 detector를
+            # 1회 실행해 로드 실패를 기동 실패로 만들기(fail-fast, 이관 리뷰 #1) 때문에,
+            # 이 핸들러에 도달했다는 것 자체가 이미 startup probe 통과를 의미한다.
+            "model": "HEALTHY",
             "status": "ok",  # 생성 시 startup probe를 통과했어야 함 (fail-fast)
+            "yolo_loaded": True,
+            "session_store_ready": True,
+            "timestamp": time.time(),
+            # 아래는 우리 쪽 추가 진단 필드 (원본 계약에는 없음)
             "door_state": service.gateway.state.value,
             "queue_pending": service.worker.pending,
             "barrier_satisfied": barrier.satisfied,

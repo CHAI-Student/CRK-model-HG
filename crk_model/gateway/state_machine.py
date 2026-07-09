@@ -11,9 +11,9 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import Enum
-from typing import Callable, Mapping
 
 from crk_model.core.profiles import SensorProfile
 from crk_model.core.types import FinalizedSettlement, InterimSummary

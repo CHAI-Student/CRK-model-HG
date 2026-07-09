@@ -44,7 +44,7 @@ def main() -> None:
 
     settings = Settings.from_env()
     model_path = os.environ.get(
-        "MODEL__VISION__YOLO_MODEL_PATH", "models/0204_morning.engine"
+        "MODEL__VISION__YOLO_MODEL_PATH", "models/set9_doorfas_0323_imbal.engine"
     )
     detector = UltralyticsEngineDetector(model_path)
 

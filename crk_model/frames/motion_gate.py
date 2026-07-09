@@ -11,8 +11,8 @@ I16 (래치형 조작적 정의): 직전 추론 통과 프레임에서 손이 RO
 """
 from __future__ import annotations
 
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from typing import Iterable, Sequence
 
 from crk_model.core.profiles import SensorProfile
 
@@ -92,9 +92,21 @@ class MotionGate:
         return GateDecision(False, "skip")
 
     def _diff_ratio(self, a: Frame, b: Frame) -> float:
+        # numpy fast path: 120×120 이중 파이썬 루프(트리거당 최대 수백만 회) 대신
+        # 벡터화 — Jetson CPU에서 게이트 이득(YOLO 스킵)을 갉아먹지 않도록 함.
+        # numpy 미존재/미지원 입력이면 순수 파이썬 경로로 폴백(동작 등가성 유지).
+        try:
+            import numpy as np  # lazy
+
+            if isinstance(a, np.ndarray) and isinstance(b, np.ndarray):
+                # uint8 뺄셈 오버플로 방지: int16으로 승격 후 abs
+                diff = np.abs(a.astype(np.int16) - b.astype(np.int16))
+                return float(np.mean(diff > self._pixel_delta))
+        except ImportError:
+            pass
         changed = 0
         total = 0
-        for va, vb in zip(_flat(a), _flat(b)):
+        for va, vb in zip(_flat(a), _flat(b), strict=False):
             total += 1
             if abs(va - vb) > self._pixel_delta:
                 changed += 1

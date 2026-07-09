@@ -6,7 +6,7 @@ FP16 엔진, is_hand = class 0. ultralytics는 Jetson system-site 것을 lazy im
 """
 from __future__ import annotations
 
-from typing import Sequence
+from collections.abc import Sequence
 
 from crk_model.perception.detector import Detection
 

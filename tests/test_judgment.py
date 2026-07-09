@@ -1,4 +1,6 @@
 """judgment: 라우터 순서(D3), strict(I5·I12), I6, freezer(I3), 세그먼트(D4), I8."""
+from conftest import cand
+
 from crk_model.core.profiles import FREEZER, REFRIGERATOR
 from crk_model.core.types import JudgmentResult, JudgmentStatus, ProductCount, WeightSegment
 from crk_model.judgment import (
@@ -8,8 +10,6 @@ from crk_model.judgment import (
     default_pipeline,
     enforce_full_delta_match,
 )
-
-from conftest import cand
 
 
 def ctx(delta, products, candidates, profile=REFRIGERATOR, segments=(), vision_only=False):
@@ -117,7 +117,9 @@ class TestSegmentMatching:
 
     def test_single_segment_falls_to_strict(self, cola):
         router = JudgmentRouter()
-        result = router.judge(ctx(-100.0, [cola], [cand(1)], segments=[WeightSegment(0, 1, -100.0)]))
+        result = router.judge(
+            ctx(-100.0, [cola], [cand(1)], segments=[WeightSegment(0, 1, -100.0)])
+        )
         assert result.strategy == "strict"
 
 

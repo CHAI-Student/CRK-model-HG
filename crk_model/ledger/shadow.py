@@ -1,7 +1,7 @@
 """구/신 정산기 shadow 병행 (L6 승인 조건 ②) — diff 로깅 후 전환."""
 from __future__ import annotations
 
-from typing import Mapping, Sequence
+from collections.abc import Mapping, Sequence
 
 from crk_model.core.profiles import SensorProfile
 from crk_model.core.types import FinalizedSettlement

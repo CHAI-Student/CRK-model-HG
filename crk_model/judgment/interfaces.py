@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Optional, Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 from crk_model.core.profiles import SensorProfile
 from crk_model.core.types import (
@@ -46,4 +46,4 @@ class Strategy(Protocol):
 
     def precondition(self, ctx: JudgmentContext) -> bool: ...
 
-    def solve(self, ctx: JudgmentContext) -> Optional[JudgmentResult]: ...
+    def solve(self, ctx: JudgmentContext) -> JudgmentResult | None: ...

@@ -6,7 +6,7 @@ requires-python = ">=3.10"
 dependencies = []
 
 [project.optional-dependencies]
-dev = ["pytest"]
+dev = ["pytest", "ruff", "httpx"]
 # Jetson 서버 어댑터용 — ultralytics/torch/cv2/numpy는 여기 두지 않는다
 # (JetPack system-site 사용, CPU wheel 오염 방지: scripts/setup_jetson.sh 참조)
 jetson = ["fastapi>=0.100.0", "uvicorn[standard]>=0.23.0"]
@@ -23,3 +23,16 @@ include = ["crk_model*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+exclude = ["reference", ".venv"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+
+[tool.ruff.lint.per-file-ignores]
+# FastAPI의 Body(...)/Depends(...) 기본인자 관용구는 B008(함수 호출 기본인자 금지)의
+# 표준 예외다 — 프레임워크 자체가 요구하는 패턴이라 여기서만 완화한다.
+"crk_model/adapters/http_app.py" = ["B008"]

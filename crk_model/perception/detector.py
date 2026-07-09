@@ -5,8 +5,9 @@ I4: 저신뢰 감지(conf 0.01+)도 투표 누적까지 보존 — 검출 단계
 """
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Protocol, Sequence
+from typing import Protocol
 
 
 @dataclass(frozen=True)

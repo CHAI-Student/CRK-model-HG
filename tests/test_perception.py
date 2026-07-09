@@ -1,8 +1,8 @@
 """perception: 투표 분모 단일 정의, I4, 조기 종료 한정(I15)·단일 tolerance(D7)."""
+from conftest import cand
+
 from crk_model.core.profiles import FREEZER, REFRIGERATOR
 from crk_model.perception import Detection, EarlyTerminationConfig, EarlyTerminator, VotingEnsemble
-
-from conftest import cand
 
 
 class TestVoting:

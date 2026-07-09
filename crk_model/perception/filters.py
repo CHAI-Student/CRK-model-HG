@@ -11,7 +11,7 @@
 from __future__ import annotations
 
 from collections import defaultdict, deque
-from typing import Sequence
+from collections.abc import Sequence
 
 from crk_model.perception.detector import Detection
 

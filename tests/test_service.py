@@ -133,7 +133,11 @@ class TestEndToEnd:
             svc.handle_multi_zone({"session_id": "s1", "state": "CLOSE"})
             svc.handle_multi_zone({"session_id": "s1", "state": "CLOSE"})
             svc.handle_multi_zone({"session_id": "s1", "state": "CLOSE"})
-        close_logs = [r for r in caplog.records if "[MULTI-ZONE CLOSE]" in r.message and "-> finalized" in r.message]
+        close_logs = [
+            r
+            for r in caplog.records
+            if "[MULTI-ZONE CLOSE]" in r.message and "-> finalized" in r.message
+        ]
         assert len(close_logs) == 1
 
     def test_consecutive_door_sessions_are_independent(self, cola):

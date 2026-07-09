@@ -32,7 +32,9 @@ def ret(sid, zone, ts, delta):
 
 
 def error_event(sid, zone, ts):
-    return TriggerEvent(sid, zone, ts, 0.0, (), JudgmentResult(JudgmentStatus.ERROR), status="error")
+    return TriggerEvent(
+        sid, zone, ts, 0.0, (), JudgmentResult(JudgmentStatus.ERROR), status="error"
+    )
 
 
 PROFILES = {1: REFRIGERATOR, 2: REFRIGERATOR, 9: FREEZER}

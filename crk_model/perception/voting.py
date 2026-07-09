@@ -9,7 +9,7 @@ I4: 저신뢰 투표도 결합 전까지 보존, conf 하한(0.4)은 weighted_co
 from __future__ import annotations
 
 from collections import defaultdict
-from typing import Sequence
+from collections.abc import Sequence
 
 from crk_model.core.types import VisionCandidate
 from crk_model.perception.detector import Detection

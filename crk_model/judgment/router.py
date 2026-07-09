@@ -6,8 +6,8 @@
 from __future__ import annotations
 
 from collections import Counter
+from collections.abc import Sequence
 from dataclasses import replace
-from typing import Sequence, Union
 
 from crk_model.core.types import JudgmentResult, JudgmentStatus
 from crk_model.judgment.interfaces import JudgmentContext, Stage, Strategy
@@ -26,7 +26,7 @@ from crk_model.judgment.strategies import (
     enforce_full_delta_match,
 )
 
-PipelineEntry = Union[Stage, Strategy]
+PipelineEntry = Stage | Strategy
 
 
 def default_pipeline() -> list[PipelineEntry]:
@@ -48,7 +48,9 @@ def default_pipeline() -> list[PipelineEntry]:
 
 class JudgmentRouter:
     def __init__(self, pipeline: Sequence[PipelineEntry] | None = None):
-        self.pipeline: list[PipelineEntry] = list(pipeline) if pipeline is not None else default_pipeline()
+        self.pipeline: list[PipelineEntry] = (
+            list(pipeline) if pipeline is not None else default_pipeline()
+        )
         self.telemetry: Counter[str] = Counter()  # 전략별 히트율
         self.miss_log: list[str] = []  # I8: solve=None인 전략 기록
 

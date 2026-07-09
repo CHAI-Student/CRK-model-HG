@@ -9,8 +9,8 @@ StrictWeightMatcher + SensorProfile.tolerance_grams 단일 소스를 공유한�
 """
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Sequence
 
 from crk_model.core.profiles import SensorProfile
 from crk_model.core.types import ActiveProduct, VisionCandidate

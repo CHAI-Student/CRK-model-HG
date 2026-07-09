@@ -10,7 +10,9 @@ def frame(value):
 
 
 def make_gate(keepalive=8, threshold=0.02):
-    profile = replace(REFRIGERATOR, motion_gate_keepalive=keepalive, motion_gate_threshold=threshold)
+    profile = replace(
+        REFRIGERATOR, motion_gate_keepalive=keepalive, motion_gate_threshold=threshold
+    )
     latch = HandLatch(exit_confirm_frames=2)
     return MotionGate(profile, latch), latch
 
@@ -60,7 +62,8 @@ class TestMotionGate:
         # 스킵된 프레임이 아니라 직전 "통과" 프레임과 비교
         gate, _ = make_gate(threshold=0.5)
         gate.evaluate(frame(10))
-        gate.evaluate(frame(60))  # diff 50/255 < 50% → skip? pixel_delta=15 → changed 100% ≥ 0.5 → motion
+        # diff 50/255 < 50% → skip? pixel_delta=15 → changed 100% ≥ 0.5 → motion
+        gate.evaluate(frame(60))
         # threshold 0.5, |60-10|=50 > 15 → 전 픽셀 변화 → motion
         assert gate.processed_frames == 2
 

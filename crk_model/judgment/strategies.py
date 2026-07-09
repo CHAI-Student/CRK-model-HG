@@ -9,7 +9,6 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import Optional
 
 from crk_model.core.types import (
     ActiveProduct,
@@ -49,7 +48,7 @@ class VisionOnlyStrategy:
     def precondition(self, ctx: JudgmentContext) -> bool:
         return ctx.vision_only
 
-    def solve(self, ctx: JudgmentContext) -> Optional[JudgmentResult]:
+    def solve(self, ctx: JudgmentContext) -> JudgmentResult | None:
         by_class = _product_by_class(ctx)
         ranked = sorted(ctx.vision_candidates, key=lambda c: (-c.vote_count, -c.confidence))
         for cand in ranked:
@@ -79,7 +78,7 @@ class FreezerVisionFirstStrategy:
             and ctx.delta_weight < 0
         )
 
-    def solve(self, ctx: JudgmentContext) -> Optional[JudgmentResult]:
+    def solve(self, ctx: JudgmentContext) -> JudgmentResult | None:
         target = abs(ctx.delta_weight)
         gate = ctx.profile.count_gate
         by_class = _product_by_class(ctx)
@@ -151,7 +150,7 @@ class SegmentWeightMatchingStrategy:
         removal = [s for s in ctx.segments if s.delta_grams < 0]
         return len(removal) >= 2 and bool(ctx.vision_candidates)
 
-    def solve(self, ctx: JudgmentContext) -> Optional[JudgmentResult]:
+    def solve(self, ctx: JudgmentContext) -> JudgmentResult | None:
         removal = [s for s in ctx.segments if s.delta_grams < 0]
         merged: dict[str, ProductCount] = {}
         scores: list[float] = []
@@ -190,7 +189,7 @@ class NoCandidateFallbackStrategy:
     def precondition(self, ctx: JudgmentContext) -> bool:
         return not ctx.vision_candidates and not ctx.vision_only
 
-    def solve(self, ctx: JudgmentContext) -> Optional[JudgmentResult]:
+    def solve(self, ctx: JudgmentContext) -> JudgmentResult | None:
         # weight_only: vision 필터 없이 전 재고 대상 (낮은 신뢰도)
         pool = [p for p in ctx.active_products if p.stock_qty > 0]
         # vision 후보가 없으므로 전 재고를 conf=0 후보로 취급 (무게만으로 탐색)
@@ -221,7 +220,7 @@ class MinWeightGateStrategy:
             and abs(ctx.delta_weight) < ctx.profile.min_weight_change_grams
         )
 
-    def solve(self, ctx: JudgmentContext) -> Optional[JudgmentResult]:
+    def solve(self, ctx: JudgmentContext) -> JudgmentResult | None:
         return JudgmentResult(
             JudgmentStatus.NO_DETECTION, reason="below_min_weight_change"
         )
@@ -235,7 +234,7 @@ class SameWeightCollisionGuardStrategy:
     def precondition(self, ctx: JudgmentContext) -> bool:
         return bool(ctx.vision_candidates) and ctx.delta_weight < 0
 
-    def solve(self, ctx: JudgmentContext) -> Optional[JudgmentResult]:
+    def solve(self, ctx: JudgmentContext) -> JudgmentResult | None:
         target = abs(ctx.delta_weight)
         tol = ctx.profile.tolerance_grams
         by_class = _product_by_class(ctx)
@@ -270,7 +269,7 @@ class StrictStrategy:
     def precondition(self, ctx: JudgmentContext) -> bool:
         return bool(ctx.vision_candidates)
 
-    def solve(self, ctx: JudgmentContext) -> Optional[JudgmentResult]:
+    def solve(self, ctx: JudgmentContext) -> JudgmentResult | None:
         best = self._matcher.best(
             ctx.vision_candidates, ctx.delta_weight, ctx.active_products,
             ctx.profile.tolerance_grams,
@@ -293,7 +292,7 @@ class SameProductCountStrategy:
     def precondition(self, ctx: JudgmentContext) -> bool:
         return bool(ctx.vision_candidates)
 
-    def solve(self, ctx: JudgmentContext) -> Optional[JudgmentResult]:
+    def solve(self, ctx: JudgmentContext) -> JudgmentResult | None:
         target = abs(ctx.delta_weight)
         tol = ctx.profile.tolerance_grams
         by_class = _product_by_class(ctx)
@@ -331,7 +330,7 @@ class RelaxedStrategy:
     def precondition(self, ctx: JudgmentContext) -> bool:
         return bool(ctx.vision_candidates)
 
-    def solve(self, ctx: JudgmentContext) -> Optional[JudgmentResult]:
+    def solve(self, ctx: JudgmentContext) -> JudgmentResult | None:
         relaxed_tol = ctx.profile.tolerance_grams * self._relax
         best = self._matcher.best(
             ctx.vision_candidates, ctx.delta_weight, ctx.active_products, relaxed_tol
@@ -367,7 +366,7 @@ class FinalFallbackStrategy:
     def precondition(self, ctx: JudgmentContext) -> bool:
         return True
 
-    def solve(self, ctx: JudgmentContext) -> Optional[JudgmentResult]:
+    def solve(self, ctx: JudgmentContext) -> JudgmentResult | None:
         return JudgmentResult(
             JudgmentStatus.NO_DETECTION, reason="forced_final_no_match"
         )
