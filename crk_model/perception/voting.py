@@ -18,17 +18,18 @@ video/voting_ensemble.py 327-458행 대조):
   원본이 conf 노이즈를 거르는 지점은 프레임을 투표에 올리기 *전*의
   카메라별 임계값(_threshold_for_camera, 기본 top/side 각 0.70,
   실배포 jetson-stride2.env 0.70 · .env.example 0.50)이다.
-  우리 아키텍처는 그 프레임 게이트를 filters.py에서 의도적으로 생략했다
-  (I4: 저신뢰 검출도 투표 누적까지 보존). conf_floor는 그 대신 두는
-  결합 후 안전판으로 원본에 없는 파라미터지만, 프레임 단계에서 conf를
-  거르지 않기로 한 설계를 지키려면 유지해야 한다 — 완전 제거는 노이즈
-  전멸 방지 장치가 사라져 회귀 위험이 크다. top_only/side_only 가중치
-  정렬로 실제 회귀(단일 카메라 고conf 검출 탈락)는 해소된다.
+  2차 실기(issue #6 재현, vote_summary)에서 이 격차가 실측으로 확정됐다:
+  conf 0.01 노이즈 투표까지 평균에 섞여 클래스별 weighted가 0.10~0.16에
+  머물고, 94~96표를 받은 실제 상품까지 conf_floor(0.4)에서 전멸했다.
+  → 원본의 노이즈 방어 지점(카메라별 진입 임계)을 entry_conf_top/side로
+  이식한다. 진입 컷을 쓰면 평균이 진입자 기준으로 계산되어(원본 동형)
+  결합 후 conf_floor는 불필요해진다 — 운영 기본(Settings)은 진입 컷
+  0.70(원본 코드 기본) + conf_floor 0.0(원본 동형)이며, 전부
+  MODEL__VISION__* env로 조정 가능하다 (.env.example 참조).
 
 weighted_conf:
   양쪽 검출 — top*top_weight + side*side_weight + min(top,side)*common_class_bonus
   단일 검출 — conf * (top_only_weight | side_only_weight)
-I4: 저신뢰 투표도 결합 전까지 보존, conf 하한(conf_floor)은 weighted_conf에만.
 """
 from __future__ import annotations
 
@@ -51,6 +52,11 @@ class VotingEnsemble:
         common_class_bonus: float = 0.2,
         top_only_weight: float = 0.60,
         side_only_weight: float = 0.40,
+        entry_conf_top: float = 0.0,
+        entry_conf_side: float = 0.0,
+        # 카메라별 투표 진입 임계 (원본 _threshold_for_camera 대응,
+        # MODEL__VISION__TOP/SIDE_CONFIDENCE_THRESHOLD). 생성자 기본값 0.0은
+        # 라이브러리 하위호환용 — 운영값은 Settings가 주입한다.
     ):
         self._conf_floor = conf_floor
         self._min_ratio = min_vote_ratio
@@ -60,17 +66,23 @@ class VotingEnsemble:
         self._common_class_bonus = common_class_bonus
         self._top_only_weight = top_only_weight
         self._side_only_weight = side_only_weight
+        self._entry_conf = {"top": entry_conf_top, "side": entry_conf_side}
         self._votes: dict[str, dict[int, list[float]]] = {
             "top": defaultdict(list),
             "side": defaultdict(list),
         }
         self.gate_passed_frames = 0  # 분모 (단일 정의)
+        self.entry_dropped = {"top": 0, "side": 0}  # 진단: 진입 컷 탈락 수
 
     def add_frame(self, camera: str, detections: Sequence[Detection]) -> None:
         """게이트 통과(=추론된) 프레임에서만 호출."""
         self.gate_passed_frames += 1
+        entry = self._entry_conf.get(camera, 0.0)
         for d in detections:
             if d.is_hand:
+                continue
+            if d.confidence < entry:
+                self.entry_dropped[camera] += 1  # 진단용 — 어디서 죽었는지 추적
                 continue
             self._votes[camera][d.class_id].append(d.confidence)
 

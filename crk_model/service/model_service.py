@@ -32,6 +32,7 @@ from crk_model.ledger.events import EventLog
 from crk_model.ledger.journal import EventJournal
 from crk_model.ledger.settler import CloseSettler
 from crk_model.perception.detector import Detector
+from crk_model.perception.filters import DetectionFilterChain
 from crk_model.service.pipeline import TriggerPipeline, TriggerRequest
 from crk_model.service.snapshot import ActiveProductStore
 from crk_model.service.worker import SerialTriggerWorker
@@ -109,7 +110,19 @@ class ModelService:
             default_profile=self._default_profile,
         )
         self.pipeline = TriggerPipeline(
-            detector, self._profiles, self.snapshots, default_profile=self._default_profile
+            detector, self._profiles, self.snapshots, default_profile=self._default_profile,
+            # 비전 튜닝 (MODEL__VISION__*, issue #6 2차): 진입 컷·투표 임계는
+            # 현장 카메라/조명에 따라 env로 조정한다 (.env.example 참조).
+            filters=DetectionFilterChain(
+                side_roi_max_center_x=self.settings.side_roi_max_center_x
+            ),
+            voting_params={
+                "entry_conf_top": self.settings.top_confidence_threshold,
+                "entry_conf_side": self.settings.side_confidence_threshold,
+                "min_vote_ratio": self.settings.min_vote_ratio,
+                "min_vote_count": self.settings.min_vote_count,
+                "conf_floor": self.settings.vote_conf_floor,
+            },
         )
         # 동시성: FastAPI sync 엔드포인트(threadpool)와 워커 스레드가 게이트웨이·
         # 이벤트로그·스냅샷을 동시에 건드릴 수 있어 단일 RLock으로 코스 그레인

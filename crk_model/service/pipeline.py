@@ -82,6 +82,9 @@ class TriggerPipeline:
         # 동작(REFRIGERATOR)과 동일 — cabinet_type=freezer 기기에서는
         # ModelService가 FREEZER를 주입해 존 미지정 시에도 냉동 프로파일이
         # 기본이 되게 한다 (MODEL__MACHINE__CABINET_TYPE 이식).
+        voting_params: Mapping | None = None,
+        # VotingEnsemble 생성 인자 (MODEL__VISION__* env → Settings 경유 주입).
+        # None이면 라이브러리 기본값 — 기존 테스트/직접 생성 하위호환.
     ):
         self._detector = detector
         self._profiles = dict(profiles)
@@ -91,6 +94,7 @@ class TriggerPipeline:
         self._et_enabled = early_termination_enabled
         self._analyzer_factory = analyzer_factory or LoadcellAnalyzer
         self._default_profile = default_profile
+        self._voting_params = dict(voting_params) if voting_params else {}
 
     def process(self, session_id: str, req: TriggerRequest) -> TriggerOutcome:
         try:
@@ -171,10 +175,11 @@ class TriggerPipeline:
         delta: float,
         trace: TriggerTrace,
     ) -> tuple[VisionCandidate, ...]:
-        voting = VotingEnsemble()
+        voting = VotingEnsemble(**self._voting_params)
         terminator = EarlyTerminator(profile, enabled=self._et_enabled)
         stopped = False
         filtered_out: dict[str, int] = {}  # 진단(work item 3): 카메라별 필터 제거 개수
+        self._filters.reset_drop_stats()  # 트리거 단위 단계별 제거 카운터 (issue #6 2차)
         for camera in CAMERAS:
             frames = req.frames.get(camera)
             if frames is None:
@@ -220,6 +225,11 @@ class TriggerPipeline:
         trace.vote_summary = {
             "classes": voting.debug_summary(),
             "filtered_out_by_camera": filtered_out,
+            # issue #6 2차 진단 확장: 필터 단계별(side_roi/hand_path) 제거 수와
+            # 투표 진입 컷(entry_conf) 탈락 수 — "후보 0"이 어디서 죽었는지
+            # (모델 미검출/필터/진입 컷/결합 임계) 세션 아카이브에서 즉시 구분.
+            "filter_drops_by_stage": self._filters.drop_stats,
+            "entry_dropped_by_camera": dict(voting.entry_dropped),
         }
         return voting.combine()
 

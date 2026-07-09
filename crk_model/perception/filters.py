@@ -43,6 +43,17 @@ class DetectionFilterChain:
         self._hand_history: dict[str, deque] = defaultdict(
             lambda: deque(maxlen=hand_history_frames)
         )
+        # 진단 (issue #6 2차: side 검출이 195프레임 중 194개 제거 — 어느 단계가
+        # 지웠는지 구분 불가했음): 카메라×단계별 제거 카운터. 트리거 시작 시
+        # pipeline이 reset_drop_stats()로 초기화하고 종료 시 vote_summary에 싣는다.
+        self.drop_stats: dict[str, dict[str, int]] = {}
+        self.reset_drop_stats()
+
+    def reset_drop_stats(self) -> None:
+        self.drop_stats = {
+            "side_roi": {"top": 0, "side": 0},
+            "hand_path": {"top": 0, "side": 0},
+        }
 
     def apply(self, camera: str, detections: Sequence[Detection]) -> list[Detection]:
         hands = [d for d in detections if d.is_hand]
@@ -58,11 +69,13 @@ class DetectionFilterChain:
             if d.bbox != _ZERO_BBOX:
                 # Side ROI: 존 바깥(오른쪽) 검출 제거
                 if camera == "side" and _center_x(d.bbox) >= self._side_max_cx:
+                    self.drop_stats["side_roi"][camera] += 1
                     continue
                 # Hand Path: 손 궤적 근방과 교차하지 않으면 제거
                 if history and not any(
                     _intersects(d.bbox, _expand(h, self._hand_margin)) for h in history
                 ):
+                    self.drop_stats["hand_path"][camera] += 1
                     continue
             out.append(d)
         return out

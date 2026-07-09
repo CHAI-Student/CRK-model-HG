@@ -408,3 +408,39 @@
 
 - 테스트: `python -m pytest -q` → 176 passed. 스모크: OPEN→trigger→CLOSE(complete
   1회)→CLOSE×3(전부 "No active door session", door_state=idle)→새 OPEN 정상.
+
+---
+
+## 2026-07-09 vote_summary로 확정: conf_floor 평균 희석 전멸 → 원본식 투표 진입 컷 이식 + 비전 env 튜닝 개방 (issue #6 3차)
+
+- 증상: cabinet_type=freezer·매핑 mapped=11/11 정상 적용 후에도 여전히
+  `vision_candidates: []` → no_candidate_fallback (freezer 억제 덕에 오과금은
+  없어졌으나 0원 no_detection = 매출 누락). 이번엔 vote_summary가 남아 원인
+  확정: 실제 상품이 94~96표(360프레임 중 26%)를 받고도 **전부
+  `rejected_by: conf_floor`** — 저신뢰(0.01~) 투표까지 평균에 섞여 클래스별
+  weighted_conf가 0.10~0.16에 머묾. 모델은 정상적으로 보고 있었음.
+  부수 단서: side 카메라 검출 195프레임 중 194개가 필터 제거(단계 미상).
+
+- 원인: 원본의 노이즈 방어 지점은 **투표 진입 전 카메라별 conf 임계**
+  (top/side_confidence_threshold, 코드 기본 0.70·운영 .env.example 0.50)이고
+  결합 후 하한은 존재하지 않는다. 우리는 진입 컷 없이 conf 0.01부터 전부
+  투표시켜 평균을 희석시킨 뒤 결합 후 하한(0.4)을 걸었다 — 다수의 중간 conf
+  검출이 구조적으로 전멸하는 조합. 또한 이 임계들이 전부 하드코딩이라 현장
+  튜닝이 불가능했다.
+
+- 해결방안: ① VotingEnsemble에 카메라별 진입 컷(entry_conf_top/side) 이식 +
+  진입 탈락 카운터. ② MODEL__VISION__TOP/SIDE_CONFIDENCE_THRESHOLD(기본 0.70),
+  MIN_VOTE_RATIO(0.05)/MIN_VOTE_COUNT(3), CONF_FLOOR(기본 0.0 — 원본 동형),
+  SIDE_ROI_MAX_CENTER_X(240)를 Settings→pipeline으로 배선해 env 튜닝 개방.
+  ③ .env.example 신설 — 전 env 문서화 + vote_summary 읽는 법·냉동 기기 권장
+  시작값(진입 컷 0.50, 안 잡히면 0.35) 가이드. ④ side 필터 미스터리 규명용
+  filter_drops_by_stage(side_roi/hand_path 단계별)·entry_dropped_by_camera를
+  vote_summary에 추가 — 다음 재현에서 어느 단계가 지웠는지 즉시 판별.
+
+- 관련 파일: `crk_model/perception/voting.py`, `crk_model/perception/filters.py`,
+  `crk_model/service/pipeline.py`, `crk_model/service/model_service.py`,
+  `crk_model/core/config.py`, `.env.example`(신규), `README.md`,
+  `tests/test_perception.py`, `tests/test_lifecycle.py`.
+
+- 테스트: `python -m pytest -q` → 182 passed. 실기 재현 대기 — .env에
+  진입 컷 0.50부터 시작, vote_summary의 entry_dropped/rejected_by로 조정.

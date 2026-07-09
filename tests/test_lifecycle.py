@@ -452,3 +452,57 @@ class TestCabinetTypeDefaultProfile:
             assert raised
         finally:
             del os.environ["MODEL__MACHINE__CABINET_TYPE"]
+
+
+# ---------------------------------------------------------------------------
+# 6) 비전 투표 튜닝 env 배선 (issue #6 2차 — MODEL__VISION__*)
+# ---------------------------------------------------------------------------
+class TestVisionTuningWiring:
+    """Settings의 비전 튜닝 값이 pipeline의 VotingEnsemble/필터까지 흐르는지."""
+
+    def test_from_env_reads_vision_tuning(self, monkeypatch):
+        monkeypatch.setenv("MODEL__VISION__TOP_CONFIDENCE_THRESHOLD", "0.35")
+        monkeypatch.setenv("MODEL__VISION__SIDE_CONFIDENCE_THRESHOLD", "0.30")
+        monkeypatch.setenv("MODEL__VISION__MIN_VOTE_RATIO", "0.02")
+        monkeypatch.setenv("MODEL__VISION__MIN_VOTE_COUNT", "1")
+        monkeypatch.setenv("MODEL__VISION__CONF_FLOOR", "0.1")
+        monkeypatch.setenv("MODEL__VISION__SIDE_ROI_MAX_CENTER_X", "480")
+        s = Settings.from_env()
+        assert s.top_confidence_threshold == 0.35
+        assert s.side_confidence_threshold == 0.30
+        assert s.min_vote_ratio == 0.02
+        assert s.min_vote_count == 1
+        assert s.vote_conf_floor == 0.1
+        assert s.side_roi_max_center_x == 480
+
+    def test_settings_flow_into_voting_ensemble(self, cola):
+        # 진입 컷 0.9로 올리면 FakeDetector(conf 0.8) 검출이 투표에 못 들어가
+        # vision 후보 0 → (냉장 기본) weight_only로 빠진다 — env가 실제로
+        # 파이프라인 동작을 바꾸는지 E2E로 검증.
+        settings = Settings(top_confidence_threshold=0.9, side_confidence_threshold=0.9)
+        svc = make_service(settings=settings)
+        svc.handle_multi_zone(open_payload(cola))
+        svc.handle_trigger(trigger_payload())
+        svc.process_pending()
+        ev = svc.worker.outcomes[-1].event
+        assert ev.vision_candidates == ()  # 진입 컷이 전부 차단
+        summary = svc.worker.outcomes[-1].trace.vote_summary
+        assert summary["entry_dropped_by_camera"]["top"] > 0  # 진단 카운터 동작
+
+    def test_default_settings_keep_high_conf_detections_alive(self, cola):
+        # 기본값(진입 컷 0.70, conf_floor 0.0)에서 conf 0.8 검출은 후보 생존.
+        svc = make_service()
+        svc.handle_multi_zone(open_payload(cola))
+        svc.handle_trigger(trigger_payload())
+        svc.process_pending()
+        ev = svc.worker.outcomes[-1].event
+        assert len(ev.vision_candidates) >= 1
+
+    def test_vote_summary_has_filter_stage_breakdown(self, cola):
+        svc = make_service()
+        svc.handle_multi_zone(open_payload(cola))
+        svc.handle_trigger(trigger_payload())
+        svc.process_pending()
+        summary = svc.worker.outcomes[-1].trace.vote_summary
+        assert "filter_drops_by_stage" in summary
+        assert set(summary["filter_drops_by_stage"]) == {"side_roi", "hand_path"}

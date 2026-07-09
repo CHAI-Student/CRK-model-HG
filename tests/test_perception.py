@@ -18,13 +18,45 @@ class TestVoting:
         assert c.vote_ratio == 2 / 10  # 분모 = 게이트 통과 프레임 수
 
     def test_low_conf_votes_preserved_until_combine(self):
-        # I4: conf 0.05 감지도 투표 누적 — 결합 후 weighted_conf로만 필터
+        # 진입 컷 0(라이브러리 기본)이면 conf 0.05 감지도 투표 누적 —
+        # 결합 후 weighted_conf로만 필터 (conf_floor 안전판 경로)
         v = VotingEnsemble(conf_floor=0.4)
         for _ in range(5):
             v.add_frame("top", [Detection(1, 0.05)])
             v.add_frame("side", [Detection(1, 0.05)])
         # weighted = 0.05*0.6 + 0.05*0.4 + 0.05*0.2 = 0.06 < 0.4 → 탈락
         assert v.combine() == ()
+
+    def test_entry_conf_cut_blocks_noise_votes(self):
+        # issue #6 2차: 원본의 노이즈 방어 지점(카메라별 진입 임계) — 저신뢰
+        # 노이즈가 투표에 진입해 평균 conf를 희석하는 것을 원천 차단한다.
+        v = VotingEnsemble(
+            entry_conf_top=0.5, entry_conf_side=0.5, conf_floor=0.0, min_vote_count=1
+        )
+        for _ in range(10):
+            v.add_frame("top", [Detection(1, 0.7), Detection(1, 0.05)])  # 노이즈 혼입
+        (c,) = v.combine()
+        # 진입자(0.7)만 평균에 반영 → weighted = 0.7 * top_only(0.6) = 0.42
+        assert c.confidence == pytest.approx(0.7 * 0.6)
+        assert c.vote_count == 10  # 노이즈 투표는 카운트에도 미포함
+        assert v.entry_dropped == {"top": 10, "side": 0}  # 진단 카운터
+
+    def test_entry_cut_reproduces_original_semantics_end_to_end(self):
+        # 원본 재현 프리셋(진입 컷 0.5 + conf_floor 0.0): 실기 사고 패턴
+        # (다수 중간 conf 투표)이 후보로 생존하는지 — 구버전(진입 0 + floor 0.4)
+        # 에서는 평균 희석으로 전멸하던 케이스.
+        old = VotingEnsemble(conf_floor=0.4)  # 구 운영 의미론
+        new = VotingEnsemble(entry_conf_top=0.5, conf_floor=0.0)  # 원본 재현
+        for _ in range(90):
+            # 같은 클래스에 실검출(0.55)과 저신뢰 노이즈(0.05)가 섞임 — 실기
+            # vote_summary의 패턴 (94표, weighted 0.157 = 평균 희석)
+            frame = [Detection(3, 0.55), Detection(3, 0.05)]
+            old.add_frame("top", frame)
+            new.add_frame("top", frame)
+        assert old.combine() == ()  # 구버전: avg(0.55,0.05)=0.30 ×0.6 < 0.4 → 전멸
+        survivors = new.combine()
+        assert [c.class_id for c in survivors] == [3]  # 원본 의미론: 상품 생존
+        assert survivors[0].confidence == pytest.approx(0.55 * 0.6)  # 진입자만 평균
 
     def test_weighted_conf_formula(self):
         # 원본 voting_ensemble.py combine() 427-458행: 양쪽 검출 시

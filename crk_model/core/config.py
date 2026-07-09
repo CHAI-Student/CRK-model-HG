@@ -74,6 +74,22 @@ class Settings:
     # 세션 YAML 아카이브 (issue #6: 오판정 사후 분석용) — 빈 문자열이면 비활성.
     session_archive_dir: str = "data/sessions"
     session_archive_retention_days: int = 14
+    # ---- 비전 투표 튜닝 (issue #6 2차: 실기 vote_summary로 conf_floor 전멸 확정) ----
+    # 카메라별 투표 진입 임계 — 원본 top/side_confidence_threshold 대응 (코드 기본
+    # 0.70, 원본 운영 .env.example은 0.50). 이 값 미만 검출은 투표에 진입하지 못해
+    # 노이즈가 평균 conf를 희석하지 않는다 (원본의 노이즈 방어 지점).
+    top_confidence_threshold: float = 0.70
+    side_confidence_threshold: float = 0.70
+    # 후보 채택 임계 — 원본 min_vote_ratio/min_vote_count 대응.
+    min_vote_ratio: float = 0.05
+    min_vote_count: int = 3
+    # 결합 후 weighted_conf 하한 — 원본에는 없는 파라미터 (원본 동형 = 0.0).
+    # 진입 컷이 노이즈를 이미 거르므로 기본 0.0. 진입 컷을 0으로 낮춰 저신뢰
+    # 투표를 보존하고 싶을 때만 안전판으로 올려 쓴다.
+    vote_conf_floor: float = 0.0
+    # Side ROI: 존 바깥(오른쪽) 검출 제거 경계 — 실기에서 side 검출 194/195가
+    # 필터 제거된 사례가 있어 카메라 장착에 맞게 조정 가능해야 한다.
+    side_roi_max_center_x: float = 240.0
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -93,4 +109,14 @@ class Settings:
             session_archive_retention_days=_env_int(
                 "MODEL__SESSION__ARCHIVE_RETENTION_DAYS", 14
             ),
+            top_confidence_threshold=_env_float(
+                "MODEL__VISION__TOP_CONFIDENCE_THRESHOLD", 0.70
+            ),
+            side_confidence_threshold=_env_float(
+                "MODEL__VISION__SIDE_CONFIDENCE_THRESHOLD", 0.70
+            ),
+            min_vote_ratio=_env_float("MODEL__VISION__MIN_VOTE_RATIO", 0.05),
+            min_vote_count=_env_int("MODEL__VISION__MIN_VOTE_COUNT", 3),
+            vote_conf_floor=_env_float("MODEL__VISION__CONF_FLOOR", 0.0),
+            side_roi_max_center_x=_env_float("MODEL__VISION__SIDE_ROI_MAX_CENTER_X", 240.0),
         )

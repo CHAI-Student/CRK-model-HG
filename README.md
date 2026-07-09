@@ -397,7 +397,14 @@ flowchart TD
 | `MODEL__SESSION__ARCHIVE_RETENTION_DAYS` | 14 | 세션 아카이브 보존 기간(일) |
 | `MODEL__LEDGER__JOURNAL_PATH` | `logs/events.jsonl` | 이벤트 저널 경로, 일자 로테이션 |
 | `MODEL__LEDGER__JOURNAL_RETENTION_DAYS` | 14 | 이벤트 저널 보존 기간(일) |
+| `MODEL__VISION__TOP_CONFIDENCE_THRESHOLD` | 0.70 | top 카메라 투표 진입 conf 임계 (원본 동명 설정). 후보가 안 잡히면 0.50→0.35 순으로 낮춰 조정 — `.env.example`의 vote_summary 튜닝 가이드 참조 |
+| `MODEL__VISION__SIDE_CONFIDENCE_THRESHOLD` | 0.70 | side 카메라 투표 진입 conf 임계 |
+| `MODEL__VISION__MIN_VOTE_RATIO` | 0.05 | 후보 채택 최소 투표율 (COUNT와 둘 중 하나만 충족하면 유지) |
+| `MODEL__VISION__MIN_VOTE_COUNT` | 3 | 후보 채택 최소 절대 투표 수 |
+| `MODEL__VISION__CONF_FLOOR` | 0.0 | 결합 후 weighted_conf 하한 (원본에 없는 안전판 — 진입 컷을 0으로 낮출 때만 사용) |
+| `MODEL__VISION__SIDE_ROI_MAX_CENTER_X` | 240 | side 카메라 ROI 경계 (center_x ≥ 값이면 존 바깥으로 제거) |
 
+전체 env 목록과 튜닝 가이드는 `.env.example` 참조 (`cp .env.example .env` 후 수정).
 게이트·tolerance·구간화 임계는 env가 아니라 `SensorProfile`(코드) 소속 —
 존 타입별 물리 특성이므로 배포 설정으로 흔들리지 않게 한다 (C3).
 
