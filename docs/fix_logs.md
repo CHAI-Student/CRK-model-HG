@@ -305,3 +305,71 @@
 
 - 테스트: `python -m pytest -q` → 172 passed (기존 165 + 신규 7). `ruff check .`
   → All checks passed.
+
+---
+
+## 2026-07-09 투표 앙상블이 원본보다 과보수적으로 이식되어 vision 후보 전멸 (이슈 #6 유력 원인)
+
+- 증상: 실기에서 yolo_calls 300+에도 `vision_candidates: []`가 계속 발생 —
+  전 트리거가 weight_only 판정으로 강등되어 손실 방지형(fail-closed) 로직이
+  발동, 실제로는 정상 촬영된 케이스까지 저신뢰 처리·오과금 위험.
+
+- 원인: `crk_model/perception/voting.py`의 `combine()`이 단일 카메라 검출도
+  양쪽 카메라 검출과 동일한 공용 가중치(top 0.5 / side 0.5)를 썼다. 한쪽
+  카메라만 검출되면 다른 쪽이 0이 되어 conf가 사실상 반토막(top conf=0.7
+  단일 검출 → weighted=0.35)나, 결합 후 conf_floor(0.4) 문턱을 넘지 못하고
+  전멸했다. 원본
+  `reference/CRK-model/services/model/model_service/video/voting_ensemble.py`
+  (327-458행)을 정독한 결과, 원본은 처음부터 단일 카메라 전용
+  `top_only_weight`(0.60)/`side_only_weight`(0.40) 가중치를 별도로 두고
+  있었다(`config.py` 244-264행, 기본 top_weight=0.60/side_weight=0.40도
+  우리 구버전의 0.5/0.5와 다름). 우리 이식본은 이 분기를 통째로 누락했다.
+
+  덧붙여 "conf 0.01→0.4 2단계"(`REDESIGN_RATIONALE_QA.md` Q4, I4)라는
+  전제도 원본 코드로 재확인한 결과 부정확했다. 원본에서 conf=0.01은
+  YOLO 엔진 내부 NMS 파라미터(`yolo_wrapper.py`
+  `yolo_internal_conf_threshold`)일 뿐이고, 실제 conf 컷은
+  `video_processor.py`의 프레임 루프에서 **투표 등록 이전**에
+  `det.conf < _threshold_for_camera(camera_type)`(기본 top/side 각 0.70,
+  실배포 `jetson-stride2.env` 0.70 · `.env.example` 0.50)로 걸린다.
+  결합(combine) 이후 필터는 `vote_ratio >= min_vote_ratio OR
+  vote_count >= min_vote_count`뿐이며(`video_processor.py` 3079-3087행),
+  원본 `combine()`에는 결합 후 conf 하한이 아예 없다. "0.4"라는 수치는
+  원본 어디에도 없다(`multi_kind_min_confidence` 기본값은 0.18로 별개
+  용도, `HAND_CONFIDENCE_THRESHOLD=0.40`은 손 검출 전용이라 이것과 혼동된
+  것으로 보임).
+
+- 해결방안:
+  1. `crk_model/perception/voting.py`: `VotingEnsemble.__init__`에
+     `top_weight`(기본 0.60)·`side_weight`(기본 0.40, 구버전 0.5/0.5에서
+     변경)·`top_only_weight`(0.60)·`side_only_weight`(0.40)·
+     `common_class_bonus`(0.2, 기존 유지) 파라미터를 추가.
+     `_weighted_confidence()` 신설: 양쪽 카메라 검출 시
+     `top*top_weight + side*side_weight + min(top,side)*common_class_bonus`
+     (원본 dynamic_bonus 산식과 동형), 단일 카메라 검출 시
+     `conf * top_only_weight` 또는 `conf * side_only_weight` 전용
+     가중치를 사용하도록 `combine()`·`debug_summary()`를 정렬.
+     상한 clamp(`min(weighted, 1.0)`)도 원본과 동일하게 추가.
+  2. conf_floor(결합 후 하한)는 원본에 대응 개념이 없지만 **의도적으로
+     유지**한다 — 우리 아키텍처는 `filters.py`에서 프레임 단계 conf 컷을
+     하지 않기로 이미 설계돼 있고(I4 주석, "conf 필터는 여기서 하지
+     않는다"), 그 설계를 지키는 한 결합 후 안전판을 완전히 없애면 노이즈
+     검출이 그대로 후보가 되는 회귀가 생긴다. top_only/side_only 가중치
+     정렬만으로 이슈 #6이 지목한 회귀(고신뢰 단일 카메라 검출의 conf
+     반토막)는 해소되므로, conf_floor 값(0.4)·필터 위치는 손대지 않았다.
+  3. `crk_model/service/pipeline.py`: 변경 없음 (`VotingEnsemble()`이
+     새 파라미터 기본값만 사용하므로 diff 불필요, 확인만 수행).
+  4. vote_ratio 분모("게이트 통과 프레임 수")는 원본과 다르게 유지되는
+     `OPTIMIZED_ARCHITECTURE.md` L1 승인 조건의 의도된 재설계이며, 이번
+     조사·수정 대상에서 제외했다(원본으로 되돌리지 않음).
+
+- 관련 파일: `crk_model/perception/voting.py`(가중치 산식 정렬),
+  `tests/test_perception.py`(`test_weighted_conf_formula` 기대값을 원본
+  가중치 0.60/0.40로 갱신 + 신규 4건:
+  `test_single_camera_high_conf_survives_as_candidate`(이슈 #6 회귀
+  재현·해소 확인), `test_side_only_uses_side_only_weight`,
+  `test_common_class_bonus_both_cameras_detected`,
+  `test_top_only_weight_exceeds_side_only_weight_for_equal_confidence`).
+
+- 테스트: `python -m pytest -q` → 176 passed (기존 172 + 신규 4). `ruff check .`
+  → All checks passed.
