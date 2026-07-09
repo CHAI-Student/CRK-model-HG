@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from datetime import datetime
@@ -16,6 +17,8 @@ from typing import Any, Callable, Mapping
 
 from crk_model.ingest.loadcell import LoadcellSample
 from crk_model.service.model_service import ModelService
+
+logger = logging.getLogger(__name__)
 
 
 def _default_decode(video_paths: Mapping[str, str]):
@@ -125,7 +128,11 @@ def create_app(service: ModelService, *, decode: Callable | None = None):
             _loadcell_from_wire(s) for s in payload.get("loadcells", [])
         ]
         ts = payload.get("ts") or (loadcells[0].ts if loadcells else time.time())
-        return service.handle_trigger(
+        logger.info(
+            "[TRIGGER] received: zone=%s videos=%s loadcells=%d",
+            payload.get("zone"), dict(video_paths), len(loadcells),
+        )
+        resp = service.handle_trigger(
             {
                 "zone": payload["zone"],
                 "video_paths": video_paths,   # I7 멱등성 키
@@ -135,11 +142,23 @@ def create_app(service: ModelService, *, decode: Callable | None = None):
                 "seq": payload.get("seq"),
             }
         )
+        logger.info(
+            "[TRIGGER] response: %s (queue_pending=%d)", resp, service.worker.pending
+        )
+        return resp
 
     @app.post("/api/judge/multi-zone")
     def multi_zone(payload: Any = Body(...)) -> dict:
         # Node는 객체 {session_id, products, ...} 또는 상품 배열을 보낸다.
-        return service.handle_multi_zone(_normalize_multi_zone(payload))
+        normalized = _normalize_multi_zone(payload)
+        resp = service.handle_multi_zone(normalized)
+        logger.info(
+            "[MULTI-ZONE] state=%s products=%d -> status=%s%s",
+            normalized["state"], len(normalized["active_products"]),
+            resp.get("status"),
+            f" detail={resp['detail']}" if resp.get("detail") else "",
+        )
+        return resp
 
     @app.get("/api/health")
     def health() -> dict:
@@ -160,7 +179,14 @@ def start_worker_thread(service: ModelService, *, interval_s: float = 0.05) -> t
 
     def _loop() -> None:
         while True:
-            if service.process_pending() == 0:
+            try:
+                if service.process_pending() == 0:
+                    time.sleep(interval_s)
+            except Exception:
+                # 워커가 죽으면 큐가 영구 적체(배리어 미충족) — 죽는 대신 기록하고 계속.
+                # 파이프라인 예외는 I1이 이벤트로 흡수하므로 여기 도달은 저널/게이트웨이 등
+                # 인프라 예외뿐이다.
+                logger.exception("[WORKER] drain loop error — continuing")
                 time.sleep(interval_s)
 
     thread = threading.Thread(target=_loop, name="trigger-worker", daemon=True)

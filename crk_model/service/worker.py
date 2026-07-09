@@ -9,11 +9,15 @@
 """
 from __future__ import annotations
 
+import logging
+import time
 from collections import deque
 
 from crk_model.gateway.state_machine import MultiZoneGateway
 from crk_model.ledger.journal import EventJournal
 from crk_model.service.pipeline import TriggerOutcome, TriggerPipeline, TriggerRequest
+
+logger = logging.getLogger(__name__)
 
 
 class SerialTriggerWorker:
@@ -38,13 +42,36 @@ class SerialTriggerWorker:
         n = 0
         while self._queue:
             session_id, req = self._queue.popleft()
+            logger.info(
+                "[TRIGGER] processing: session=%s zone=%d loadcells=%d cameras=%s",
+                session_id, req.zone, len(req.loadcells), list(req.frames),
+            )
+            started = time.monotonic()
             outcome = self._pipeline.process(session_id, req)
-            self._gateway.record_trigger(outcome.event)
+            accepted = self._gateway.record_trigger(outcome.event)
             if self._journal is not None:
                 self._journal.append(outcome.event)
             self._gateway.notify_processed(req.zone)  # 처리 완료 후에만
             self.outcomes.append(outcome)
             n += 1
+
+            ev, tr = outcome.event, outcome.trace
+            log = logger.error if ev.status != "ok" else logger.info
+            log(
+                "[TRIGGER] done in %.2fs: session=%s zone=%d status=%s judgment=%s "
+                "delta=%.1fg products=%s yolo_calls=%d frames=%s early_term=%s "
+                "reasons=%s accepted=%s",
+                time.monotonic() - started, session_id, ev.zone, ev.status,
+                ev.judgment.status.value, ev.delta_weight,
+                [(pc.product.name, pc.count) for pc in ev.judgment.products],
+                tr.yolo_calls, dict(tr.processed_frames), tr.early_terminated,
+                tr.reason_codes, accepted,
+            )
+            if not accepted:
+                # I11: 확정 후 유입 — 정산에 반영되지 않음 (유실 아님, rejected 기록)
+                logger.warning(
+                    "[TRIGGER] event rejected (session %s already finalized)", session_id
+                )
         return n
 
     @property

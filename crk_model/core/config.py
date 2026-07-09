@@ -29,6 +29,10 @@ def _env_zones(key: str) -> tuple[int, ...]:
 class Settings:
     # I17: 인과 배리어 상한 타임아웃 (정상 경로 아님 — debounce 3s보다 길게)
     close_timeout_s: float = 10.0
+    # queue_pending(워커 처리 중)은 유실이 아니라 진행 중 — Jetson 디코드+TRT
+    # 추론이 close_timeout보다 길 수 있어 별도의 넉넉한 stall 상한을 적용한다.
+    # 이 상한 초과 = 워커 사망/행 (I17 fail-closed 유지)
+    worker_stall_timeout_s: float = 120.0
     # D8: 기본 OFF
     batch_size: int = 1
     # freezer 프로파일을 적용할 존 목록 (예: "9,10")
@@ -43,6 +47,7 @@ class Settings:
         policy_raw = os.environ.get("MODEL__SESSION__ERROR_POLICY", "block_payment")
         return cls(
             close_timeout_s=_env_float("MODEL__CLOSE__BARRIER_TIMEOUT_S", 10.0),
+            worker_stall_timeout_s=_env_float("MODEL__CLOSE__WORKER_STALL_TIMEOUT_S", 120.0),
             batch_size=_env_int("MODEL__VISION__BATCH_SIZE", 1),
             freezer_zones=_env_zones("MODEL__ZONES__FREEZER"),
             error_policy=ErrorSessionPolicy(policy_raw),

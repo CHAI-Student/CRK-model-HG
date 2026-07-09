@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import dataclass
 from enum import Enum
@@ -19,6 +20,8 @@ from crk_model.core.types import FinalizedSettlement, InterimSummary
 from crk_model.ledger.barrier import CausalBarrier
 from crk_model.ledger.events import EventLog, TriggerEvent
 from crk_model.ledger.settler import CloseSettler, interim_summary
+
+logger = logging.getLogger(__name__)
 
 
 class DoorState(str, Enum):
@@ -45,16 +48,19 @@ class MultiZoneGateway:
         *,
         clock: Callable[[], float] = time.monotonic,
         close_timeout_s: float = 10.0,  # I17: 상한 타임아웃 (정상 경로 아님)
+        worker_stall_timeout_s: float = 120.0,  # queue_pending 전용 상한 (처리 지연 ≠ 유실)
     ):
         self._settler = settler
         self._event_log = event_log
         self._profiles = dict(profiles)
         self._clock = clock
         self._close_timeout = close_timeout_s
+        self._stall_timeout = max(worker_stall_timeout_s, close_timeout_s)
         self.state = DoorState.IDLE
         self.session_id: str | None = None
         self.barrier = CausalBarrier()
         self._close_ts: float | None = None
+        self._progress_ts: float | None = None  # 마지막 트리거 처리 완료 시각
 
     # -- OPEN --
     def handle_open(self, session_id: str) -> GatewayResponse:
@@ -71,6 +77,7 @@ class MultiZoneGateway:
 
     def notify_processed(self, zone: int) -> None:
         self.barrier.notify_processed(zone)
+        self._progress_ts = self._clock()  # stall 판정 기준점 (진행 = 살아있음)
 
     def record_trigger(self, event: TriggerEvent) -> bool:
         return self._event_log.append(event)
@@ -97,16 +104,38 @@ class MultiZoneGateway:
             settlement = self._settle()
             if settlement.blocked:
                 self.state = DoorState.ERROR  # I13: 무성 확정 금지
+                logger.error(
+                    "[GATEWAY] session=%s ERROR (blocked settlement): %s",
+                    self.session_id, settlement.block_reason,
+                )
                 return GatewayResponse(DoorState.ERROR, settlement, settlement.block_reason)
             self.state = DoorState.FINALIZED
+            logger.info(
+                "[GATEWAY] session=%s FINALIZED: totalPrice=%d products=%d notes=%s",
+                self.session_id, settlement.total_price,
+                settlement.product_count, list(settlement.notes),
+            )
             return GatewayResponse(DoorState.FINALIZED, settlement)
 
         assert self._close_ts is not None
-        if self._clock() - self._close_ts >= self._close_timeout:
+        # queue_pending(워커가 처리 중)은 유실이 아니라 진행 중 — 원본
+        # handle_close_signal이 pending trigger를 기다리듯 소진까지 대기한다
+        # (Jetson 디코드+추론이 close_timeout보다 길 수 있음). 워커 사망/행
+        # 대비 상한은 별도의 넉넉한 stall_timeout으로 유지 (I17 fail-closed).
+        in_flight = any("queue_pending" in p for p in status.pending)
+        timeout = self._stall_timeout if in_flight else self._close_timeout
+        anchor = self._close_ts
+        if in_flight and self._progress_ts is not None:
+            anchor = max(anchor, self._progress_ts)  # 트리거 처리 완료 = 진행 증거
+        if self._clock() - anchor >= timeout:
             # I17: 상한 타임아웃 만료 + 배리어 미충족 = 에러 세션 (D9 fail-closed).
             # "시간이 지나서 확정"은 정상 경로가 아니다 — late trigger 유실
             # = 매출 누락 또는 이중 과금이므로 결제로 보내지 않는다.
             self.state = DoorState.ERROR
+            logger.error(
+                "[GATEWAY] session=%s ERROR (barrier_timeout after %.1fs): %s",
+                self.session_id, timeout, list(status.pending),
+            )
             return GatewayResponse(
                 DoorState.ERROR, None, "barrier_timeout:" + ";".join(status.pending)
             )
