@@ -162,3 +162,30 @@
   (`TestNoCandidateFreezerSuppression` 등 신규 28건).
 
 - 테스트: `python -m pytest -q` → 136 passed.
+
+---
+
+## 2026-07-09 live_engine_preview 카메라 열기 실패 시 진단 부재 (GitHub issue #7)
+
+- 증상: Jetson 실기에서 `--source 0`, `--source 2` 모두
+  `VIDEOIO(V4L2:/dev/videoN): can't open camera by index` 후
+  `ERROR camera/video source could not be opened` 한 줄로 종료 — 어떤 장치가
+  존재하는지, 누가 점유 중인지, CSI인지 알 수 없어 현장에서 진행 불가.
+
+- 원인: ① 실행 환경 요인(코드 결함 아님) — 자판기에서는 CRK-CAMERA/Edge_Environment
+  캡처 서비스가 카메라를 상시 점유(V4L2는 배타 오픈)하거나 CSI 카메라라 V4L2
+  인덱스로 열 수 없음. ② 스크립트 결함 — 실패 시 원인 판별에 필요한 진단
+  (장치 목록·점유 프로세스·CSI 안내)을 전혀 출력하지 않았고, CSI/GStreamer
+  소스를 지정할 방법도 없었음. 참고: 이슈 로그의 실행 경로는 원본 레포
+  (~/Codes/CRK-model)였으나 캡처 로직이 동일해 어느 쪽이든 같은 증상.
+
+- 해결방안: `--list-devices` 진단(모델 로드 없이 /dev/video* 열거,
+  `v4l2-ctl --list-devices`, fuser/lsof 점유 프로세스 표시) + 열기 실패 시 동일
+  진단 자동 실행 + 발견 장치 기반 재시도 커맨드 예시 출력. 소스 형식 확장:
+  `/dev/videoN` 경로, `csi:N`(nvarguscamerasrc 파이프라인 자동 조립),
+  `gst:<pipeline>`. README 트러블슈팅 소절 추가.
+
+- 관련 파일: `scripts/live_engine_preview.py`, `README.md`.
+
+- 테스트: `python -m pytest -q` → 145 passed, cv2 없는 macOS에서
+  `--help`/`--list-devices` 동작 확인. Jetson 실기 재검증 대기.
