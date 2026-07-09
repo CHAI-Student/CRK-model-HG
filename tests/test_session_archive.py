@@ -118,7 +118,7 @@ class TestSessionArchiveOnFinalize:
         svc.handle_trigger(trigger_payload())
         svc.process_pending()
         resp = svc.handle_multi_zone({"state": "CLOSE"})
-        assert resp["status"] == "complete"
+        assert resp["status"] == "success"
 
         date_dir = tmp_path / "sessions" / "2026-02-04"
         files = list(date_dir.glob("*.yaml"))

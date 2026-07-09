@@ -87,7 +87,7 @@ class TestHttpAdapter:
         svc.process_pending()  # 워커 스레드 대행
         r = client.post("/api/judge/multi-zone", json={"session_id": "CLOSE"})
         body = r.json()
-        assert body["status"] == "complete"
+        assert body["status"] == "success"
         assert body["totalPrice"] == 1500
 
     def test_health_reports_barrier(self, client_and_service):

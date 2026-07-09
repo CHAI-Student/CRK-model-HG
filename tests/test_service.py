@@ -97,7 +97,7 @@ class TestEndToEnd:
 
         svc.process_pending()
         close2 = svc.handle_multi_zone({"session_id": "s1", "state": "CLOSE"})
-        assert close2["status"] == "complete"
+        assert close2["status"] == "success"
         assert close2["totalPrice"] == 1500
         assert close2["productCount"] == 1
 
@@ -121,7 +121,7 @@ class TestEndToEnd:
         svc.process_pending()
         first = svc.handle_multi_zone({"session_id": "s1", "state": "CLOSE"})
         second = svc.handle_multi_zone({"session_id": "s1", "state": "CLOSE"})
-        assert first["status"] == "complete" and first["totalPrice"] == 1500
+        assert first["status"] == "success" and first["totalPrice"] == 1500
         assert second["success"] is True and second["status"] == "success"
         assert second["totalPrice"] == 0 and second["zones"] == []
         assert second["message"] == "No active door session to close"
@@ -155,7 +155,7 @@ class TestEndToEnd:
         svc.handle_trigger(trigger_payload())
         svc.process_pending()
         first = svc.handle_multi_zone({"state": "CLOSE"})
-        assert first["status"] == "complete" and first["totalPrice"] == 1500
+        assert first["status"] == "success" and first["totalPrice"] == 1500
 
         # 세션 2: 트리거 2건 → 3000원 (캐시 재탕이면 1500, 이벤트 누적이면 4500)
         clock.t += 100.0  # 멱등성 TTL 경과
@@ -166,7 +166,7 @@ class TestEndToEnd:
             assert svc.handle_trigger(p)["status"] == "queued"  # 멱등 드롭 아님
         svc.process_pending()
         second = svc.handle_multi_zone({"state": "CLOSE"})
-        assert second["status"] == "complete"
+        assert second["status"] == "success"
         assert second["totalPrice"] == 3000
 
     def test_error_session_recovers_on_next_open(self, cola):
@@ -191,7 +191,7 @@ class TestEndToEnd:
         svc.handle_trigger(p)
         svc.process_pending()
         done = svc.handle_multi_zone({"state": "CLOSE"})
-        assert done["status"] == "complete"
+        assert done["status"] == "success"
         assert done["totalPrice"] == 1500
 
 

@@ -116,7 +116,7 @@ class TestOpsCloseLogging:
         svc.process_pending()
         with caplog.at_level("INFO", logger="crk_model.ops"):
             resp = svc.handle_multi_zone({"session_id": "s1", "state": "CLOSE"})
-        assert resp["status"] == "complete"
+        assert resp["status"] == "success"
 
         summary_lines = _close_summary_lines(caplog.records)
         zone_lines = _close_zone_lines(caplog.records)

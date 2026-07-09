@@ -274,9 +274,19 @@ class MultiZoneGateway:
 
 
 def build_payment_payload(settlement: FinalizedSettlement) -> dict:
-    """결제 페이로드 빌더 — I10을 타입으로 강제.
+    """결제 페이로드 빌더 — I10을 타입으로 강제, wire 형식은 원본 finalize 응답과 동형.
 
     InterimSummary(잠정)를 넘기면 TypeError. blocked settlement은 ValueError (I13).
+
+    형식 근거 (issue #6 4차 — 추론·정산이 정상인데 Node가 "결제할 내역이
+    없습니다"를 표시): 원본 multi_zone.py의 finalize 응답(1108-1128행)은
+    `success`/`status="success"`/평탄화된 `products` 배열("Node.js 하위 호환"
+    주석 명시)/상품 항목 키 productIdx·productId·name·count·price를 쓴다.
+    우리 구버전은 status="complete"에 zones 내부 product_id/unit_price만 보내
+    Node가 결제 항목을 찾지 못했다. 상품 항목의 productIdx는 Node IF11 문자열
+    ID(우리 ActiveProduct.product_id), productId는 YOLO class id(하위 호환,
+    unmapped면 -1)다. confidence는 정산 결과(ZoneBasket)에 per-product 값이
+    없어 0.0 고정 — 결제에는 쓰이지 않는 표시용 필드.
     """
     if not isinstance(settlement, FinalizedSettlement):
         raise TypeError(
@@ -284,25 +294,44 @@ def build_payment_payload(settlement: FinalizedSettlement) -> dict:
         )
     if settlement.blocked:
         raise ValueError(f"I13: blocked settlement은 결제 불가 — {settlement.block_reason}")
-    return {
-        "zones": [
+
+    zones = []
+    all_products: list[dict] = []
+    for z in settlement.zones:
+        products = [
+            {
+                "productIdx": pc.product.product_id,
+                "productId": pc.product.class_id,
+                "name": pc.product.name,
+                "count": pc.count,
+                "price": pc.product.unit_price,
+                "confidence": 0.0,
+            }
+            for pc in z.products
+        ]
+        zones.append(
             {
                 "zone": z.zone,
-                "products": [
-                    {
-                        "product_id": pc.product.product_id,
-                        "name": pc.product.name,
-                        "count": pc.count,
-                        "unit_price": pc.product.unit_price,
-                        "total_price": pc.total_price,
-                    }
-                    for pc in z.products
-                ],
+                "products": products,
+                "productNames": [p["name"] for p in products],
+                "productCounts": [p["count"] for p in products],
                 "totalPrice": z.total_price,
+                "productCount": sum(p["count"] for p in products),
+                "weightDelta": round(z.weight_delta, 1),
             }
-            for z in settlement.zones
-        ],
+        )
+        all_products.extend(products)
+
+    has_products = settlement.product_count > 0
+    return {
+        "success": True,
+        "status": "success" if has_products else "complete_no_products",
+        "has_products": has_products,
+        "global_session_id": settlement.session_id,
+        "zones": zones,
+        "products": all_products,  # Node.js 하위 호환 — 결제 항목 소스 (원본 동형)
         "totalPrice": settlement.total_price,
+        "totalProductCount": settlement.product_count,
         "productCount": settlement.product_count,
         "globalSessionInfo": {"session_id": settlement.session_id, "status": "complete"},
     }

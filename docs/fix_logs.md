@@ -444,3 +444,32 @@
 
 - 테스트: `python -m pytest -q` → 182 passed. 실기 재현 대기 — .env에
   진입 컷 0.50부터 시작, vote_summary의 entry_dropped/rejected_by로 조정.
+
+---
+
+## 2026-07-09 추론 성공했으나 Node "결제할 내역이 없습니다" — 결제 페이로드 wire 형식 불일치 (issue #6 4차)
+
+- 증상: 튜닝 후 추론·정산 전부 정상 (메로나 800원 freezer_vision_first conf 0.76,
+  만두 3,700원 + 교차존 net_delta 보정) — 그러나 Node/키오스크가
+  "결제할 내역이 없습니다"를 표시하며 결제 미진행.
+
+- 원인: 우리 확정 응답이 `{"status": "complete", zones: [{products:
+  [{product_id, unit_price, total_price}]}], ...}` 형식인데, 원본 finalize
+  응답(multi_zone.py 1108-1128행)은 `success: true` + `status: "success"` +
+  **평탄화된 `products` 배열**("Node.js 하위 호환" 주석 명시) + 상품 항목 키
+  `productIdx`(IF11 문자열)/`productId`(YOLO class)/`name`/`count`/`price`다.
+  Node는 이 계약으로 결제 항목을 읽으므로 우리 응답에서 결제 내역을 찾지 못함.
+
+- 해결방안: `build_payment_payload`를 원본 finalize wire 형식으로 재작성 —
+  success/status("success"|"complete_no_products")/has_products/
+  global_session_id/평탄화 products/zones(productNames·productCounts·
+  weightDelta 포함)/totalPrice/totalProductCount/productCount. 에러 응답에도
+  `success: false` 추가. confidence는 정산 결과에 per-product 값이 없어 0.0
+  고정(표시용). I10(확정 타입만 통과)·I13(blocked 차단)은 그대로.
+
+- 관련 파일: `crk_model/gateway/state_machine.py`(build_payment_payload),
+  `crk_model/service/model_service.py`(_to_response), tests 5개 파일의
+  status 기대값 "complete"→"success" (상품 0개 확정은 "complete_no_products").
+
+- 테스트: `python -m pytest -q` → 182 passed. 스모크로 원본 동형 응답 확인.
+  실기 재검증 대기 (결제 연동).

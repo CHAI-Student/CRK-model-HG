@@ -321,11 +321,14 @@ class ModelService:
     @staticmethod
     def _to_response(resp) -> dict:
         if resp.state is DoorState.FINALIZED:
-            payload = build_payment_payload(resp.payload)  # I10: 확정 타입만 통과
-            return {"status": "complete", **payload}
+            # I10: 확정 타입만 통과. status("success"|"complete_no_products")·
+            # success·평탄화 products까지 페이로드가 원본 finalize wire 형식을
+            # 완결한다 (issue #6 4차 — Node 결제 소비 계약).
+            return build_payment_payload(resp.payload)
         if resp.state is DoorState.ERROR:
             # I13: 에러 세션은 결제 필드 없이 에러로 응답 (무성 확정 금지)
-            return {"status": "error", "detail": resp.detail}
+            # success=False는 원본 에러 응답 형태 대응.
+            return {"success": False, "status": "error", "detail": resp.detail}
         body: dict = {"status": "processing", "provisional": True}  # I10: 잠정 명시
         if isinstance(resp.payload, InterimSummary):
             body["zones"] = [

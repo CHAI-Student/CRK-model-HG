@@ -167,7 +167,7 @@ class TestLedgerPrune:
         svc.handle_trigger(trigger_payload())
         svc.process_pending()
         first_close = svc.handle_multi_zone({"session_id": "s", "state": "CLOSE"})
-        assert first_close["status"] == "complete"
+        assert first_close["status"] == "success"
 
         # 새 세션 OPEN (직전 세션은 keep_sessions=4 안에 들어 prune 안 됨)
         svc.handle_multi_zone(open_payload(cola))
@@ -343,7 +343,7 @@ class TestLockSmoke:
         assert svc.worker.pending == 0
 
         close = svc.handle_multi_zone({"session_id": "s", "state": "CLOSE"})
-        assert close["status"] == "complete"
+        assert close["status"] == "success"
 
     def test_worker_default_lock_none_backward_compat(self):
         # lock 없이 생성해도(기존 테스트 패턴) 정상 동작해야 한다.
@@ -435,7 +435,8 @@ class TestCabinetTypeDefaultProfile:
         svc.handle_trigger(return_payload)
         svc.process_pending()
         close = svc.handle_multi_zone({"session_id": "s", "state": "CLOSE"})
-        assert close["status"] == "complete"
+        # 상품 0개 확정은 원본 wire 계약상 complete_no_products (success는 유지)
+        assert close["status"] == "complete_no_products" and close["success"] is True
         assert close["totalPrice"] == 0  # freezer ±15g: 반품 매칭 → 청구 없음
         assert close["productCount"] == 0
 
