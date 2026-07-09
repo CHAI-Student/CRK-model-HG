@@ -109,35 +109,38 @@ class TestPaymentContract:
         with pytest.raises(TypeError):
             build_payment_payload(resp.payload)
 
-    def test_repoll_after_finalize_is_idempotent(self, cola):
-        # I11: 재폴링해도 동일 정산 객체 (이중 과금 불가)
+    def test_settlement_idempotent_at_settler_layer(self, cola):
+        # I11: 이중 과금 불가는 wire 반복 전달이 아니라 settler의 세션 키 멱등
+        # 캐시가 보장한다 — 확정 후 같은 세션을 다시 정산해도 동일 객체.
         gw, _ = make_gateway()
         gw.handle_open("s1")
         gw.notify_enqueued(1)
         gw.record_trigger(removal("s1", 1, 1.0, cola))
         gw.notify_processed(1)
         first = gw.handle_close()
-        second = gw.poll()
-        assert first.payload is second.payload
+        assert first.state is DoorState.FINALIZED
+        assert first.payload is gw._settle()  # 캐시 재생 = 동일 정산 객체
 
-    def test_repoll_after_finalize_stays_finalized_without_new_open(self, cola):
-        # CLOSE는 level-triggered — 문이 닫혀있는 동안 계속 재폴링된다. 시간이 아무리
-        # 지나도 새 OPEN 없이는 FINALIZED가 임의로 초기화되면 안 된다(issue #5 후속
-        # 회귀: 타임아웃 자동 리셋이 결제 확정 정보를 status=processing으로 덮어썼었음).
+    def test_finalize_delivers_once_then_returns_to_idle(self, cola):
+        # 에지의 device busy 해제 계약: 확정 결과는 정확히 1회 전달되고 게이트웨이는
+        # 즉시 idle로 복귀한다 (원본 finalize_global_session이 확정 직후 세션을
+        # 비우는 것과 동형). 이후 CLOSE 재폴링은 IDLE — complete를 반복 응답하면
+        # 에지가 busy 상태를 영원히 유지하는 것을 실기에서 확인함 (issue #5 계열 3차).
         gw, clock = make_gateway()
         gw.handle_open("s1")
         gw.notify_enqueued(1)
         gw.record_trigger(removal("s1", 1, 1.0, cola))
         gw.notify_processed(1)
         first = gw.handle_close()
-        assert first.state is DoorState.FINALIZED
+        assert first.state is DoorState.FINALIZED  # 결제 페이로드는 이 응답에 실림
+        assert gw.state is DoorState.IDLE  # 전달 직후 즉시 복귀
 
-        clock.t = 600.0  # 문이 한참동안 닫혀있는 채로 CLOSE만 반복 폴링됨
+        clock.t = 600.0  # 문이 닫혀있는 채로 CLOSE만 반복 폴링돼도
         resp = gw.poll()
-        assert resp.state is DoorState.FINALIZED
-        assert resp.payload is first.payload
+        assert resp.state is DoorState.IDLE  # 더 이상 확정 결과를 반복하지 않음
+        assert resp.payload is None
 
-        # 새 OPEN이 오면 그때 정상적으로 새 세션 시작 (기존 동작 유지)
+        # 새 OPEN이 오면 정상적으로 새 세션 시작 (기존 동작 유지)
         gw.handle_open("s2")
         assert gw.state is DoorState.ACTIVE
 

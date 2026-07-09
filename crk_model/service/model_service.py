@@ -214,13 +214,11 @@ class ModelService:
                     )
                     resp = self.gateway.handle_close(payload.get("seq_watermark"))
                 else:
-                    resp = self.gateway.poll()  # 재폴링 (I11: 확정 후에도 동일 응답)
+                    resp = self.gateway.poll()  # PENDING_CLOSE 재폴링 / 확정 후 IDLE
                 if resp.state in (DoorState.FINALIZED, DoorState.ERROR):
-                    # CLOSE는 문이 닫혀있는 동안 계속 재폴링되는 level-triggered 신호라
-                    # (I11), FINALIZED/ERROR로 확정된 뒤에도 동일 응답이 반복된다. 매번
-                    # 로그를 남기면 몇 분씩 같은 줄이 반복돼 "멈춘 것처럼" 보이므로
-                    # (issue #5) 결과가 실제로 바뀔 때만 기록한다 — 응답 자체는 그대로
-                    # 매 호출 반환한다.
+                    # ERROR는 다음 OPEN까지 지속돼 재폴링마다 동일 응답이 반복된다
+                    # (issue #5) — 결과가 실제로 바뀔 때만 로그. FINALIZED는 확정
+                    # 게이트웨이가 1회만 반환하므로 자연히 1회 기록된다.
                     log_key = (self.gateway.session_id, resp.state, resp.detail)
                     if log_key != self._last_close_log_key:
                         self._last_close_log_key = log_key
@@ -228,6 +226,22 @@ class ModelService:
                             "[MULTI-ZONE CLOSE] session=%s -> %s detail=%s",
                             self.gateway.session_id, resp.state.value, resp.detail or "-",
                         )
+            if resp.state is DoorState.IDLE:
+                # 확정 결과가 이미 전달됐거나(게이트웨이가 finalize 직후 idle 복귀)
+                # 애초에 열린 세션이 없는 CLOSE — 원본 wire 계약(_handle_door_close의
+                # store-None 분기)대로 "활성 세션 없음"을 알린다. 에지는 이 응답으로
+                # device busy를 해제한다 (complete를 반복 주면 busy가 안 풀림 — 실기).
+                return {
+                    "success": True,
+                    "status": "success",
+                    "message": "No active door session to close",
+                    "zones": [],
+                    "products": [],
+                    "totalPrice": 0,
+                    "totalProductCount": 0,
+                    "productCount": 0,
+                    "globalSessionInfo": None,
+                }
             return self._to_response(resp)
         # 폴링(session_id=null): 현재 상태만 반환, 상태 전이 없음
         with self._lock:

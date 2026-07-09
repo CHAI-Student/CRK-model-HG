@@ -173,12 +173,13 @@ class MultiZoneGateway:
     def poll(self) -> GatewayResponse:
         if self.state is DoorState.ACTIVE:
             return GatewayResponse(DoorState.ACTIVE, self.interim(), "processing")
-        if self.state is DoorState.FINALIZED:
-            # I11: 재폴링에도 동일 결과 (settler 멱등 캐시). CLOSE는 level-triggered라
-            # 문이 닫혀있는 동안 계속 재폴링될 수 있음 — 결제 확정 정보를 매번 그대로
-            # 돌려줘야 하며, 타임아웃으로 임의 초기화하면 안 됨(issue #5 후속 회귀).
-            # 새 세션은 handle_open()이 FINALIZED에서도 무조건 복구한다.
-            return GatewayResponse(DoorState.FINALIZED, self._settle())
+        # FINALIZED는 지속 상태가 아니다 — 아래 확정 분기가 결제 결과를 응답에
+        # 실어 보낸 "그 호출"에서 즉시 IDLE로 복귀한다 (원본 finalize_global_session이
+        # 확정 직후 _global_session=None으로 비우는 것과 동형). 이후 CLOSE 재폴링은
+        # IDLE로 떨어져 "활성 세션 없음" 응답을 받는다 — 에지(Edge_Environment)는
+        # 이 응답으로 device busy를 해제한다 (실기 검증: complete를 반복 응답하면
+        # busy가 영구 유지됨). I11(이중 과금 불가)은 wire 반복 전달이 아니라
+        # settler의 세션 키 멱등 캐시가 보장한다.
         if self.state is not DoorState.PENDING_CLOSE:
             return GatewayResponse(self.state, None)
 
@@ -197,7 +198,6 @@ class MultiZoneGateway:
                 )
                 self._notify_finalize(DoorState.ERROR, settlement)
                 return GatewayResponse(DoorState.ERROR, settlement, settlement.block_reason)
-            self.state = DoorState.FINALIZED
             logger.info(
                 "[GATEWAY] session=%s FINALIZED: totalPrice=%d products=%d notes=%s",
                 self.session_id, settlement.total_price,
@@ -207,6 +207,11 @@ class MultiZoneGateway:
                 self.session_id, settlement, self._event_log.events_for(self.session_id)
             )
             self._notify_finalize(DoorState.FINALIZED, settlement)
+            # 확정 결과는 이 응답으로 1회 전달 — 상태는 즉시 idle 복귀 (원본 동형).
+            # session_id는 유지: late trigger의 세션 귀속·사후 로그 추적용이며,
+            # 다음 OPEN이 새 ID를 발급한다. 응답의 state는 FINALIZED로 나가
+            # 어댑터가 결제 페이로드를 빌드한다 (I10).
+            self.state = DoorState.IDLE
             return GatewayResponse(DoorState.FINALIZED, settlement)
 
         assert self._close_ts is not None

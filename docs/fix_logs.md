@@ -373,3 +373,38 @@
 
 - 테스트: `python -m pytest -q` → 176 passed (기존 172 + 신규 4). `ruff check .`
   → All checks passed.
+
+---
+
+## 2026-07-09 확정 후 CLOSE 재폴링에 complete 반복 → 에지 device busy 영구 유지 (issue #5 계열 3차 — 최종 정정)
+
+- 증상: finalize 이후에도 에지(Edge_Environment)가 `POST /api/judge/multi-zone`을
+  계속 보내며 device busy 상태가 해제되지 않음. 우리 서버는 CLOSE 재폴링마다
+  동일한 `status=complete` + 결제 페이로드를 멱등 반복 응답 중이었음.
+
+- 원인 (2차 정정의 오류 정정): issue #5의 2차 수정에서 "CLOSE는 level-triggered
+  이므로 결제 확정 정보를 매번 그대로 돌려줘야 한다"고 전제했는데, 이는 원본
+  코드와 대조하지 않은 추정이었다. 원본은 `finalize_global_session()`이 확정
+  직후 `_global_session = None`으로 세션을 즉시 비워 **확정 결과를 정확히 1회만
+  전달**하고, 이후 CLOSE 폴링에는 `"No active door session to close"`
+  (success=True, status="success", 빈 zones)를 응답한다 — 에지는 바로 이 응답을
+  받아야 device busy를 해제한다. complete를 반복 주면 에지 상태기계가 트랜잭션
+  종료를 인지하지 못한다 (실기 확인).
+
+- 해결방안: ① `MultiZoneGateway.poll()`의 확정 분기에서 결제 페이로드를 실은
+  FINALIZED 응답을 반환한 직후 `state = IDLE`로 즉시 복귀 (원본 동형, session_id는
+  late trigger 귀속·사후 추적용으로 유지 — 다음 OPEN이 새 ID 발급). FINALIZED는
+  더 이상 지속 상태가 아니므로 재폴링 멱등 분기 삭제. ② `handle_multi_zone`
+  CLOSE 분기에서 게이트웨이가 IDLE이면 원본 wire 계약대로 "No active door
+  session to close" 응답. ③ I11(이중 과금 불가)은 wire 반복 전달이 아니라
+  settler의 세션 키 멱등 캐시가 보장함을 테스트로 명시
+  (`test_settlement_idempotent_at_settler_layer`). [OPS][CLOSE]·세션 아카이브는
+  확정 "그 호출"에서 1회 실행되므로 영향 없음.
+
+- 관련 파일: `crk_model/gateway/state_machine.py`,
+  `crk_model/service/model_service.py`, `tests/test_gateway.py`
+  (`test_finalize_delivers_once_then_returns_to_idle`), `tests/test_service.py`
+  (`test_close_after_delivery_reports_no_active_session`).
+
+- 테스트: `python -m pytest -q` → 176 passed. 스모크: OPEN→trigger→CLOSE(complete
+  1회)→CLOSE×3(전부 "No active door session", door_state=idle)→새 OPEN 정상.

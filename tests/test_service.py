@@ -111,15 +111,20 @@ class TestEndToEnd:
         assert trace.early_terminated  # L2: 증거 수렴 후 추론 중단
         assert detector.calls < 20  # 전 프레임(10×2) 미만
 
-    def test_repoll_after_complete_is_stable(self, cola):
-        # I11: 확정 후 재폴링도 동일 금액
+    def test_close_after_delivery_reports_no_active_session(self, cola):
+        # 확정 결과는 1회 전달, 이후 CLOSE 재폴링은 원본 wire 계약
+        # "No active door session to close"(success) — 에지는 이 응답으로
+        # device busy를 해제한다 (complete 반복 응답 시 busy 영구 유지, 실기 확인).
         svc = make_service()
         svc.handle_multi_zone(open_payload(cola))
         svc.handle_trigger(trigger_payload())
         svc.process_pending()
         first = svc.handle_multi_zone({"session_id": "s1", "state": "CLOSE"})
         second = svc.handle_multi_zone({"session_id": "s1", "state": "CLOSE"})
-        assert first["totalPrice"] == second["totalPrice"] == 1500
+        assert first["status"] == "complete" and first["totalPrice"] == 1500
+        assert second["success"] is True and second["status"] == "success"
+        assert second["totalPrice"] == 0 and second["zones"] == []
+        assert second["message"] == "No active door session to close"
 
     def test_repoll_after_complete_does_not_spam_log(self, cola, caplog):
         # issue #5: CLOSE는 문이 닫혀있는 동안 계속 재폴링되는 level-triggered
