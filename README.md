@@ -135,6 +135,25 @@ fail-closed 원칙).
 | `MODEL__LEDGER__JOURNAL_PATH` | `logs/events.jsonl` | 저널 파일 경로. 일자별로 로테이션 |
 | `MODEL__LEDGER__JOURNAL_RETENTION_DAYS` | 14 | 로테이션된 저널 파일 보존 기간(일) |
 
+### 엣지 워터마크 (권장 — Node 측 구현 필요)
+
+CLOSE가 카메라 AVI 업로드보다 먼저 도착하면 배리어(I17)가 자명하게 충족되어
+0원 확정 + late trigger rejected가 날 수 있다 (이슈 #8). 기본 방어는 CLOSE
+유예 3초(`MODEL__CLOSE__GRACE_S`)지만, **Node가 CLOSE payload에 존별 기대
+트리거 수를 실으면** 시간 휴리스틱 없이 인과적으로 정확해진다:
+
+```json
+{ "session_id": "CLOSE", "expected_triggers": { "4": 2, "5": 1 } }
+```
+
+- Node는 녹화 디렉토리(`Edge_Environment/<세션>/inference/zone_N/…`)의
+  소유자이므로 close 시점에 존별 녹화 디렉토리 수를 세기만 하면 된다 —
+  카메라 펌웨어(seq, P5) 변경 불필요.
+- 워터마크가 있으면: 기대 수만큼 도착할 때까지 확정 보류
+  (`awaiting_triggers`), 전부 도착하면 **유예 없이 즉시** 확정. 기대한
+  트리거가 끝내 안 오면 `close_timeout`(10s)에서 에러 세션 (D9 fail-closed).
+- 워터마크가 없으면: 기존 유예 3초 폴백 (하위호환 — Node 무변경으로도 동작).
+
 ### 비디오 디코더
 
 | 환경변수 | 기본값 | 의미 |

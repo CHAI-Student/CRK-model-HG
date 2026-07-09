@@ -212,3 +212,54 @@ class TestCloseGrace:
         gw.barrier.note_seq(1, 2)
         resp = gw.handle_close(seq_watermark={1: 2})
         assert resp.state is DoorState.FINALIZED  # 유예 없이 즉시
+
+
+class TestEdgeWatermark:
+    """I17 ③' (issue #8): 카메라 seq 펌웨어(P5) 없이 엣지(Node)가 close 시점에
+    존별 녹화 수를 세어 보내는 개수 기반 워터마크 — 인과 신호가 완결되므로
+    시간 유예(close_grace) 없이 정확한 대기·즉시 확정이 가능하다."""
+
+    def make_wm_gateway(self):
+        clock = FakeClock()
+        gw = MultiZoneGateway(
+            CloseSettler(), EventLog(), {1: REFRIGERATOR}, clock=clock,
+            close_timeout_s=10.0, close_grace_s=3.0,  # 유예가 있어도 워터마크가 우선
+        )
+        return gw, clock
+
+    def test_expected_triggers_holds_until_arrival_then_finalizes(self, cola):
+        # issue #8 재현: CLOSE가 트리거보다 먼저 도착 — 워터마크(1건 기대)가
+        # 배리어를 열어두고, 도착 즉시(유예 없이) 확정한다.
+        gw, clock = self.make_wm_gateway()
+        gw.handle_open("s1")
+        resp = gw.handle_close(expected_triggers={1: 1})
+        assert resp.state is DoorState.PENDING_CLOSE
+        assert any("awaiting_triggers" in p for p in resp.detail.split(";"))
+
+        clock.t = 0.66  # 실측: 카메라 업로드 완료 시점
+        gw.notify_enqueued(1)
+        gw.record_trigger(removal("s1", 1, 0.7, cola))
+        gw.notify_processed(1)
+        resp = gw.poll()  # 유예 3s를 기다리지 않고 즉시 확정 (인과 완결)
+        assert resp.state is DoorState.FINALIZED
+        assert resp.payload.total_price == 1500
+
+    def test_expected_triggers_zero_finalizes_immediately(self):
+        # Node가 "녹화 0건"을 보증하면 빈 세션도 유예 없이 즉시 0상품 확정
+        gw, _ = self.make_wm_gateway()
+        gw.handle_open("s1")
+        resp = gw.handle_close(expected_triggers={})
+        # 빈 dict는 워터마크 아님(정보 없음) → 유예 적용이 안전측
+        assert resp.state is DoorState.PENDING_CLOSE
+        assert resp.detail == "close_grace_pending"
+
+    def test_missing_expected_trigger_times_out_to_error(self):
+        # 워터마크가 기대한 트리거가 끝내 안 오면(카메라 POST 실패) I17
+        # fail-closed: close_timeout에서 ERROR — 무성 부분 확정 금지 (D9).
+        gw, clock = self.make_wm_gateway()
+        gw.handle_open("s1")
+        gw.handle_close(expected_triggers={1: 1})
+        clock.t = 11.0
+        resp = gw.poll()
+        assert resp.state is DoorState.ERROR
+        assert "awaiting_triggers" in resp.detail

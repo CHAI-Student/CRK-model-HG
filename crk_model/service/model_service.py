@@ -226,7 +226,10 @@ class ModelService:
                         "[MULTI-ZONE CLOSE] session=%s queue_pending=%d",
                         self.gateway.session_id, self.worker.pending,
                     )
-                    resp = self.gateway.handle_close(payload.get("seq_watermark"))
+                    resp = self.gateway.handle_close(
+                        payload.get("seq_watermark"),
+                        expected_triggers=payload.get("expected_triggers"),
+                    )
                 else:
                     resp = self.gateway.poll()  # PENDING_CLOSE 재폴링 / 확정 후 IDLE
                 if resp.state in (DoorState.FINALIZED, DoorState.ERROR):

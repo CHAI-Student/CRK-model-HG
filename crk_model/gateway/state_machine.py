@@ -175,12 +175,21 @@ class MultiZoneGateway:
         return self._event_log.append(event)
 
     # -- CLOSE --
-    def handle_close(self, seq_watermark: dict[int, int] | None = None) -> GatewayResponse:
+    def handle_close(
+        self,
+        seq_watermark: dict[int, int] | None = None,
+        expected_triggers: dict[int, int] | None = None,
+    ) -> GatewayResponse:
         self.state = DoorState.PENDING_CLOSE
         self._close_ts = self._clock()
-        self._watermark_set = bool(seq_watermark)
+        # 워터마크(카메라 seq ③ 또는 엣지 기대 수 ③')가 오면 인과 신호가
+        # 완결이므로 시간 유예(close_grace)는 생략된다 — 유예는 워터마크
+        # 부재 시의 heuristic 방어일 뿐이다 (issue #8).
+        self._watermark_set = bool(seq_watermark) or bool(expected_triggers)
         if seq_watermark:  # D2: 카메라 seq 도입 시에만 (I17 ③)
             self.barrier.set_close_watermark(seq_watermark)
+        if expected_triggers:  # 엣지 워터마크 (I17 ③', issue #8)
+            self.barrier.set_expected_counts(expected_triggers)
         return self.poll()
 
     def poll(self) -> GatewayResponse:

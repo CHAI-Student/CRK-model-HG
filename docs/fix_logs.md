@@ -505,3 +505,30 @@
 
 - 테스트: `python -m pytest -q` → 185 passed. 스모크: CLOSE 선도착 → 유예 →
   late trigger 수용 → 3,700원 정상 확정. 실기 재검증 대기.
+
+---
+
+## 2026-07-09 (issue #8 후속) 엣지 워터마크 — 카메라 펌웨어 없이 인과 배리어 완결
+
+- 배경: issue #8의 CLOSE 유예(3s)는 시간 휴리스틱 — 근본 해결은 "close 시점에
+  트리거가 몇 개 생겼는지"라는 인과 정보인데, 원설계(D2 카메라 seq)는 펌웨어
+  변경(P5)이 필요해 보류 상태였다. 관찰: 녹화 디렉토리
+  (`Edge_Environment/<세션>/inference/zone_N/…`)의 소유자가 엣지(Node)이므로,
+  Node가 close 시점에 존별 녹화 수를 세어 CLOSE payload에 실을 수 있다.
+
+- 구현: CLOSE payload에 `expected_triggers: {"존": 수}` (선택 필드) 수신 —
+  CausalBarrier에 개수 기반 워터마크(I17 ③')를 추가해 존별 도착 수가 기대에
+  못 미치면 `awaiting_triggers`로 확정 보류, 전부 도착하면 시간 유예 없이
+  즉시 확정. 기대 트리거 미도착은 close_timeout에서 ERROR (D9 fail-closed).
+  워터마크 부재 시 기존 유예 3초 폴백 (Node 무변경 하위호환). 어댑터에서
+  JSON 문자열 키 정규화, 파싱 불가 값은 무시(부가 신호 원칙).
+
+- 관련 파일: `crk_model/ledger/barrier.py`(set_expected_counts),
+  `crk_model/gateway/state_machine.py`(handle_close expected_triggers),
+  `crk_model/adapters/http_app.py`(_int_key_counts 정규화),
+  `crk_model/service/model_service.py`, `README.md`(Node 구현 가이드),
+  `tests/test_gateway.py`(TestEdgeWatermark 3건).
+
+- 테스트: `python -m pytest -q` → 188 passed. E2E 스모크: 워터마크 CLOSE →
+  awaiting_triggers 보류 → 0.66s 후 트리거 도착 → 유예 없이 즉시 3,700원 확정.
+  Node 측 구현은 Edge_Environment 팀 몫 (README 가이드 참조).

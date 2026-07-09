@@ -145,20 +145,40 @@ def _active_product_fields(
     }
 
 
+def _int_key_counts(raw: Any) -> dict[int, int] | None:
+    """엣지 워터마크(issue #8) 정규화: {"4": 2} 같은 JSON 맵 → {4: 2}.
+    파싱 불가 항목은 무시 — 워터마크는 부가 신호라 잘못된 값으로 CLOSE를
+    막지 않는다 (없으면 시간 유예로 폴백)."""
+    if not isinstance(raw, Mapping):
+        return None
+    out: dict[int, int] = {}
+    for k, v in raw.items():
+        try:
+            out[int(k)] = int(v)
+        except (TypeError, ValueError):
+            continue
+    return out or None
+
+
 def _normalize_multi_zone(body: Any, name_to_class: Mapping[str, int] | None = None) -> dict:
-    """wire(dict 또는 Node 배열) → 도메인 계약 {state, active_products, seq_watermark}."""
+    """wire(dict 또는 Node 배열) → 도메인 계약
+    {state, active_products, seq_watermark, expected_triggers}."""
     if isinstance(body, list):
-        products, signal, seq_watermark = body, None, None
+        products, signal, seq_watermark, expected = body, None, None, None
     elif isinstance(body, Mapping):
         products = body.get("products", [])
         signal = body.get("session_id")
         seq_watermark = body.get("seq_watermark")
+        # 엣지 워터마크 (issue #8): Node가 close 시점에 세션 녹화 디렉토리를
+        # 세어 보내는 존별 기대 트리거 수 — {"expected_triggers": {"4": 2}}.
+        expected = _int_key_counts(body.get("expected_triggers"))
     else:
-        products, signal, seq_watermark = [], None, None
+        products, signal, seq_watermark, expected = [], None, None, None
     return {
         "state": _door_state(signal),
         "active_products": [_active_product_fields(p, name_to_class) for p in products],
         "seq_watermark": seq_watermark,
+        "expected_triggers": expected,
     }
 
 
