@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 
@@ -25,6 +26,13 @@ def load_dotenv(path: str = ".env") -> None:
 
 def main() -> None:
     load_dotenv()
+
+    # 도메인 로거([TRIGGER]/[MULTI-ZONE]/[GATEWAY]) 출력 — uvicorn log_level은
+    # uvicorn 로거만 다루므로 crk_model 로거에는 별도 핸들러가 필요하다.
+    logging.basicConfig(
+        level=os.environ.get("MODEL__LOG_LEVEL", "INFO").upper(),
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
 
     import numpy as np  # Jetson: system-site numpy<2
 

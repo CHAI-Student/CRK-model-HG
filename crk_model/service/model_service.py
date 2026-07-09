@@ -12,6 +12,7 @@ HTTP 바인딩(FastAPI 등)은 이 파사드를 감싸는 얇은 어댑터로 �
 """
 from __future__ import annotations
 
+import logging
 import time
 from typing import Callable, Mapping
 
@@ -31,6 +32,8 @@ from crk_model.perception.detector import Detector
 from crk_model.service.pipeline import TriggerPipeline, TriggerRequest
 from crk_model.service.snapshot import ActiveProductStore
 from crk_model.service.worker import SerialTriggerWorker
+
+logger = logging.getLogger(__name__)
 
 
 def _profiles_from_settings(settings: Settings) -> dict[int, SensorProfile]:
@@ -66,11 +69,13 @@ class ModelService:
             self._profiles,
             clock=clock,
             close_timeout_s=self.settings.close_timeout_s,
+            worker_stall_timeout_s=self.settings.worker_stall_timeout_s,
         )
         self.pipeline = TriggerPipeline(detector, self._profiles, self.snapshots)
         self.worker = SerialTriggerWorker(self.pipeline, self.gateway, journal)
         self._idempotency = IdempotencyRegistry(self.settings.idempotency_ttl_s, clock)
         self._trigger_counter = 0
+        self._session_counter = 0
 
     # ---- POST /trigger (C4) ----
     def handle_trigger(self, payload: dict) -> dict:
@@ -96,11 +101,16 @@ class ModelService:
         self.worker.submit(session_id, req)
         return {"status": "queued", "trigger_id": trigger_id}  # 202 의미론
 
+    def _next_session_id(self) -> str:
+        """문 세션 ID 발급 — EventLog 확정 거부(I11)·settler 멱등 캐시가
+        session_id 키이므로 세션마다 유일해야 한다 (원본 global_session_id 대응)."""
+        self._session_counter += 1
+        return f"ses-{self._session_counter}-{int(time.time())}"
+
     # ---- POST /api/judge/multi-zone (C5) ----
     def handle_multi_zone(self, payload: dict) -> dict:
         # 계약(REFERENCE.md): 문 상태는 별도 필드가 아니라 세션 신호로 들어온다.
         # 어댑터가 wire(session_id="OPEN"|"CLOSE"|null)를 state로 번역해 전달한다.
-        session_id = payload.get("session_id")
         state = payload.get("state")  # "OPEN" | "CLOSE" | None(폴링)
         if state == "OPEN":
             products = tuple(
@@ -109,13 +119,32 @@ class ModelService:
             if products:
                 self.snapshots.update(products)  # OPEN마다 스냅샷 갱신 (I2)
                 # 빈 목록은 재고 스냅샷을 덮어쓰지 않는다 (폴링성 OPEN 보호)
-            resp = self.gateway.handle_open(session_id or "global")
+            if self.gateway.state in (DoorState.IDLE, DoorState.FINALIZED, DoorState.ERROR):
+                # 새 문 세션 시작 — ERROR/FINALIZED에서 복구는 여기서만 일어난다
+                session_id = self._next_session_id()
+                logger.info(
+                    "[MULTI-ZONE OPEN] new session %s (prev_state=%s, products=%d)",
+                    session_id, self.gateway.state.value, len(products),
+                )
+            else:
+                # 반복 OPEN — 진행 중 세션 유지 (원본 get_or_start 의미론)
+                session_id = self.gateway.session_id or self._next_session_id()
+            resp = self.gateway.handle_open(session_id)
             return self._to_response(resp)
         if state == "CLOSE":
             if self.gateway.state is DoorState.ACTIVE:
+                logger.info(
+                    "[MULTI-ZONE CLOSE] session=%s queue_pending=%d",
+                    self.gateway.session_id, self.worker.pending,
+                )
                 resp = self.gateway.handle_close(payload.get("seq_watermark"))
             else:
                 resp = self.gateway.poll()  # 재폴링 (I11: 확정 후에도 동일 응답)
+            if resp.state in (DoorState.FINALIZED, DoorState.ERROR):
+                logger.info(
+                    "[MULTI-ZONE CLOSE] session=%s -> %s detail=%s",
+                    self.gateway.session_id, resp.state.value, resp.detail or "-",
+                )
             return self._to_response(resp)
         # 폴링(session_id=null): 현재 상태만 반환, 상태 전이 없음
         return self._to_response(self.gateway.poll())

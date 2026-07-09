@@ -121,6 +121,55 @@ class TestEndToEnd:
         second = svc.handle_multi_zone({"session_id": "s1", "state": "CLOSE"})
         assert first["totalPrice"] == second["totalPrice"] == 1500
 
+    def test_consecutive_door_sessions_are_independent(self, cola):
+        # 이슈 #3 회귀: 세션 ID가 고정("global")이면 EventLog 확정 거부(I11)와
+        # settler 멱등 캐시가 세션을 관통 → 두 번째 세션이 첫 결과를 재탕했다.
+        clock = FakeClock()
+        svc = make_service(clock=clock)
+        # 세션 1: 트리거 1건 → 1500원
+        svc.handle_multi_zone(open_payload(cola))
+        svc.handle_trigger(trigger_payload())
+        svc.process_pending()
+        first = svc.handle_multi_zone({"state": "CLOSE"})
+        assert first["status"] == "complete" and first["totalPrice"] == 1500
+
+        # 세션 2: 트리거 2건 → 3000원 (캐시 재탕이면 1500, 이벤트 누적이면 4500)
+        clock.t += 100.0  # 멱등성 TTL 경과
+        svc.handle_multi_zone(open_payload(cola))
+        for cam in ("a", "b"):
+            p = trigger_payload()
+            p["video_paths"] = {"top": f"/{cam}.avi"}
+            assert svc.handle_trigger(p)["status"] == "queued"  # 멱등 드롭 아님
+        svc.process_pending()
+        second = svc.handle_multi_zone({"state": "CLOSE"})
+        assert second["status"] == "complete"
+        assert second["totalPrice"] == 3000
+
+    def test_error_session_recovers_on_next_open(self, cola):
+        # 이슈 #3: ERROR 세션 후 door_state가 영구 error로 고착 —
+        # 다음 OPEN이 새 세션을 발급해 복구해야 한다.
+        clock = FakeClock()
+        detector = FakeDetector(error=RuntimeError("gpu"))
+        svc = make_service(detector, clock=clock)
+        svc.handle_multi_zone(open_payload(cola))
+        svc.handle_trigger(trigger_payload())
+        svc.process_pending()  # I1: 처리 예외 → error 이벤트
+        err = svc.handle_multi_zone({"state": "CLOSE"})
+        assert err["status"] == "error"  # I13: blocked settlement
+
+        # 다음 손님: 문 열림 → 정상 세션으로 복구
+        detector.error = None
+        clock.t += 100.0
+        opened = svc.handle_multi_zone(open_payload(cola))
+        assert opened["status"] == "processing"  # error 고착 아님
+        p = trigger_payload()
+        p["video_paths"] = {"top": "/t2.avi"}
+        svc.handle_trigger(p)
+        svc.process_pending()
+        done = svc.handle_multi_zone({"state": "CLOSE"})
+        assert done["status"] == "complete"
+        assert done["totalPrice"] == 1500
+
 
 class TestGuards:
     def test_empty_allowlist_fail_closed(self):
@@ -207,13 +256,14 @@ class TestJournalReplay:
         journal = EventJournal(tmp_path / "events.jsonl")
         svc = make_service(journal=journal)
         svc.handle_multi_zone(open_payload(cola))
+        sid = svc.gateway.session_id  # 세션 ID는 서비스가 발급 (세션마다 유일)
         svc.handle_trigger(trigger_payload())
         svc.process_pending()
         live = svc.handle_multi_zone({"session_id": "s1", "state": "CLOSE"})
 
-        replayed = journal.replay("s1")
+        replayed = journal.replay(sid)
         assert len(replayed) == 1
-        result = CloseSettler().settle("s1", replayed, {1: REFRIGERATOR})
+        result = CloseSettler().settle(sid, replayed, {1: REFRIGERATOR})
         assert result.total_price == live["totalPrice"]
 
 

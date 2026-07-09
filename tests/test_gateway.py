@@ -64,10 +64,29 @@ class TestBarrierDrivenClose:
         gw.notify_enqueued(1)  # 영원히 미처리 (카메라/워커 장애 시뮬레이션)
         gw.handle_close()
         clock.t = 11.0
+        # queue_pending은 유실이 아니라 진행 중일 수 있음 (Jetson 추론 > close_timeout)
+        # → close_timeout에서는 에러 금지, stall 상한까지 대기
+        assert gw.poll().state is DoorState.PENDING_CLOSE
+        clock.t = 121.0  # worker_stall_timeout(120s) 초과 = 진짜 워커 사망
         resp = gw.poll()
         assert resp.state is DoorState.ERROR
         assert resp.payload is None  # 결제로 아무것도 안 나감
         assert "barrier_timeout" in resp.detail
+
+    def test_slow_inflight_trigger_survives_close_timeout(self, cola):
+        # 이슈 #3: CLOSE 후 10s 내 추론 미완 → 예전엔 barrier_timeout ERROR.
+        # 처리 완료가 늦게 와도 정상 확정되어야 한다.
+        gw, clock = make_gateway()
+        gw.handle_open("s1")
+        gw.notify_enqueued(1)
+        gw.handle_close()
+        clock.t = 30.0  # close_timeout(10s) 훌쩍 지남 — 워커는 아직 추론 중
+        assert gw.poll().state is DoorState.PENDING_CLOSE
+        gw.record_trigger(removal("s1", 1, 2.0, cola))
+        gw.notify_processed(1)  # 추론 완료
+        resp = gw.poll()
+        assert resp.state is DoorState.FINALIZED
+        assert resp.payload.total_price == 1500  # late 결과 유실 없음
 
     def test_seq_watermark_gates_close(self, cola):
         # D2/I17 ③: close 이전 seq 전원 도착까지 확정 보류
@@ -106,7 +125,7 @@ class TestPaymentContract:
         gw.handle_open("s1")
         gw.notify_enqueued(1)  # s1에서 미해소
         gw.handle_close()
-        clock.t = 11.0
+        clock.t = 121.0  # queue_pending은 stall 상한(120s)에서만 에러
         assert gw.poll().state is DoorState.ERROR
         # 새 세션 OPEN → 새 배리어 (이전 세션 잔재가 다음 세션을 막지 않음)
         gw.handle_open("s2")
