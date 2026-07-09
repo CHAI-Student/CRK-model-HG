@@ -98,14 +98,18 @@ class ModelService:
 
     # ---- POST /api/judge/multi-zone (C5) ----
     def handle_multi_zone(self, payload: dict) -> dict:
-        session_id = payload["session_id"]
-        state = payload["state"]  # "OPEN" | "CLOSE"
+        # 계약(REFERENCE.md): 문 상태는 별도 필드가 아니라 세션 신호로 들어온다.
+        # 어댑터가 wire(session_id="OPEN"|"CLOSE"|null)를 state로 번역해 전달한다.
+        session_id = payload.get("session_id")
+        state = payload.get("state")  # "OPEN" | "CLOSE" | None(폴링)
         if state == "OPEN":
             products = tuple(
                 ActiveProduct(**p) for p in payload.get("active_products", ())
             )
-            self.snapshots.update(products)  # OPEN마다 스냅샷 갱신 (I2)
-            resp = self.gateway.handle_open(session_id)
+            if products:
+                self.snapshots.update(products)  # OPEN마다 스냅샷 갱신 (I2)
+                # 빈 목록은 재고 스냅샷을 덮어쓰지 않는다 (폴링성 OPEN 보호)
+            resp = self.gateway.handle_open(session_id or "global")
             return self._to_response(resp)
         if state == "CLOSE":
             if self.gateway.state is DoorState.ACTIVE:
@@ -113,7 +117,8 @@ class ModelService:
             else:
                 resp = self.gateway.poll()  # 재폴링 (I11: 확정 후에도 동일 응답)
             return self._to_response(resp)
-        raise ValueError(f"unknown state: {state}")
+        # 폴링(session_id=null): 현재 상태만 반환, 상태 전이 없음
+        return self._to_response(self.gateway.poll())
 
     def process_pending(self) -> int:
         """워커 drain — 장치에서는 전용 스레드/태스크가 주기 호출."""
