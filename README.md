@@ -387,6 +387,7 @@ flowchart TD
 | 환경변수 | 기본값 | 의미 |
 | --- | --- | --- |
 | `MODEL__CLOSE__BARRIER_TIMEOUT_S` | 10.0 | I17 상한 타임아웃 (정상 경로 아님) |
+| `MODEL__CLOSE__GRACE_S` | 3.0 | CLOSE 유예 창 — 문 닫힘/마지막 트리거 후 이 시간 동안 확정 보류 (카메라가 쓰는 중인 AVI의 late trigger 유실 방지, 이슈 #8) |
 | `MODEL__VISION__BATCH_SIZE` | 1 | D8 배치 (1 = OFF) |
 | `MODEL__ZONES__FREEZER` | (없음) | freezer 프로파일 존 목록 (예: `9,10`) — cabinet_type 기본 프로파일에 대한 존 단위 오버라이드 |
 | `MODEL__MACHINE__CABINET_TYPE` | `refrigerated` | 기기 단위 기본 프로파일 `refrigerated`\|`freezer`. **냉동 기기는 반드시 `freezer`로 설정할 것** — 미설정 시 전 존이 냉장(±3g) 프로파일로 판정되어 이슈 #6과 같은 오판정이 재발한다 |

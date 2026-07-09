@@ -6,6 +6,7 @@ fastapi가 없는 환경에서는 HTTP 테스트를 skip한다.
 import pytest
 from test_service import FakeClock, FakeDetector, frame, moving_frames, samples
 
+from crk_model.core.config import Settings
 from crk_model.core.profiles import REFRIGERATOR
 from crk_model.frames.bundle import FrameBundle
 from crk_model.service import ActiveProductStore, ModelService, TriggerPipeline, TriggerRequest
@@ -57,7 +58,10 @@ class TestHttpAdapter:
         testclient = pytest.importorskip("fastapi.testclient")
         from crk_model.adapters.http_app import create_app
 
-        svc = ModelService(FakeDetector(), profiles={1: REFRIGERATOR}, clock=FakeClock())
+        svc = ModelService(
+            FakeDetector(), profiles={1: REFRIGERATOR}, clock=FakeClock(),
+            settings=Settings(close_grace_s=0.0),
+        )
         # 디코드 주입: AVI 경로 → 준비된 프레임 (cv2 없이 계약 검증)
         app = create_app(svc, decode=lambda paths: {cam: moving_frames(8) for cam in paths})
         return testclient.TestClient(app), svc

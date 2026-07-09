@@ -106,6 +106,7 @@ class ModelService:
             clock=clock,
             close_timeout_s=self.settings.close_timeout_s,
             worker_stall_timeout_s=self.settings.worker_stall_timeout_s,
+            close_grace_s=self.settings.close_grace_s,
             on_finalize=self._on_session_finalize,
             default_profile=self._default_profile,
         )

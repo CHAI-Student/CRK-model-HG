@@ -4,6 +4,7 @@ from dataclasses import asdict
 
 import pytest
 
+from crk_model.core.config import Settings
 from crk_model.core.profiles import REFRIGERATOR
 from crk_model.core.types import JudgmentStatus
 from crk_model.ingest.loadcell import LoadcellAnalyzer, LoadcellSample
@@ -61,11 +62,14 @@ def samples(start, end, n=10, dt=0.1):
 
 
 def make_service(detector=None, clock=None, journal=None):
+    # close_grace_s=0: 유예 창은 test_gateway의 전용 테스트에서 검증 —
+    # 여기서는 FakeClock(t=0) 기반 E2E 흐름을 즉시 확정으로 단순화한다.
     return ModelService(
         detector or FakeDetector(),
         profiles={1: REFRIGERATOR},
         clock=clock or FakeClock(),
         journal=journal,
+        settings=Settings(close_grace_s=0.0),
     )
 
 

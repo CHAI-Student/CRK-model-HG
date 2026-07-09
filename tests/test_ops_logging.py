@@ -11,6 +11,7 @@ from dataclasses import asdict
 
 import pytest
 
+from crk_model.core.config import Settings
 from crk_model.core.profiles import REFRIGERATOR
 from crk_model.core.types import JudgmentResult, JudgmentStatus, ProductCount
 from crk_model.ledger.events import TriggerEvent
@@ -67,6 +68,7 @@ def make_service(detector=None, clock=None):
         detector or FakeDetector(),
         profiles={1: REFRIGERATOR},
         clock=clock or FakeClock(),
+        settings=Settings(close_grace_s=0.0),  # 유예는 test_gateway에서 검증
     )
 
 

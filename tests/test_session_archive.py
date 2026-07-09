@@ -22,6 +22,7 @@ import json
 
 import pytest
 
+from crk_model.core.config import Settings
 from crk_model.core.profiles import REFRIGERATOR
 from crk_model.core.types import JudgmentResult, JudgmentStatus, ProductCount
 from crk_model.ledger.archive import SessionArchive, build_session_document
@@ -107,6 +108,7 @@ def make_service(tmp_path, detector=None, clock=None, retention_days=14):
         profiles={1: REFRIGERATOR},
         clock=clock or FakeClock(),
         archive=archive,
+        settings=Settings(close_grace_s=0.0),  # 유예는 test_gateway에서 검증
     ), archive
 
 

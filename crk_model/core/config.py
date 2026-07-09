@@ -45,6 +45,11 @@ def _env_cabinet_type(key: str, default: str) -> str:
 class Settings:
     # I17: 인과 배리어 상한 타임아웃 (정상 경로 아님 — debounce 3s보다 길게)
     close_timeout_s: float = 10.0
+    # CLOSE 유예 창 (issue #8, 원본 close_initial_wait_seconds 복원): 배리어가
+    # 충족돼도 CLOSE·마지막 트리거 도착 후 이 시간 동안 확정을 보류 — 카메라가
+    # 아직 쓰고 있는 AVI의 late trigger 유실(0원 확정+rejected) 방지. seq
+    # 워터마크(D2) 배포 전까지의 유일한 방어. 0이면 비활성.
+    close_grace_s: float = 3.0
     # queue_pending(워커 처리 중)은 유실이 아니라 진행 중 — Jetson 디코드+TRT
     # 추론이 close_timeout보다 길 수 있어 별도의 넉넉한 stall 상한을 적용한다.
     # 이 상한 초과 = 워커 사망/행 (I17 fail-closed 유지)
@@ -96,6 +101,7 @@ class Settings:
         policy_raw = os.environ.get("MODEL__SESSION__ERROR_POLICY", "block_payment")
         return cls(
             close_timeout_s=_env_float("MODEL__CLOSE__BARRIER_TIMEOUT_S", 10.0),
+            close_grace_s=_env_float("MODEL__CLOSE__GRACE_S", 3.0),
             worker_stall_timeout_s=_env_float("MODEL__CLOSE__WORKER_STALL_TIMEOUT_S", 120.0),
             batch_size=_env_int("MODEL__VISION__BATCH_SIZE", 1),
             freezer_zones=_env_zones("MODEL__ZONES__FREEZER"),

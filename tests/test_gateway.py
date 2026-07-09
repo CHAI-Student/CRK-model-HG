@@ -23,7 +23,8 @@ def removal(sid, zone, ts, product, count=1):
 def make_gateway(clock=None):
     clock = clock or FakeClock()
     gw = MultiZoneGateway(
-        CloseSettler(), EventLog(), {1: REFRIGERATOR}, clock=clock, close_timeout_s=10.0
+        CloseSettler(), EventLog(), {1: REFRIGERATOR}, clock=clock,
+        close_timeout_s=10.0, close_grace_s=0.0,  # 유예는 전용 테스트에서만
     )
     return gw, clock
 
@@ -154,3 +155,60 @@ class TestPaymentContract:
         # 새 세션 OPEN → 새 배리어 (이전 세션 잔재가 다음 세션을 막지 않음)
         gw.handle_open("s2")
         assert gw.handle_close().state is DoorState.FINALIZED
+
+
+class TestCloseGrace:
+    """issue #8: 배리어는 '도착한' 트리거만 센다 — 문 닫힘 시점에 카메라가 아직
+    쓰고 있는 AVI(실측: CLOSE 0.66s 후 /trigger 도착)는 배리어에 보이지 않아
+    0원 확정 + late trigger rejected(매출 누락)가 났다. seq 워터마크(D2) 배포
+    전까지 CLOSE 유예 창(원본 close_initial_wait 3.0s)이 유일한 방어."""
+
+    def make_grace_gateway(self, grace=3.0):
+        clock = FakeClock()
+        gw = MultiZoneGateway(
+            CloseSettler(), EventLog(), {1: REFRIGERATOR}, clock=clock,
+            close_timeout_s=10.0, close_grace_s=grace,
+        )
+        return gw, clock
+
+    def test_close_with_no_triggers_waits_grace_before_finalize(self, cola):
+        # 실기 재현: 트리거 0건 상태의 CLOSE — 유예 동안 확정 보류
+        gw, clock = self.make_grace_gateway()
+        gw.handle_open("s1")
+        resp = gw.handle_close()
+        assert resp.state is DoorState.PENDING_CLOSE
+        assert resp.detail == "close_grace_pending"
+
+        # 유예 내(0.66s 뒤) late trigger 도착 → 정상 수용
+        clock.t = 0.66
+        gw.notify_enqueued(1)
+        gw.record_trigger(removal("s1", 1, 0.7, cola))
+        gw.notify_processed(1)
+        # 트리거 도착 시점부터 유예 리셋 — 아직 확정 금지
+        clock.t = 2.0
+        assert gw.poll().state is DoorState.PENDING_CLOSE
+        # 마지막 트리거 도착 + 유예 경과 → 확정, late trigger 매출 포함
+        clock.t = 0.66 + 3.0
+        resp = gw.poll()
+        assert resp.state is DoorState.FINALIZED
+        assert resp.payload.total_price == 1500  # rejected 매출 누락 없음
+
+    def test_grace_elapsed_without_late_trigger_finalizes_empty(self):
+        gw, clock = self.make_grace_gateway()
+        gw.handle_open("s1")
+        assert gw.handle_close().detail == "close_grace_pending"
+        clock.t = 3.0  # 유예 경과, late trigger 없음 → 0상품 정상 확정
+        resp = gw.poll()
+        assert resp.state is DoorState.FINALIZED
+        assert resp.payload.product_count == 0
+
+    def test_seq_watermark_skips_grace(self, cola):
+        # D2 워터마크가 있으면 인과 신호가 완결 — 시간 유예 불필요, 즉시 확정
+        gw, _ = self.make_grace_gateway()
+        gw.handle_open("s1")
+        gw.notify_enqueued(1)
+        gw.record_trigger(removal("s1", 1, 0.5, cola))
+        gw.notify_processed(1)
+        gw.barrier.note_seq(1, 2)
+        resp = gw.handle_close(seq_watermark={1: 2})
+        assert resp.state is DoorState.FINALIZED  # 유예 없이 즉시

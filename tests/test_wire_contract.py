@@ -8,6 +8,7 @@ fastapi가 없는 환경에서는 test_adapters.py와 동일하게 skip한다.
 import pytest
 from test_service import FakeClock, FakeDetector, moving_frames, samples
 
+from crk_model.core.config import Settings
 from crk_model.core.profiles import REFRIGERATOR
 from crk_model.service import ModelService
 
@@ -31,7 +32,10 @@ def client_and_service():
     testclient = pytest.importorskip("fastapi.testclient")
     from crk_model.adapters.http_app import create_app
 
-    svc = ModelService(FakeDetector(), profiles={1: REFRIGERATOR}, clock=FakeClock())
+    svc = ModelService(
+        FakeDetector(), profiles={1: REFRIGERATOR}, clock=FakeClock(),
+        settings=Settings(close_grace_s=0.0),
+    )
     # 디코드 주입(cv2 없이 계약 검증) — 기본으로 비디오 경로 검증이 꺼진다.
     app = create_app(svc, decode=lambda paths: {cam: moving_frames(8) for cam in paths})
     return testclient.TestClient(app), svc
@@ -85,7 +89,10 @@ class TestVideoFileNotFound:
         testclient = pytest.importorskip("fastapi.testclient")
         from crk_model.adapters.http_app import create_app
 
-        svc = ModelService(FakeDetector(), profiles={1: REFRIGERATOR}, clock=FakeClock())
+        svc = ModelService(
+        FakeDetector(), profiles={1: REFRIGERATOR}, clock=FakeClock(),
+        settings=Settings(close_grace_s=0.0),
+    )
         # decode 주입 없이 validate_video_paths=True를 명시 — 실 파일 검사 경로를 검증.
         app = create_app(svc, validate_video_paths=True)
         client = testclient.TestClient(app)

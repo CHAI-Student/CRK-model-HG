@@ -473,3 +473,35 @@
 
 - 테스트: `python -m pytest -q` → 182 passed. 스모크로 원본 동형 응답 확인.
   실기 재검증 대기 (결제 연동).
+
+---
+
+## 2026-07-09 CLOSE가 카메라 업로드보다 빨라 0원 확정 + late trigger rejected (GitHub issue #8)
+
+- 증상: 만두 2개 취출 후 문 닫음 — CLOSE 도착 시점(18:32:24.358)에 트리거가
+  아직 없어(queue_pending=0) 배리어가 자명하게 충족 → 0원(complete_no_products)
+  즉시 확정. 0.66초 뒤 /trigger 도착, 추론은 성공(만두×2, -434.4g)했으나
+  `event rejected (session already finalized)` — 7,400원 매출 누락.
+
+- 원인: 인과 배리어(I17)는 "도착한" 트리거만 셀 수 있다 — 문 닫힘 시점에
+  카메라가 아직 AVI를 기록/업로드 중이면 그 트리거는 배리어에 보이지 않는다.
+  원본은 정확히 이 레이스를 `close_initial_wait_seconds=3.0`(첫 CLOSE 후 시간
+  대기)으로 방어했는데, 우리 재설계는 고정 대기를 카메라 seq 워터마크(D2,
+  I17 ③)로 대체하는 전제로 제거했다. seq는 펌웨어 미배포(P5) 상태라 방어가
+  없는 채로 "큐가 비면 즉시 확정"이 실기에서 그대로 발동한 것.
+
+- 해결방안: CLOSE 유예 창 복원 — 배리어가 충족돼도
+  `max(close_ts, 마지막 트리거 도착 시각) + close_grace_s`(기본 3.0,
+  `MODEL__CLOSE__GRACE_S`)까지 확정을 보류하고 `close_grace_pending`으로 응답.
+  유예 내 도착한 late trigger는 배리어를 다시 열어 정상 수용된다.
+  seq_watermark가 온 CLOSE는 인과 신호가 완결이므로 유예 생략(즉시 확정).
+  Node 폴링이 ~10s 주기이므로 체감 지연은 다음 폴링 1회 수준(원본과 동일).
+
+- 관련 파일: `crk_model/gateway/state_machine.py`(close_grace_s, _last_enqueue_ts,
+  _watermark_set), `crk_model/core/config.py`, `crk_model/service/model_service.py`,
+  `.env.example`, `README.md`, `tests/test_gateway.py`(TestCloseGrace 3건 —
+  실측 0.66s 타이밍 재현 포함), 기존 테스트 헬퍼들은 close_grace_s=0으로 고정
+  (유예는 전용 테스트에서만 검증).
+
+- 테스트: `python -m pytest -q` → 185 passed. 스모크: CLOSE 선도착 → 유예 →
+  late trigger 수용 → 3,700원 정상 확정. 실기 재검증 대기.

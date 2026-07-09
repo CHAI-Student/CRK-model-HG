@@ -84,12 +84,14 @@ def trigger_payload(zone=1, n_frames=8, seq=0):
 
 
 def make_service(detector=None, clock=None, journal=None, settings=None):
+    # close_grace_s=0: CLOSE 유예 창은 test_gateway 전용 테스트에서 검증 —
+    # FakeClock(t=0) 기반 흐름 테스트는 즉시 확정으로 단순화한다.
     return ModelService(
         detector or FakeDetector(),
         profiles={1: REFRIGERATOR},
         clock=clock or FakeClock(),
         journal=journal,
-        settings=settings,
+        settings=settings if settings is not None else Settings(close_grace_s=0.0),
     )
 
 
@@ -98,7 +100,7 @@ def make_service(detector=None, clock=None, journal=None, settings=None):
 # ---------------------------------------------------------------------------
 class TestOutcomesBound:
     def test_outcomes_capped_at_keep(self, cola):
-        settings = Settings(outcomes_keep=3)
+        settings = Settings(outcomes_keep=3, close_grace_s=0.0)
         svc = make_service(settings=settings)
         svc.handle_multi_zone(open_payload(cola))
         for i in range(5):
@@ -126,7 +128,7 @@ class TestOutcomesBound:
 # ---------------------------------------------------------------------------
 class TestLedgerPrune:
     def test_old_session_pruned_current_and_prev_kept(self, cola):
-        settings = Settings(keep_sessions=2)
+        settings = Settings(keep_sessions=2, close_grace_s=0.0)
         svc = make_service(settings=settings)
 
         session_ids = []
@@ -146,7 +148,7 @@ class TestLedgerPrune:
         assert prev in svc._recent_session_ids
 
     def test_prune_never_removes_active_session(self, cola):
-        settings = Settings(keep_sessions=1)
+        settings = Settings(keep_sessions=1, close_grace_s=0.0)
         svc = make_service(settings=settings)
         svc.handle_multi_zone(open_payload(cola))
         svc.handle_trigger(trigger_payload())
@@ -159,7 +161,7 @@ class TestLedgerPrune:
     def test_i11_close_repoll_after_prune_stable(self, cola):
         """직전 세션 CLOSE 재폴링이 새 OPEN 직후 섞여 들어와도(K=4 기본값)
         동일 결과를 내야 한다 — prune이 settler의 멱등 캐시를 지우면 안 됨."""
-        settings = Settings(keep_sessions=4)
+        settings = Settings(keep_sessions=4, close_grace_s=0.0)
         svc = make_service(settings=settings)
 
         svc.handle_multi_zone(open_payload(cola))
@@ -379,7 +381,7 @@ class TestCabinetTypeDefaultProfile:
     COMPLETE를 내 회귀를 놓친다."""
 
     def test_freezer_cabinet_type_suppresses_weight_only_without_zone_override(self, cola):
-        settings = Settings(cabinet_type="freezer")
+        settings = Settings(cabinet_type="freezer", close_grace_s=0.0)
         svc = ModelService(
             FakeDetector(detections=[]),  # vision 후보 0 → no_candidate_fallback 경로
             clock=FakeClock(),
@@ -395,7 +397,7 @@ class TestCabinetTypeDefaultProfile:
 
     def test_refrigerated_default_keeps_weight_only(self, cola):
         # 회귀 방지: 기본값(refrigerated)에서는 기존처럼 weight_only가 유지된다.
-        settings = Settings(cabinet_type="refrigerated")
+        settings = Settings(cabinet_type="refrigerated", close_grace_s=0.0)
         svc = ModelService(
             FakeDetector(detections=[]),
             clock=FakeClock(),
@@ -416,7 +418,7 @@ class TestCabinetTypeDefaultProfile:
         REFRIGERATOR(±3g)로 남아 있으면 반품 미매칭 → 콜라 1개가 그대로
         청구된다 (net_delta 교정도 cola 100g > excess+tol=93g라 불가) —
         이 delta는 정확히 폴백 프로파일 차이만 가른다."""
-        settings = Settings(cabinet_type="freezer")
+        settings = Settings(cabinet_type="freezer", close_grace_s=0.0)
         svc = ModelService(
             FakeDetector(),  # class_id=1(콜라) 검출 → freezer_vision_first 판정
             clock=FakeClock(),
@@ -480,7 +482,9 @@ class TestVisionTuningWiring:
         # 진입 컷 0.9로 올리면 FakeDetector(conf 0.8) 검출이 투표에 못 들어가
         # vision 후보 0 → (냉장 기본) weight_only로 빠진다 — env가 실제로
         # 파이프라인 동작을 바꾸는지 E2E로 검증.
-        settings = Settings(top_confidence_threshold=0.9, side_confidence_threshold=0.9)
+        settings = Settings(
+            top_confidence_threshold=0.9, side_confidence_threshold=0.9, close_grace_s=0.0
+        )
         svc = make_service(settings=settings)
         svc.handle_multi_zone(open_payload(cola))
         svc.handle_trigger(trigger_payload())

@@ -119,6 +119,13 @@ class MultiZoneGateway:
         clock: Callable[[], float] = time.monotonic,
         close_timeout_s: float = 10.0,  # I17: 상한 타임아웃 (정상 경로 아님)
         worker_stall_timeout_s: float = 120.0,  # queue_pending 전용 상한 (처리 지연 ≠ 유실)
+        close_grace_s: float = 3.0,
+        # CLOSE 유예 창 (issue #8, 원본 close_initial_wait_seconds=3.0 복원).
+        # 인과 배리어(I17)는 "도착한" 트리거만 셀 수 있다 — 문 닫힘 시점에
+        # 카메라가 아직 AVI를 쓰고 있으면(실측: CLOSE 0.66s 후 /trigger 도착)
+        # 배리어가 자명하게 충족되어 0원 확정 + late trigger rejected = 매출
+        # 누락. 카메라 seq 워터마크(D2/I17 ③)가 배포되기 전까지(P5)는 이
+        # 시간 유예가 유일한 방어다. seq_watermark가 오면 그쪽이 우선한다.
         on_finalize: Callable[[str, DoorState, FinalizedSettlement], None] | None = None,
         default_profile: SensorProfile = REFRIGERATOR,
         # zone이 profiles dict에 없을 때의 폴백 프로파일 (cabinet_type 이식) —
@@ -132,6 +139,7 @@ class MultiZoneGateway:
         self._clock = clock
         self._close_timeout = close_timeout_s
         self._stall_timeout = max(worker_stall_timeout_s, close_timeout_s)
+        self._close_grace = close_grace_s
         # 세션 아카이브 훅 (issue #6): FINALIZED/ERROR로 "최초" 전이하는 시점에
         # 정확히 1회 호출된다 (재폴링 시 반복 안 됨 — I11과 동일한 멱등 요구).
         # None이면 무동작(하위호환 — 기존 테스트는 콜백 없이 게이트웨이 생성).
@@ -141,6 +149,8 @@ class MultiZoneGateway:
         self.barrier = CausalBarrier()
         self._close_ts: float | None = None
         self._progress_ts: float | None = None  # 마지막 트리거 처리 완료 시각
+        self._last_enqueue_ts: float | None = None  # CLOSE 유예 기준점 (issue #8)
+        self._watermark_set = False  # D2 seq 워터마크 수신 여부 — 있으면 유예 생략
 
     # -- OPEN --
     def handle_open(self, session_id: str) -> GatewayResponse:
@@ -148,12 +158,14 @@ class MultiZoneGateway:
             self.session_id = session_id
             self.barrier = CausalBarrier()  # 세션당 새 배리어
             self._close_ts = None
+            self._last_enqueue_ts = None
         self.state = DoorState.ACTIVE
         return GatewayResponse(DoorState.ACTIVE, self.interim())
 
     # -- 트리거 수명주기 → 배리어 공급 (I17 ①) --
     def notify_enqueued(self, zone: int) -> None:
         self.barrier.notify_enqueued(zone)
+        self._last_enqueue_ts = self._clock()  # 유예 창 리셋 (원본 last_trigger_at 대응)
 
     def notify_processed(self, zone: int) -> None:
         self.barrier.notify_processed(zone)
@@ -166,6 +178,7 @@ class MultiZoneGateway:
     def handle_close(self, seq_watermark: dict[int, int] | None = None) -> GatewayResponse:
         self.state = DoorState.PENDING_CLOSE
         self._close_ts = self._clock()
+        self._watermark_set = bool(seq_watermark)
         if seq_watermark:  # D2: 카메라 seq 도입 시에만 (I17 ③)
             self.barrier.set_close_watermark(seq_watermark)
         return self.poll()
@@ -185,6 +198,22 @@ class MultiZoneGateway:
 
         status = self.barrier.status()
         if status.satisfied:
+            # issue #8: 배리어 충족이 "카메라가 더 보낼 게 없다"를 뜻하진 않는다 —
+            # 문 닫힘 시점에 카메라가 아직 AVI를 쓰고 있으면 그 트리거는 배리어에
+            # 보이지 않는다 (실측: CLOSE 0.66s 후 /trigger 도착 → 0원 확정 +
+            # rejected = 매출 누락). seq 워터마크(D2)가 없는 배포에서는 CLOSE·
+            # 마지막 트리거 도착 이후 close_grace_s 동안 확정을 보류해 late
+            # trigger에게 도착할 시간을 준다 (원본 close_initial_wait 3.0s 복원).
+            # 워터마크가 있으면 인과 신호가 완결이므로 유예 없이 즉시 확정.
+            if not self._watermark_set and self._close_grace > 0:
+                assert self._close_ts is not None
+                anchor = self._close_ts
+                if self._last_enqueue_ts is not None:
+                    anchor = max(anchor, self._last_enqueue_ts)
+                if self._clock() - anchor < self._close_grace:
+                    return GatewayResponse(
+                        DoorState.PENDING_CLOSE, self.interim(), "close_grace_pending"
+                    )
             settlement = self._settle()
             if settlement.blocked:
                 self.state = DoorState.ERROR  # I13: 무성 확정 금지
