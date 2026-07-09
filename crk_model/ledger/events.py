@@ -4,7 +4,7 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import dataclass, field
 
-from crk_model.core.types import JudgmentResult, WeightSegment
+from crk_model.core.types import JudgmentResult, VisionCandidate, WeightSegment
 
 
 @dataclass(frozen=True)
@@ -17,6 +17,12 @@ class TriggerEvent:
     judgment: JudgmentResult
     seq: int | None = None  # D2: 카메라 시퀀스 (선택 — 없어도 동작)
     status: str = "ok"  # "ok" | "error" (I1: 처리 실패는 에러로 전파)
+    # 진단 강화 (issue #6): 투표 앙상블 최종 후보 전체(채택 안 된 것 포함).
+    # 오판정 사후 분석의 핵심 — 어떤 후보들이 경쟁했는지 남긴다.
+    vision_candidates: tuple[VisionCandidate, ...] = ()
+    # 원본 YAML의 video_paths 대응 — 오판정 시 해당 AVI를 즉시 찾는 용도.
+    # frozen dataclass라 dict 대신 hashable한 (camera, path) 튜플로 보관한다.
+    video_paths: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass

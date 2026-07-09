@@ -25,6 +25,7 @@ from crk_model.core.types import (
     JudgmentResult,
     JudgmentStatus,
     ProductCount,
+    VisionCandidate,
     WeightSegment,
 )
 from crk_model.ledger.events import TriggerEvent
@@ -49,6 +50,9 @@ def event_to_dict(e: TriggerEvent) -> dict:
         },
         "seq": e.seq,
         "status": e.status,
+        # 진단 강화 (issue #6): G2 코퍼스 재생의 입력이 되므로 저널에도 남긴다.
+        "vision_candidates": [asdict(c) for c in e.vision_candidates],
+        "video_paths": {k: v for k, v in e.video_paths},
     }
 
 
@@ -73,6 +77,11 @@ def event_from_dict(d: dict) -> TriggerEvent:
         judgment=judgment,
         seq=d["seq"],
         status=d["status"],
+        # dict.get 기본값 — 기존 저널 라인(신규 필드 도입 전) 파싱 호환.
+        vision_candidates=tuple(
+            VisionCandidate(**c) for c in d.get("vision_candidates", ())
+        ),
+        video_paths=tuple(d.get("video_paths", {}).items()),
     )
 
 

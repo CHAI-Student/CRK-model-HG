@@ -27,6 +27,7 @@ from crk_model.gateway.state_machine import (
     build_payment_payload,
 )
 from crk_model.ingest.idempotency import IdempotencyRegistry
+from crk_model.ledger.archive import SessionArchive
 from crk_model.ledger.events import EventLog
 from crk_model.ledger.journal import EventJournal
 from crk_model.ledger.settler import CloseSettler
@@ -36,6 +37,7 @@ from crk_model.service.snapshot import ActiveProductStore
 from crk_model.service.worker import SerialTriggerWorker
 
 logger = logging.getLogger(__name__)
+ops_logger = logging.getLogger("crk_model.ops")
 
 
 def _profiles_from_settings(settings: Settings) -> dict[int, SensorProfile]:
@@ -53,6 +55,7 @@ class ModelService:
         settings: Settings | None = None,
         profiles: Mapping[int, SensorProfile] | None = None,
         journal: EventJournal | None = None,
+        archive: SessionArchive | None = None,
         clock: Callable[[], float] = time.monotonic,
         startup_probe_frame=None,
     ):
@@ -67,6 +70,13 @@ class ModelService:
         self.snapshots = ActiveProductStore()
         self.event_log = EventLog()
         self.settler = CloseSettler(self.settings.error_policy)
+        # journal과 동일한 하위호환 원칙: archive를 명시적으로 주지 않으면
+        # 비활성(SessionArchive("")) — 기본 생성자로 settings.session_archive_dir
+        # 를 자동 활성화하면 테스트/임시 ModelService가 실제 저장소(data/sessions)
+        # 에 부작용을 남기게 된다. 운영 진입점(adapters/serve.py)이 Settings.
+        # from_env() 값으로 명시적으로 SessionArchive를 만들어 주입한다.
+        self.archive = archive if archive is not None else SessionArchive("")
+        self._clock = clock
         self.gateway = MultiZoneGateway(
             self.settler,
             self.event_log,
@@ -74,6 +84,7 @@ class ModelService:
             clock=clock,
             close_timeout_s=self.settings.close_timeout_s,
             worker_stall_timeout_s=self.settings.worker_stall_timeout_s,
+            on_finalize=self._on_session_finalize,
         )
         self.pipeline = TriggerPipeline(detector, self._profiles, self.snapshots)
         # 동시성: FastAPI sync 엔드포인트(threadpool)와 워커 스레드가 게이트웨이·
@@ -110,6 +121,7 @@ class ModelService:
             loadcells=payload.get("loadcells", ()),
             ts=payload.get("ts", 0.0),
             seq=payload.get("seq"),
+            video_paths=payload.get("video_paths") or {},
         )
         with self._lock:
             # session_id 읽기 + note_seq(배리어 갱신) + submit(enqueue)을 하나의
@@ -183,6 +195,37 @@ class ModelService:
         with self._lock:
             resp = self.gateway.poll()
         return self._to_response(resp)
+
+    def _on_session_finalize(self, session_id, state: DoorState, settlement) -> None:
+        """세션 아카이브 훅 (issue #6) — gateway가 FINALIZED/ERROR로 "최초"
+        전이하는 시점에 정확히 1회 호출된다 (state_machine.poll() 참고).
+        호출 시점은 이미 self._lock 보유 구간(handle_multi_zone) 내부이므로
+        RLock 재진입으로 안전하게 EventLog/worker.outcomes를 조회할 수 있다.
+
+        저장 실패는 SessionArchive.save() 내부에서 흡수하므로(부가 기능 원칙)
+        여기서 추가 방어는 하지 않는다."""
+        if session_id is None:
+            return
+        events = self.event_log.events_for(session_id)
+        outcomes = self.worker.outcomes_for(session_id)
+        traces = {o.event: o.trace for o in outcomes}
+        processing_times_ms = {o.event: o.processing_time_ms for o in outcomes}
+        status = "finalized" if state is DoorState.FINALIZED else "error"
+        error_detail = "" if settlement is None else settlement.block_reason
+        if state is DoorState.ERROR and settlement is None:
+            error_detail = "barrier_timeout"
+        path = self.archive.save(
+            session_id,
+            status,
+            events,
+            settlement,
+            traces,
+            processing_times_ms,
+            error_detail=error_detail,
+            finalized_at=self._clock(),
+        )
+        if path is not None:
+            ops_logger.info("[OPS][SESSION_ARCHIVE] path=%s", path)
 
     def _prune_ledger(self, new_session_id: str) -> None:
         """무한 성장 방지 (24h+ soak): 새 세션 OPEN 시점에 EventLog/settler의

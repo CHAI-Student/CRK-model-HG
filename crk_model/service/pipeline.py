@@ -39,6 +39,9 @@ class TriggerRequest:
     loadcells: Sequence[LoadcellSample]
     ts: float
     seq: int | None = None  # D2: 카메라 시퀀스 (선택)
+    # 진단 강화 (issue #6): 카메라별 원본 AVI 경로 — 오판정 시 즉시 재생 확인용.
+    # model_service.handle_trigger가 payload["video_paths"]를 그대로 실어온다.
+    video_paths: Mapping[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -54,6 +57,9 @@ class TriggerTrace:
 class TriggerOutcome:
     event: TriggerEvent
     trace: TriggerTrace
+    # 세션 아카이브(issue #6) 진단용 — pipeline.process() 자체는 0.0으로 두고,
+    # worker.drain()이 실측 처리시간으로 채운다(dataclasses.replace, frozen이라).
+    processing_time_ms: float = 0.0
 
 
 class TriggerPipeline:
@@ -85,7 +91,15 @@ class TriggerPipeline:
                 JudgmentStatus.ERROR, reason=f"processing_error:{type(exc).__name__}"
             )
             event = TriggerEvent(
-                session_id, req.zone, req.ts, 0.0, (), judgment, req.seq, status="error"
+                session_id,
+                req.zone,
+                req.ts,
+                0.0,
+                (),
+                judgment,
+                req.seq,
+                status="error",
+                video_paths=tuple(req.video_paths.items()),
             )
             return TriggerOutcome(event, TriggerTrace(reason_codes=["processing_error"]))
 
@@ -135,7 +149,9 @@ class TriggerPipeline:
             vision_only=vision_only,
         )
         judgment = self._router.judge(ctx)
-        return self._outcome(session_id, req, delta, analysis.segments, judgment, trace)
+        return self._outcome(
+            session_id, req, delta, analysis.segments, judgment, trace, candidates
+        )
 
     def _run_vision(
         self,
@@ -191,8 +207,18 @@ class TriggerPipeline:
         return voting.combine()
 
     @staticmethod
-    def _outcome(session_id, req, delta, segments, judgment, trace) -> TriggerOutcome:
+    def _outcome(
+        session_id, req, delta, segments, judgment, trace, candidates=()
+    ) -> TriggerOutcome:
         event = TriggerEvent(
-            session_id, req.zone, req.ts, delta, tuple(segments), judgment, req.seq
+            session_id,
+            req.zone,
+            req.ts,
+            delta,
+            tuple(segments),
+            judgment,
+            req.seq,
+            vision_candidates=tuple(candidates),
+            video_paths=tuple(req.video_paths.items()),
         )
         return TriggerOutcome(event, trace)

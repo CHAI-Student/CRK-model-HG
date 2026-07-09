@@ -48,6 +48,9 @@ class Settings:
     keep_sessions: int = 4
     # 무한 성장 방지: EventJournal 일자별 로테이션 파일 보존기간(일)
     journal_retention_days: int = 14
+    # 세션 YAML 아카이브 (issue #6: 오판정 사후 분석용) — 빈 문자열이면 비활성.
+    session_archive_dir: str = "data/sessions"
+    session_archive_retention_days: int = 14
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -62,4 +65,8 @@ class Settings:
             outcomes_keep=_env_int("MODEL__TRIGGER__OUTCOMES_KEEP", 256),
             keep_sessions=_env_int("MODEL__LEDGER__KEEP_SESSIONS", 4),
             journal_retention_days=_env_int("MODEL__LEDGER__JOURNAL_RETENTION_DAYS", 14),
+            session_archive_dir=os.environ.get("MODEL__SESSION__ARCHIVE_DIR", "data/sessions"),
+            session_archive_retention_days=_env_int(
+                "MODEL__SESSION__ARCHIVE_RETENTION_DAYS", 14
+            ),
         )

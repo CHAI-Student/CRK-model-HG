@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
 
@@ -46,18 +46,66 @@ def _format_products(zb) -> str:
     return ", ".join(f"{pc.product.name}x{pc.count}" for pc in zb.products)
 
 
-def _log_ops_close(session_id: str, settlement: FinalizedSettlement) -> None:
-    """[OPS][CLOSE] 존별 확정 요약 로그 (세션당 1회, 호출측이 보장)."""
+def _format_judgments(events: Sequence[TriggerEvent]) -> str:
+    """issue #6 진단 보강: 존별 트리거의 전략·사유·신뢰도 요약.
+    `judgments=strategy:reason(conf=0.62)` 형태를 트리거별로 쉼표 연결."""
+    parts = []
+    for e in events:
+        j = e.judgment
+        strategy = j.strategy or "-"
+        reason = j.reason or "-"
+        parts.append(f"{strategy}:{reason}(conf={j.confidence:.2f})")
+    return ", ".join(parts)
+
+
+def _format_runner_up(events: Sequence[TriggerEvent]) -> str:
+    """issue #6 진단 보강: 채택되지 않은 톱 경쟁 후보 1~2개 — 오판정 즉시 의심
+    가능하게. 채택된 class_id(judgment.products)를 제외한 vision_candidates 중
+    vote_count 상위 항목을 고른다."""
+    parts = []
+    for e in events:
+        adopted_ids = {pc.product.class_id for pc in e.judgment.products}
+        runner_ups = sorted(
+            (c for c in e.vision_candidates if c.class_id not in adopted_ids),
+            key=lambda c: c.vote_count,
+            reverse=True,
+        )[:2]
+        for c in runner_ups:
+            parts.append(
+                f"class{c.class_id}(conf={c.confidence:.2f},votes={c.vote_count})"
+            )
+    return ", ".join(parts)
+
+
+def _log_ops_close(
+    session_id: str,
+    settlement: FinalizedSettlement,
+    events: Sequence[TriggerEvent] = (),
+) -> None:
+    """[OPS][CLOSE] 존별 확정 요약 로그 (세션당 1회, 호출측이 보장).
+
+    issue #6 실기 피드백("현재 [OPS][CLOSE]는 별로 도움이 안 된다") 대응:
+    존별 줄에 판정 근거(judgments)와 채택되지 않은 톱 경쟁 후보(runner_up)를
+    추가해 오판정을 즉시 의심할 수 있게 한다."""
     total_weight_delta = sum(zb.weight_delta for zb in settlement.zones)
     ops_logger.info(
         "[OPS][CLOSE] session_id=%s total_weight_delta=%+.1fg total_products=%d total_price=%d",
         session_id, total_weight_delta, settlement.product_count, settlement.total_price,
     )
+    events_by_zone: dict[int, list[TriggerEvent]] = {}
+    for e in events:
+        events_by_zone.setdefault(e.zone, []).append(e)
     for zb in settlement.zones:
         note_part = f" notes={', '.join(zb.notes)}" if zb.notes else ""
+        zone_events = events_by_zone.get(zb.zone, ())
+        judgments = _format_judgments(zone_events)
+        runner_up = _format_runner_up(zone_events)
+        judgments_part = f" judgments={judgments}" if judgments else ""
+        runner_up_part = f" runner_up={runner_up}" if runner_up else ""
         ops_logger.info(
-            "[OPS][CLOSE] zone=%d weight_delta=%+.1fg products=%s triggers=%d%s",
-            zb.zone, zb.weight_delta, _format_products(zb), zb.trigger_count, note_part,
+            "[OPS][CLOSE] zone=%d weight_delta=%+.1fg products=%s triggers=%d%s%s%s",
+            zb.zone, zb.weight_delta, _format_products(zb), zb.trigger_count,
+            note_part, judgments_part, runner_up_part,
         )
 
 
@@ -71,6 +119,7 @@ class MultiZoneGateway:
         clock: Callable[[], float] = time.monotonic,
         close_timeout_s: float = 10.0,  # I17: 상한 타임아웃 (정상 경로 아님)
         worker_stall_timeout_s: float = 120.0,  # queue_pending 전용 상한 (처리 지연 ≠ 유실)
+        on_finalize: Callable[[str, DoorState, FinalizedSettlement], None] | None = None,
     ):
         self._settler = settler
         self._event_log = event_log
@@ -78,6 +127,10 @@ class MultiZoneGateway:
         self._clock = clock
         self._close_timeout = close_timeout_s
         self._stall_timeout = max(worker_stall_timeout_s, close_timeout_s)
+        # 세션 아카이브 훅 (issue #6): FINALIZED/ERROR로 "최초" 전이하는 시점에
+        # 정확히 1회 호출된다 (재폴링 시 반복 안 됨 — I11과 동일한 멱등 요구).
+        # None이면 무동작(하위호환 — 기존 테스트는 콜백 없이 게이트웨이 생성).
+        self._on_finalize = on_finalize
         self.state = DoorState.IDLE
         self.session_id: str | None = None
         self.barrier = CausalBarrier()
@@ -137,6 +190,7 @@ class MultiZoneGateway:
                     "[OPS][CLOSE_ERROR] session_id=%s reason=%s",
                     self.session_id, settlement.block_reason,
                 )
+                self._notify_finalize(DoorState.ERROR, settlement)
                 return GatewayResponse(DoorState.ERROR, settlement, settlement.block_reason)
             self.state = DoorState.FINALIZED
             logger.info(
@@ -144,7 +198,10 @@ class MultiZoneGateway:
                 self.session_id, settlement.total_price,
                 settlement.product_count, list(settlement.notes),
             )
-            _log_ops_close(self.session_id, settlement)
+            _log_ops_close(
+                self.session_id, settlement, self._event_log.events_for(self.session_id)
+            )
+            self._notify_finalize(DoorState.FINALIZED, settlement)
             return GatewayResponse(DoorState.FINALIZED, settlement)
 
         assert self._close_ts is not None
@@ -171,10 +228,21 @@ class MultiZoneGateway:
                 "[OPS][CLOSE_ERROR] session_id=%s reason=%s",
                 self.session_id, barrier_reason,
             )
+            self._notify_finalize(DoorState.ERROR, None)
             return GatewayResponse(DoorState.ERROR, None, barrier_reason)
         return GatewayResponse(
             DoorState.PENDING_CLOSE, self.interim(), "barrier_pending:" + ";".join(status.pending)
         )
+
+    def _notify_finalize(
+        self, state: DoorState, settlement: FinalizedSettlement | None
+    ) -> None:
+        """세션 아카이브 훅 호출 (issue #6) — 실패해도 게이트웨이 상태 전이는
+        이미 완료된 뒤이므로 서비스 경로에 영향 없음. 콜백 자체의 예외 안전은
+        호출측(ModelService/SessionArchive)이 책임진다 — 여기서는 콜백이 없는
+        경우만 방어한다."""
+        if self._on_finalize is not None:
+            self._on_finalize(self.session_id, state, settlement)
 
     def interim(self) -> InterimSummary:
         assert self.session_id is not None

@@ -39,6 +39,7 @@ def main() -> None:
     from crk_model.adapters.http_app import create_app, start_worker_thread
     from crk_model.adapters.yolo_detector import UltralyticsEngineDetector
     from crk_model.core.config import Settings
+    from crk_model.ledger.archive import SessionArchive
     from crk_model.ledger.journal import EventJournal
     from crk_model.service.model_service import ModelService
 
@@ -49,10 +50,17 @@ def main() -> None:
     detector = UltralyticsEngineDetector(model_path)
 
     journal_path = Path(os.environ.get("MODEL__LEDGER__JOURNAL_PATH", "logs/events.jsonl"))
+    # issue #6: 세션 확정(FINALIZED/ERROR) 시 YAML 아카이브 — MODEL__SESSION__
+    # ARCHIVE_DIR=""로 끌 수 있음 (SessionArchive.enabled가 False가 되어 save가 무동작).
+    archive = SessionArchive(
+        settings.session_archive_dir,
+        retention_days=settings.session_archive_retention_days,
+    )
     service = ModelService(
         detector,
         settings=settings,
         journal=EventJournal(journal_path),
+        archive=archive,
         # 리뷰 #1: 엔진 로드 실패·CUDA 불가 시 여기서 즉시 죽는다 (무증상 기동 금지)
         startup_probe_frame=np.zeros((480, 480, 3), dtype=np.uint8),
     )
