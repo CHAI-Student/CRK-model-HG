@@ -51,6 +51,10 @@ class TriggerTrace:
     yolo_calls: int = 0
     early_terminated: bool = False
     reason_codes: list[str] = field(default_factory=list)
+    # issue #6 진단(work item 3): vision_candidates=[]인데 yolo_calls는 높은
+    # 케이스를 사후에 재구성하기 위한 클래스별/카메라별 요약
+    # ({"classes": VotingEnsemble.debug_summary(), "filtered_out_by_camera": {...}}).
+    vote_summary: dict = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -164,6 +168,7 @@ class TriggerPipeline:
         voting = VotingEnsemble()
         terminator = EarlyTerminator(profile, enabled=self._et_enabled)
         stopped = False
+        filtered_out: dict[str, int] = {}  # 진단(work item 3): 카메라별 필터 제거 개수
         for camera in CAMERAS:
             frames = req.frames.get(camera)
             if frames is None:
@@ -171,6 +176,7 @@ class TriggerPipeline:
             latch = HandLatch()  # 카메라별 래치 (hand-path는 카메라별, L3 계약과 동형)
             gate = MotionGate(profile, latch)
             frame_iter = iter(frames)
+            camera_filtered_out = 0
             try:
                 for frame in frame_iter:
                     if stopped:
@@ -179,9 +185,9 @@ class TriggerPipeline:
                     decision = gate.evaluate(getattr(frame, "gate_view", frame))
                     if not decision.infer:
                         continue
-                    detections = self._filters.apply(
-                        camera, list(self._detector.detect(getattr(frame, "full", frame)))
-                    )
+                    raw = list(self._detector.detect(getattr(frame, "full", frame)))
+                    detections = self._filters.apply(camera, raw)
+                    camera_filtered_out += len(raw) - len(detections)
                     trace.yolo_calls += 1
                     voting.add_frame(camera, detections)
                     latch.update_after_inference(any(d.is_hand for d in detections))
@@ -201,9 +207,14 @@ class TriggerPipeline:
                     closer()
             trace.processed_frames[camera] = gate.processed_frames
             trace.gate_skipped_frames[camera] = gate.gate_skipped_frames
+            filtered_out[camera] = camera_filtered_out
         trace.early_terminated = stopped
         if stopped:
             trace.reason_codes.append("early_terminated")
+        trace.vote_summary = {
+            "classes": voting.debug_summary(),
+            "filtered_out_by_camera": filtered_out,
+        }
         return voting.combine()
 
     @staticmethod

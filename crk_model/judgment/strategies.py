@@ -37,7 +37,12 @@ def enforce_full_delta_match(
 
 
 def _product_by_class(ctx: JudgmentContext) -> dict[int, ActiveProduct]:
-    return {p.class_id: p for p in ctx.active_products if p.stock_qty > 0}  # I5
+    # issue #6 결함 수정: class_id<=0은 hand(0) 또는 미매핑 센티널(-1) —
+    # 정체성 조회 딕셔너리에 절대 들어오면 안 된다(여러 미매핑 상품이 -1로
+    # 뭉쳐 하나로 충돌하는 것도 방지).
+    return {
+        p.class_id: p for p in ctx.active_products if p.stock_qty > 0 and p.class_id > 0
+    }  # I5
 
 
 class VisionOnlyStrategy:
@@ -258,6 +263,15 @@ class NoCandidateFallbackStrategy:
     → freezer는 여기서 품목 식별을 포기하고 loadcell_identity_suppressed로
     NO_DETECTION 반환 (원본 `_create_loadcell_identity_suppressed_result`).
     냉장고(weight_is_discriminative=True)는 기존 weight_only 그대로 유지.
+
+    issue #6 결함 수정 (오청구 재발 방지): weight_only는 더 이상 다품목 조합
+    탐색(StrictWeightMatcher.best, 최대 6개/3종)을 쓰지 않는다 — vision 증거가
+    전혀 없는 상태에서 다품목 조합이 우연히 무게 합을 맞추는 것은 사실상 우연의
+    일치이고, 이것이 issue #6 실제 오청구(2품목 우연 일치, confidence 0.3, 둘 다
+    오판)의 원인이었다. 원본 `judge_by_weight_only`/`_try_loadcell_nearest_single`
+    (engine/decision_engine.py)처럼 단일 품목 최근접 매칭만 시도하고, 두 개 이상의
+    품목이 허용오차 내에서 동시에 그럴듯하면(모호) 과금하지 않는다 — 과청구가
+    미청구보다 나쁘다는 fail-closed 방향(I13/D9)을 여기도 적용한다.
     """
 
     name = "no_candidate_fallback"
@@ -273,22 +287,34 @@ class NoCandidateFallbackStrategy:
             return JudgmentResult(
                 JudgmentStatus.NO_DETECTION, reason="loadcell_identity_suppressed"
             )
-        # weight_only: vision 필터 없이 전 재고 대상 (낮은 신뢰도)
-        pool = [p for p in ctx.active_products if p.stock_qty > 0]
-        # vision 후보가 없으므로 전 재고를 conf=0 후보로 취급 (무게만으로 탐색)
-        pseudo = tuple(VisionCandidate(p.class_id, 0.0, 0, 0.0) for p in pool)
-        best = self._matcher.best(
-            pseudo, ctx.delta_weight, pool, ctx.profile.tolerance_grams
-        )
-        if best is not None:
+        # weight_only: vision 필터 없이 전 재고 대상, 단일 품목 최근접 매칭만
+        # 시도한다(원본 _try_loadcell_nearest_single과 동일하게 count는 항상 1 —
+        # 동일 품목 n개 매칭은 same_product_count의 몫이며, 이 폴백은 vision 후보가
+        # 전혀 없을 때만 발동하므로 다품목 조합 탐색은 하지 않는다).
+        target = abs(ctx.delta_weight)
+        tol = ctx.profile.tolerance_grams
+        pool = [p for p in ctx.active_products if p.stock_qty > 0 and p.unit_weight > 0]
+        within_tolerance = [
+            (abs(target - p.unit_weight), p) for p in pool
+            if abs(target - p.unit_weight) <= tol
+        ]
+        if not within_tolerance:
             return JudgmentResult(
-                JudgmentStatus.COMPLETE,
-                best.products,
-                confidence=0.3,
-                reason="weight_only",
+                JudgmentStatus.NO_DETECTION, reason="no_candidates_forced_final"
             )
+        if len({p.product_id for _, p in within_tolerance}) >= 2:
+            # 모호: 허용오차 내에 서로 다른 품목이 2개 이상 그럴듯함 (원본의
+            # best/second-best 근접-동률 거부를 tolerance 창 스타일로 적용) —
+            # 과청구가 미청구보다 나쁘다(I13/D9) → 청구하지 않는다.
+            return JudgmentResult(
+                JudgmentStatus.NO_DETECTION, reason="weight_only_ambiguous"
+            )
+        _, p = within_tolerance[0]
         return JudgmentResult(
-            JudgmentStatus.NO_DETECTION, reason="no_candidates_forced_final"
+            JudgmentStatus.COMPLETE,
+            (ProductCount(p, 1),),
+            confidence=0.3,
+            reason="weight_only",
         )
 
 

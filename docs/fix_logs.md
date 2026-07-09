@@ -189,3 +189,43 @@
 
 - 테스트: `python -m pytest -q` → 145 passed, cv2 없는 macOS에서
   `--help`/`--list-devices` 동작 확인. Jetson 실기 재검증 대기.
+
+---
+
+## 2026-07-09 실기 오판정 — 상품 class 매핑 전멸 + weight_only 다품목 조합 과금 (GitHub issue #6)
+
+- 증상: 실기에서 두 존 모두 오과금 — zone4 만두 1개(정답)를 베이글+라라스윗으로,
+  zone5 베이글 1개(정답)를 요맘때+라라스윗으로 과금. 세션 아카이브 YAML로 확인:
+  두 트리거 모두 `vision_candidates: []`(yolo_calls 300+에도 최종 후보 0) →
+  `no_candidate_fallback/weight_only`(conf 0.3)가 무게 조합으로 판정.
+
+- 원인 (3중):
+  1. **상품→YOLO class 매핑 전멸 (확정)**: 아카이브에 상품 `class_id: 0`(hand
+     클래스!) 기록. 원본의 camelCase alias(`trainingIdx`/`yoloClassId`)와
+     엔진 class_names 기반 **이름 매핑**(manager.py yolo_name_to_id →
+     ActiveProductStore)이 어댑터 이식에서 누락 — 숫자 필드 3종만 보고 기본값 0.
+     전 상품이 class_id=0으로 붕괴해 vision 계열 전략이 구조적으로 매칭 불가,
+     모든 트리거가 weight_only로 추락.
+  2. **weight_only 다품목 조합 과금**: 원본 `judge_by_weight_only`는
+     nearest-single(단일 품목)이었는데 우리는 StrictWeightMatcher 조합 탐색을
+     그대로 써서, 우연히 합이 맞는 2품목 조합(140+87≈227 등)을 complete로 과금.
+  3. **무게 DB 불일치 (데이터, 코드 밖)**: 정답 상품의 공칭 무게와 실측 delta가
+     13~27g(10~15%) 차이 — 라벨 무게 vs 포장 포함 총중량. ±3g 톨러런스로는
+     정답이 매칭될 수 없는 상태에서 우연 조합만 통과. → 상품 DB unit_weight를
+     실측 기준으로 재등록 필요 (운영 이관).
+
+- 해결방안: ① 숫자 alias 전체 복원 + 이름 매핑(product_eng_name→name, 대소문자
+  무시) + unmapped는 0이 아닌 **-1**(hand 충돌 방지) + `_product_by_class`에서
+  `class_id <= 0` 제외 + OPEN 시 `mapped=n/total unmapped=[...]` 경고 로그.
+  ② weight_only를 단일 품목·유일 매칭으로 제한, 톨러런스 창에 2상품 이상이면
+  `weight_only_ambiguous`로 NO_DETECTION (오과금 < 매출 누락, D9 fail-closed).
+  ③ vision 후보 0의 원인(모델 미검출/필터 제거/투표 임계 미달) 규명용
+  `vote_summary`(클래스별 votes/ratio/conf/탈락 사유)를 trace→세션 아카이브에 기록.
+
+- 관련 파일: `crk_model/adapters/{http_app,serve,yolo_detector}.py`,
+  `crk_model/judgment/strategies.py`, `crk_model/perception/voting.py`,
+  `crk_model/service/{model_service,pipeline}.py`, `crk_model/ledger/archive.py`,
+  `tests/test_product_mapping.py`(신규), `tests/test_judgment.py`.
+
+- 테스트: `python -m pytest -q` → 165 passed. vision 후보 0 원인은 다음 실기
+  재현의 vote_summary로 확정 예정.

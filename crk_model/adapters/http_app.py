@@ -78,9 +78,57 @@ def _door_state(signal: Any) -> str | None:
     return None  # 그 외(실 session_id·null) → 폴링
 
 
-def _active_product_fields(p: Mapping[str, Any]) -> dict:
-    """Node 상품(product_idx/product_name/sale_price/...) → ActiveProduct 필드."""
+def _normalize_class_name(name: str) -> str:
+    """이름 매칭용 단순 정규화 — 공백 제거 + 대문자화 (대소문자 무시 exact match)."""
+    return name.strip().upper()
+
+
+def _resolve_class_id_by_name(
+    p: Mapping[str, Any], name_to_class: Mapping[str, int] | None
+) -> int | None:
+    """issue #6 결함 수정: 숫자 class_id가 없거나 0(=hand과 충돌)일 때, 상품명으로
+    YOLO class_id를 찾는다 (원본 active_product_store._find_yolo_class_id 대응).
+    우선순위: product_eng_name → product_name/productName/name.
+    """
+    if not name_to_class:
+        return None
+    lookup = {_normalize_class_name(k): v for k, v in name_to_class.items()}
+    for candidate in (
+        p.get("product_eng_name"),
+        p.get("product_name"),
+        p.get("productName"),
+        p.get("name"),
+    ):
+        if not candidate:
+            continue
+        cid = lookup.get(_normalize_class_name(str(candidate)))
+        if cid is not None:
+            return cid
+    return None
+
+
+def _active_product_fields(
+    p: Mapping[str, Any], name_to_class: Mapping[str, int] | None = None
+) -> dict:
+    """Node 상품(product_idx/product_name/sale_price/...) → ActiveProduct 필드.
+
+    issue #6 결함 수정: class_id는 숫자 별칭(camelCase 포함) → 이름 기반 매칭 순으로
+    해석한다. 어느 경로로도 못 찾으면 0(hand 클래스와 충돌)이 아니라 -1(미매핑
+    센티널)을 쓴다 — 0을 쓰면 매핑 실패 상품이 손(hand) 클래스로 조용히 둔갑해
+    오청구로 이어진다(issue #6 실사고 원인).
+    """
     stock = p.get("stock_qty")
+    numeric = (
+        p.get("yolo_class_id")
+        or p.get("yoloClassId")
+        or p.get("trainingidx")
+        or p.get("training_idx")
+        or p.get("trainingIdx")
+    )
+    class_id = int(numeric) if numeric else 0
+    if class_id == 0:
+        by_name = _resolve_class_id_by_name(p, name_to_class)
+        class_id = by_name if by_name is not None else -1
     return {
         "product_id": str(p.get("product_idx") or p.get("product_id") or ""),
         "name": (
@@ -90,19 +138,14 @@ def _active_product_fields(p: Mapping[str, Any]) -> dict:
             or p.get("name")
             or ""
         ),
-        "class_id": int(
-            p.get("yolo_class_id")
-            or p.get("trainingidx")
-            or p.get("training_idx")
-            or 0
-        ),
+        "class_id": class_id,
         "unit_weight": _to_float(p.get("product_weight") or p.get("weight") or 0),
         "unit_price": int(_to_float(p.get("sale_price") or p.get("price") or 0)),
         "stock_qty": int(stock) if stock is not None else 999,
     }
 
 
-def _normalize_multi_zone(body: Any) -> dict:
+def _normalize_multi_zone(body: Any, name_to_class: Mapping[str, int] | None = None) -> dict:
     """wire(dict 또는 Node 배열) → 도메인 계약 {state, active_products, seq_watermark}."""
     if isinstance(body, list):
         products, signal, seq_watermark = body, None, None
@@ -114,7 +157,7 @@ def _normalize_multi_zone(body: Any) -> dict:
         products, signal, seq_watermark = [], None, None
     return {
         "state": _door_state(signal),
-        "active_products": [_active_product_fields(p) for p in products],
+        "active_products": [_active_product_fields(p, name_to_class) for p in products],
         "seq_watermark": seq_watermark,
     }
 
@@ -144,6 +187,7 @@ def create_app(
     *,
     decode: Callable | None = None,
     validate_video_paths: bool | None = None,
+    yolo_name_to_id: Mapping[str, int] | None = None,
 ):
     from fastapi import Body, FastAPI, HTTPException  # lazy
 
@@ -198,7 +242,7 @@ def create_app(
     @app.post("/api/judge/multi-zone")
     def multi_zone(payload: Any = Body(...)) -> dict:
         # Node는 객체 {session_id, products, ...} 또는 상품 배열을 보낸다.
-        normalized = _normalize_multi_zone(payload)
+        normalized = _normalize_multi_zone(payload, yolo_name_to_id)
         resp = service.handle_multi_zone(normalized)
         log_key = (normalized["state"], resp.get("status"), resp.get("detail"))
         if log_key != _last_multi_zone_log[0]:

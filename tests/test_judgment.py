@@ -152,6 +152,39 @@ class TestGuards:
         assert result.strategy == "no_candidate_fallback"
         assert result.reason == "weight_only"
 
+    def test_weight_only_single_match_with_nontrivial_pool(self, cola, water):
+        # issue #6 결함 수정: 풀에 2개 품목이 있어도 tolerance 내에 하나만
+        # 들어오면(cola=100g, water=200g, delta=-100g) 여전히 단일 매치로 확정된다.
+        router = JudgmentRouter()
+        result = router.judge(ctx(-100.0, [cola, water], []))
+        assert result.strategy == "no_candidate_fallback"
+        assert result.reason == "weight_only"
+        assert result.status is JudgmentStatus.COMPLETE
+        assert result.products[0].product.product_id == "P001"
+        assert result.products[0].count == 1
+
+    def test_weight_only_no_longer_tries_multi_item_combination(self, cola, water):
+        # issue #6 오청구 재발 방지: cola(100g)+water(200g)=300g는 예전엔 다품목
+        # 조합으로 우연히 맞춰졌지만, 단일 품목 중엔 아무도 300g 근처가 아니므로
+        # (|300-100|=200, |300-200|=100, 둘 다 tolerance=3.0 초과) 더 이상 청구하지
+        # 않는다.
+        router = JudgmentRouter()
+        result = router.judge(ctx(-300.0, [cola, water], []))
+        assert result.strategy == "no_candidate_fallback"
+        assert result.status is JudgmentStatus.NO_DETECTION
+        assert result.reason == "no_candidates_forced_final"
+
+    def test_weight_only_ambiguous_rejects_charge(self, cola):
+        from dataclasses import replace
+
+        # cola(100g)의 근접 쌍둥이(102g) — 둘 다 delta=-101g의 tolerance(3.0g) 내.
+        twin = replace(cola, product_id="P099", class_id=9, unit_weight=102.0)
+        router = JudgmentRouter()
+        result = router.judge(ctx(-101.0, [cola, twin], []))
+        assert result.strategy == "no_candidate_fallback"
+        assert result.status is JudgmentStatus.NO_DETECTION
+        assert result.reason == "weight_only_ambiguous"
+
     def test_telemetry_counts_hits(self, cola):
         router = JudgmentRouter()
         router.judge(ctx(-100.0, [cola], [cand(1)]))

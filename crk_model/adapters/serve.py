@@ -48,6 +48,11 @@ def main() -> None:
         "MODEL__VISION__YOLO_MODEL_PATH", "models/set9_doorfas_0323_imbal.engine"
     )
     detector = UltralyticsEngineDetector(model_path)
+    # issue #6: 상품명→YOLO class_id 매핑 — hand(0)은 제외한다(원본 manager.py와
+    # 동일 원칙). 제외하지 않으면 매핑 실패 상품이 이름 경합으로 hand에 붙을 수 있다.
+    yolo_name_to_id = {
+        name: cid for cid, name in (detector.class_names or {}).items() if cid > 0
+    }
 
     journal_path = Path(os.environ.get("MODEL__LEDGER__JOURNAL_PATH", "logs/events.jsonl"))
     # issue #6: 세션 확정(FINALIZED/ERROR) 시 YAML 아카이브 — MODEL__SESSION__
@@ -69,7 +74,7 @@ def main() -> None:
     import uvicorn
 
     uvicorn.run(
-        create_app(service),
+        create_app(service, yolo_name_to_id=yolo_name_to_id),
         host=os.environ.get("MODEL__SERVER__HOST", "0.0.0.0"),
         port=int(os.environ.get("MODEL__SERVER__PORT", "8002")),
         log_level="info",

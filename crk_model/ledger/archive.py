@@ -56,6 +56,7 @@ def _trace_to_dict(trace: TriggerTrace | None) -> dict:
         "gate_skipped_frames": dict(trace.gate_skipped_frames),
         "early_terminated": trace.early_terminated,
         "reason_codes": list(trace.reason_codes),
+        "vote_summary": dict(trace.vote_summary) if trace.vote_summary else {},
     }
 
 

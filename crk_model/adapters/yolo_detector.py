@@ -31,6 +31,14 @@ class UltralyticsEngineDetector:
         self._hand_class = hand_class_id
         self._device = device
 
+    @property
+    def class_names(self) -> dict:
+        """엔진이 로드한 YOLO class_id → 이름 맵 (원본 engine_class_names 대응).
+
+        adapters/serve.py가 이걸로 product→class_id 이름 매핑(issue #6)을 만든다.
+        """
+        return self._model.names
+
     def detect(self, frame) -> Sequence[Detection]:
         full = getattr(frame, "full", frame)  # FrameBundle 언랩
         results = self._model.predict(

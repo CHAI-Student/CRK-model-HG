@@ -59,3 +59,34 @@ class VotingEnsemble:
             out.append(VisionCandidate(cid, weighted, votes, ratio))
         out.sort(key=lambda c: (-c.vote_count, -c.confidence))
         return tuple(out)
+
+    def debug_summary(self) -> dict:
+        """issue #6 진단: combine()이 왜 특정 class_id를 버렸는지(vote_ratio
+        게이트 vs conf_floor) class_id별로 보고한다. combine()과 동일한 게이트
+        로직을 읽기 전용으로 중복 계산할 뿐, combine()의 동작·성능에는 영향
+        없다(공유 mutable state 없음, 호출하지 않으면 오버헤드 0)."""
+        classes = set(self._votes["top"]) | set(self._votes["side"])
+        denominator = max(1, self.gate_passed_frames)
+        summary: dict[int, dict] = {}
+        for cid in classes:
+            top = self._votes["top"].get(cid, [])
+            side = self._votes["side"].get(cid, [])
+            t = sum(top) / len(top) if top else 0.0
+            s = sum(side) / len(side) if side else 0.0
+            weighted = t * 0.5 + s * 0.5 + min(t, s) * 0.2
+            votes = len(top) + len(side)
+            ratio = votes / denominator
+            passes_ratio_gate = ratio >= self._min_ratio or votes >= self._min_count
+            if not passes_ratio_gate:
+                rejected_by = "ratio"
+            elif weighted < self._conf_floor:
+                rejected_by = "conf_floor"
+            else:
+                rejected_by = None
+            summary[cid] = {
+                "votes": votes,
+                "ratio": ratio,
+                "weighted_conf": weighted,
+                "rejected_by": rejected_by,
+            }
+        return summary

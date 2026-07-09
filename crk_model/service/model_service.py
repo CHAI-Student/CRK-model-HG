@@ -161,6 +161,20 @@ class ModelService:
                         "[MULTI-ZONE OPEN] new session %s (prev_state=%s, products=%d)",
                         session_id, self.gateway.state.value, len(products),
                     )
+                    # issue #6: class_id==-1(미매핑, http_app._active_product_fields
+                    # 참고)인 상품이 있으면 vision_candidates가 비어 weight_only 오청구
+                    # 재발 위험 — OPEN마다 매핑 성공률을 즉시 로그로 남긴다.
+                    unmapped = [p.name for p in products if p.class_id == -1]
+                    if unmapped:
+                        logger.warning(
+                            "[MULTI-ZONE OPEN] mapped=%d/%d unmapped=%s",
+                            len(products) - len(unmapped), len(products), unmapped,
+                        )
+                    else:
+                        logger.info(
+                            "[MULTI-ZONE OPEN] mapped=%d/%d unmapped=[]",
+                            len(products), len(products),
+                        )
                     self._prune_ledger(session_id)
                 else:
                     # 반복 OPEN — 진행 중 세션 유지 (원본 get_or_start 의미론)
