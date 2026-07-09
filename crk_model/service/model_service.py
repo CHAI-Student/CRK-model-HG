@@ -76,6 +76,7 @@ class ModelService:
         self._idempotency = IdempotencyRegistry(self.settings.idempotency_ttl_s, clock)
         self._trigger_counter = 0
         self._session_counter = 0
+        self._last_close_log_key: tuple | None = None
 
     # ---- POST /trigger (C4) ----
     def handle_trigger(self, payload: dict) -> dict:
@@ -141,10 +142,18 @@ class ModelService:
             else:
                 resp = self.gateway.poll()  # 재폴링 (I11: 확정 후에도 동일 응답)
             if resp.state in (DoorState.FINALIZED, DoorState.ERROR):
-                logger.info(
-                    "[MULTI-ZONE CLOSE] session=%s -> %s detail=%s",
-                    self.gateway.session_id, resp.state.value, resp.detail or "-",
-                )
+                # CLOSE는 문이 닫혀있는 동안 계속 재폴링되는 level-triggered 신호라
+                # (I11), FINALIZED/ERROR로 확정된 뒤에도 동일 응답이 반복된다. 매번
+                # 로그를 남기면 몇 분씩 같은 줄이 반복돼 "멈춘 것처럼" 보이므로
+                # (issue #5) 결과가 실제로 바뀔 때만 기록한다 — 응답 자체는 그대로
+                # 매 호출 반환한다.
+                log_key = (self.gateway.session_id, resp.state, resp.detail)
+                if log_key != self._last_close_log_key:
+                    self._last_close_log_key = log_key
+                    logger.info(
+                        "[MULTI-ZONE CLOSE] session=%s -> %s detail=%s",
+                        self.gateway.session_id, resp.state.value, resp.detail or "-",
+                    )
             return self._to_response(resp)
         # 폴링(session_id=null): 현재 상태만 반환, 상태 전이 없음
         return self._to_response(self.gateway.poll())

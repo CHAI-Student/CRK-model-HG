@@ -147,17 +147,26 @@ def create_app(service: ModelService, *, decode: Callable | None = None):
         )
         return resp
 
+    # CLOSE는 문이 닫혀있는 동안 계속 재폴링되는 level-triggered 신호라(I11),
+    # 매 호출마다 동일 결과를 로그로 남기면 몇 분씩 같은 줄이 반복되어 "멈춘 것처럼"
+    # 보인다(issue #5). 응답이 실제로 바뀔 때만 기록해 로그 소음을 줄인다 — 프로토콜
+    # 응답 자체(결제 확정 정보)는 그대로 매 호출 반환한다.
+    _last_multi_zone_log: list[Any] = [None]
+
     @app.post("/api/judge/multi-zone")
     def multi_zone(payload: Any = Body(...)) -> dict:
         # Node는 객체 {session_id, products, ...} 또는 상품 배열을 보낸다.
         normalized = _normalize_multi_zone(payload)
         resp = service.handle_multi_zone(normalized)
-        logger.info(
-            "[MULTI-ZONE] state=%s products=%d -> status=%s%s",
-            normalized["state"], len(normalized["active_products"]),
-            resp.get("status"),
-            f" detail={resp['detail']}" if resp.get("detail") else "",
-        )
+        log_key = (normalized["state"], resp.get("status"), resp.get("detail"))
+        if log_key != _last_multi_zone_log[0]:
+            _last_multi_zone_log[0] = log_key
+            logger.info(
+                "[MULTI-ZONE] state=%s products=%d -> status=%s%s",
+                normalized["state"], len(normalized["active_products"]),
+                resp.get("status"),
+                f" detail={resp['detail']}" if resp.get("detail") else "",
+            )
         return resp
 
     @app.get("/api/health")

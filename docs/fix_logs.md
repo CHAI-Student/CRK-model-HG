@@ -43,3 +43,52 @@
     회귀 테스트 추가.
 
 - 테스트: `python -m pytest -q` (85 passed, 3 skipped).
+
+---
+
+## 2026-07-09 (후속 정정) 위 fix의 `finalized_hold_s` 자동 리셋을 되돌리고 로그 중복 억제로 대체
+
+- 증상: 위 fix 배포 후 재현 테스트에서 `POST /api/judge/multi-zone`이 `finalized->idle`
+  전환 이후에도 계속 들어오고, `[MULTI-ZONE] state=CLOSE products=11 -> status=processing`
+  로그가 반복해서 찍힘. 즉 로그 스팸 자체는 해결되지 않았고 반복되는 문구만
+  `finalized`에서 `processing`으로 바뀜.
+
+- 원인(오진단 정정): CLOSE 신호는 원-샷(one-shot) 이벤트가 아니라, 문이 물리적으로
+  닫혀있는 동안 에지 장치가 계속 보내는 level-triggered 폴링이다(OPEN이 문이 열려있는
+  동안 반복 전송되는 것과 대칭). 실제 이슈 #5 로그도 finalize 이후 CLOSE가 10초
+  간격으로 수 분간 계속 들어온 것으로, 이는 정상적인 클라이언트 동작이다. 반면 새
+  `OPEN`이 오면 `handle_multi_zone`의 OPEN 분기(`model_service.py`)가
+  `DoorState.FINALIZED`에서도 무조건 새 세션을 시작하므로, 다음 세션 진행이 막히는
+  일은 원래 없었다. 즉 "FINALIZED가 다음 세션을 막는다"는 최초 진단이 틀렸음.
+  직전 fix의 `finalized_hold_s` 타임아웃은 문이 계속 닫혀있는 상황에서 정산 완료
+  정보(payment payload, I11 멱등 응답)를 `status=processing`(빈 payload)으로
+  덮어써 버려, 실제로는 없던 기능적 회귀를 새로 만들었다. 진짜 문제는 상태 전이가
+  아니라 로깅이었다 — `http_app.py`의 `[MULTI-ZONE] ...` 로그와
+  `model_service.py`의 `[MULTI-ZONE CLOSE] ... -> finalized` 로그가 매 요청마다
+  무조건 찍혀서, 동일 결과가 반복되는 정상 상황이 "멈춘 것처럼" 보였을 뿐임.
+
+- 해결방안:
+  1. `crk_model/gateway/state_machine.py`의 `finalized_hold_s`/`_finalized_ts`
+     자동 리셋 로직을 되돌려 FINALIZED가 원래대로(I11) 새 OPEN 전까지 멱등하게
+     유지되도록 복원.
+  2. 로그 중복만 억제: `http_app.py`의 `/api/judge/multi-zone` 핸들러와
+     `model_service.py`의 CLOSE 분기 각각에 마지막으로 로깅한 결과 키
+     (`state/status/detail`)를 기억해두고, 이전 호출과 동일하면 로그를 생략.
+     실제 HTTP 응답(정산 payload 포함)은 매 호출 그대로 반환 — 프로토콜/상태
+     동작은 변경하지 않고 로그 볼륨만 줄임.
+
+- 관련 파일:
+  - `crk_model/gateway/state_machine.py` — `finalized_hold_s`/`_finalized_ts` 제거,
+    FINALIZED 분기를 원래의 무조건 멱등 응답으로 복원.
+  - `crk_model/adapters/http_app.py` — `/api/judge/multi-zone`에서 `(state, status,
+    detail)`이 이전과 동일하면 `[MULTI-ZONE] ...` 로그 생략.
+  - `crk_model/service/model_service.py` — `ModelService._last_close_log_key` 추가,
+    CLOSE 분기에서 `(session_id, resp.state, resp.detail)`이 이전과 동일하면
+    `[MULTI-ZONE CLOSE] ...` 로그 생략.
+  - `tests/test_gateway.py` — 자동 리셋 테스트를
+    `test_repoll_after_finalize_stays_finalized_without_new_open`으로 교체
+    (긴 시간 경과 후에도 새 OPEN 전까지 FINALIZED가 유지되는지 검증).
+  - `tests/test_service.py` — `test_repoll_after_complete_does_not_spam_log` 추가
+    (동일 결과 반복 시 `[MULTI-ZONE CLOSE] ... -> finalized` 로그가 1회만 찍히는지 검증).
+
+- 테스트: `python -m pytest -q` (86 passed, 3 skipped).

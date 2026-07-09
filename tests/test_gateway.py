@@ -120,12 +120,11 @@ class TestPaymentContract:
         second = gw.poll()
         assert first.payload is second.payload
 
-    def test_finalized_auto_resets_to_idle_after_hold_without_new_open(self, cola):
-        # issue #5: multi-zone close stuck — CLOSE만 반복 폴링되고 새 OPEN이
-        # 오지 않으면 FINALIZED가 영원히 고착되어 status=complete를 무한 반복하던 문제.
-        # 유예시간(finalized_hold_s) 경과 후에는 OPEN 없이도 idle로 자동 복귀해야 한다.
+    def test_repoll_after_finalize_stays_finalized_without_new_open(self, cola):
+        # CLOSE는 level-triggered — 문이 닫혀있는 동안 계속 재폴링된다. 시간이 아무리
+        # 지나도 새 OPEN 없이는 FINALIZED가 임의로 초기화되면 안 된다(issue #5 후속
+        # 회귀: 타임아웃 자동 리셋이 결제 확정 정보를 status=processing으로 덮어썼었음).
         gw, clock = make_gateway()
-        gw._finalized_hold = 15.0
         gw.handle_open("s1")
         gw.notify_enqueued(1)
         gw.record_trigger(removal("s1", 1, 1.0, cola))
@@ -133,18 +132,14 @@ class TestPaymentContract:
         first = gw.handle_close()
         assert first.state is DoorState.FINALIZED
 
-        clock.t = 10.0  # 유예시간 이내 재폴링 → 여전히 동일 결과 (I11)
-        repeat = gw.poll()
-        assert repeat.state is DoorState.FINALIZED
-        assert repeat.payload is first.payload
-
-        clock.t = 16.0  # 유예시간 경과, 여전히 새 OPEN 없음
+        clock.t = 600.0  # 문이 한참동안 닫혀있는 채로 CLOSE만 반복 폴링됨
         resp = gw.poll()
-        assert resp.state is DoorState.IDLE
-        assert gw.session_id is None
+        assert resp.state is DoorState.FINALIZED
+        assert resp.payload is first.payload
 
-        # 이후 CLOSE만 계속 폴링해도 더 이상 FINALIZED를 반복하지 않는다
-        assert gw.poll().state is DoorState.IDLE
+        # 새 OPEN이 오면 그때 정상적으로 새 세션 시작 (기존 동작 유지)
+        gw.handle_open("s2")
+        assert gw.state is DoorState.ACTIVE
 
     def test_new_session_resets_barrier(self, cola):
         gw, clock = make_gateway()

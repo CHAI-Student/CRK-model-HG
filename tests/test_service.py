@@ -121,6 +121,21 @@ class TestEndToEnd:
         second = svc.handle_multi_zone({"session_id": "s1", "state": "CLOSE"})
         assert first["totalPrice"] == second["totalPrice"] == 1500
 
+    def test_repoll_after_complete_does_not_spam_log(self, cola, caplog):
+        # issue #5: CLOSE는 문이 닫혀있는 동안 계속 재폴링되는 level-triggered
+        # 신호라 결과가 바뀌지 않는 한 [MULTI-ZONE CLOSE] 로그를 반복하면 안 된다
+        # (응답 자체는 매번 그대로 반환하되, 동일 로그가 몇 분씩 반복 찍히는 것만 억제).
+        svc = make_service()
+        svc.handle_multi_zone(open_payload(cola))
+        svc.handle_trigger(trigger_payload())
+        svc.process_pending()
+        with caplog.at_level("INFO", logger="crk_model.service.model_service"):
+            svc.handle_multi_zone({"session_id": "s1", "state": "CLOSE"})
+            svc.handle_multi_zone({"session_id": "s1", "state": "CLOSE"})
+            svc.handle_multi_zone({"session_id": "s1", "state": "CLOSE"})
+        close_logs = [r for r in caplog.records if "[MULTI-ZONE CLOSE]" in r.message and "-> finalized" in r.message]
+        assert len(close_logs) == 1
+
     def test_consecutive_door_sessions_are_independent(self, cola):
         # 이슈 #3 회귀: 세션 ID가 고정("global")이면 EventLog 확정 거부(I11)와
         # settler 멱등 캐시가 세션을 관통 → 두 번째 세션이 첫 결과를 재탕했다.
