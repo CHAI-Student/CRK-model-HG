@@ -12,6 +12,7 @@
 """
 from __future__ import annotations
 
+import re
 from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 
@@ -53,13 +54,22 @@ class _Basket:
     def items(self) -> list[tuple[ActiveProduct, int]]:
         return [(self.products[pid], c) for pid, c in self.counts.items() if c > 0]
 
-    def to_zone(self, zone: int) -> ZoneBasket:
+    def to_zone(
+        self,
+        zone: int,
+        weight_delta: float = 0.0,
+        trigger_count: int = 0,
+        notes: tuple[str, ...] = (),
+    ) -> ZoneBasket:
         return ZoneBasket(
             zone,
             tuple(
                 ProductCount(p, c)
                 for p, c in sorted(self.items(), key=lambda t: t[0].product_id)
             ),
+            weight_delta,
+            trigger_count,
+            notes,
         )
 
 
@@ -73,6 +83,17 @@ def _ok_events(events: Iterable[TriggerEvent]) -> list[TriggerEvent]:
 
 def _profile(profiles: Mapping[int, SensorProfile], zone: int) -> SensorProfile:
     return profiles.get(zone, REFRIGERATOR)
+
+
+def _notes_for_zone(notes: Sequence[str], zone: int) -> tuple[str, ...]:
+    """OPS 로그용 근사 매칭: note 문자열이 `zone{N}:` 또는 `zone{N}->`로 시작하는
+    패턴에 걸리는 것만 해당 zone에 귀속시킨다. `zone{N}` 뒤에 경계 구분자
+    (`:` 또는 `->`)까지 확인해 zone=1이 zone=11에 오매칭되지 않게 한다.
+    cross_zone_return(`zone{origin}->zone{dest}:...`)은 origin(반품 시작 zone)
+    표기가 항상 문자열 맨 앞에 오므로, 이 매칭 방식은 origin 쪽에만 귀속시킨다
+    (도착 zone 쪽 완전 매칭은 하지 않음 — 근사 처리, 최종 보고에 근거 명시)."""
+    pattern = re.compile(rf"zone{zone}(?::|->)")
+    return tuple(n for n in notes if pattern.search(n))
 
 
 def pass_same_zone(
@@ -137,9 +158,27 @@ class CloseSettler:
         self._pass_cross_zone(baskets, unmatched, profiles, notes)
         self._freezer_resolve(baskets, ok, profiles, notes)
 
+        # OPS 로그용: basket이 비어 있어도(예: unmatched_return만 있던 zone)
+        # 이벤트가 발생했던 zone은 요약에 나와야 한다 — events는 ok+error 전체
+        # 원본 파라미터 기준으로 zone 집합을 넓힌다 (error_zones 필터링은 이후).
+        all_zones = sorted(set(baskets) | {e.zone for e in events})
+
         zones = []
-        for zone in sorted(baskets):
-            zb = baskets[zone].to_zone(zone)
+        for zone in all_zones:
+            # trigger_count는 ok+error 포함 전체 이벤트 수(그 zone에 실제 발생한
+            # 트리거 횟수)로 센다 — error_zones는 이미 별도로 추적되므로, zone별
+            # trigger_count는 "그 zone에 도달한 전체 이벤트 수"를 나타내는 것이
+            # 원본(다이어그램/원본 로그 예시)의 의미에 더 가깝다고 판단.
+            zone_events = [e for e in events if e.zone == zone]
+            weight_delta = sum(e.delta_weight for e in zone_events)
+            trigger_count = len(zone_events)
+            zone_notes = _notes_for_zone(notes, zone)
+            basket = baskets.get(zone)
+            zb = (
+                basket.to_zone(zone, weight_delta, trigger_count, zone_notes)
+                if basket is not None
+                else _Basket().to_zone(zone, weight_delta, trigger_count, zone_notes)
+            )
             for pc in zb.products:
                 assert pc.count >= 0  # I14 (구조상 보장, 방어적 확인)
             zones.append(zb)

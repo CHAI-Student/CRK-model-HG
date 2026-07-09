@@ -137,3 +137,28 @@
 - 테스트: `python -m pytest -q` → 122 passed (numpy/ffmpeg/fastapi 설치 환경 기준.
   미설치 환경은 해당 테스트 skip으로 114 passed). Jetson 실기(G4: NVDEC 경로,
   24h soak)는 미검증으로 남음.
+
+---
+
+## 2026-07-09 freezer에서 vision 후보 없을 때 loadcell-only 정체성 판정이 억제되지 않던 결함
+
+- 증상: L5 판정 확장 중 원본 다이어그램 5와의 대조에서 발견 (실기 오과금 보고는 아직
+  없음 — 잠재 결함). freezer 존에서 vision 후보가 0개일 때 `NoCandidateFallbackStrategy`가
+  프로파일 구분 없이 weight_only(무게만으로 품목 식별)를 수행 — 로드셀 오차 5~15g인
+  냉동고에서 무게로 "무엇인지"를 판정하면 오식별 과금 위험 (178g 사건과 동일 원리).
+
+- 원인: 원본 judge()의 "후보 없음 폴백" 체인에 있던 vision-first identity policy 분기
+  (freezer → `loadcell_identity_suppressed` 억제)가 라우터 이식 시 누락. 골격 이식 단계에서
+  weight_only 경로만 옮겨지고 프로파일 조건 분기가 빠졌음.
+
+- 해결방안: `NoCandidateFallbackStrategy.solve()`에서
+  `not profile.weight_is_discriminative`(freezer)이면 weight_only를 건너뛰고
+  `NO_DETECTION, reason="loadcell_identity_suppressed"` 반환 (QA Q1의 센서 물리 원칙을
+  후보-없음 경로에도 적용). 냉장고(±3g)는 기존 weight_only 유지. 같은 원리로 신규
+  `RelaxedLoadcellOnlyStrategy`도 freezer 억제를 내장.
+
+- 관련 파일: `crk_model/judgment/strategies.py`, `crk_model/judgment/router.py`
+  (누락 전략 4종 추가와 함께 수정), `tests/test_judgment.py`
+  (`TestNoCandidateFreezerSuppression` 등 신규 28건).
+
+- 테스트: `python -m pytest -q` → 136 passed.

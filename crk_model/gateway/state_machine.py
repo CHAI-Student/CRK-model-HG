@@ -22,6 +22,7 @@ from crk_model.ledger.events import EventLog, TriggerEvent
 from crk_model.ledger.settler import CloseSettler, interim_summary
 
 logger = logging.getLogger(__name__)
+ops_logger = logging.getLogger("crk_model.ops")
 
 
 class DoorState(str, Enum):
@@ -37,6 +38,27 @@ class GatewayResponse:
     state: DoorState
     payload: FinalizedSettlement | InterimSummary | None
     detail: str = ""
+
+
+def _format_products(zb) -> str:
+    if not zb.products:
+        return "none"
+    return ", ".join(f"{pc.product.name}x{pc.count}" for pc in zb.products)
+
+
+def _log_ops_close(session_id: str, settlement: FinalizedSettlement) -> None:
+    """[OPS][CLOSE] 존별 확정 요약 로그 (세션당 1회, 호출측이 보장)."""
+    total_weight_delta = sum(zb.weight_delta for zb in settlement.zones)
+    ops_logger.info(
+        "[OPS][CLOSE] session_id=%s total_weight_delta=%+.1fg total_products=%d total_price=%d",
+        session_id, total_weight_delta, settlement.product_count, settlement.total_price,
+    )
+    for zb in settlement.zones:
+        note_part = f" notes={', '.join(zb.notes)}" if zb.notes else ""
+        ops_logger.info(
+            "[OPS][CLOSE] zone=%d weight_delta=%+.1fg products=%s triggers=%d%s",
+            zb.zone, zb.weight_delta, _format_products(zb), zb.trigger_count, note_part,
+        )
 
 
 class MultiZoneGateway:
@@ -111,6 +133,10 @@ class MultiZoneGateway:
                     "[GATEWAY] session=%s ERROR (blocked settlement): %s",
                     self.session_id, settlement.block_reason,
                 )
+                ops_logger.error(
+                    "[OPS][CLOSE_ERROR] session_id=%s reason=%s",
+                    self.session_id, settlement.block_reason,
+                )
                 return GatewayResponse(DoorState.ERROR, settlement, settlement.block_reason)
             self.state = DoorState.FINALIZED
             logger.info(
@@ -118,6 +144,7 @@ class MultiZoneGateway:
                 self.session_id, settlement.total_price,
                 settlement.product_count, list(settlement.notes),
             )
+            _log_ops_close(self.session_id, settlement)
             return GatewayResponse(DoorState.FINALIZED, settlement)
 
         assert self._close_ts is not None
@@ -139,9 +166,12 @@ class MultiZoneGateway:
                 "[GATEWAY] session=%s ERROR (barrier_timeout after %.1fs): %s",
                 self.session_id, timeout, list(status.pending),
             )
-            return GatewayResponse(
-                DoorState.ERROR, None, "barrier_timeout:" + ";".join(status.pending)
+            barrier_reason = "barrier_timeout:" + ";".join(status.pending)
+            ops_logger.error(
+                "[OPS][CLOSE_ERROR] session_id=%s reason=%s",
+                self.session_id, barrier_reason,
             )
+            return GatewayResponse(DoorState.ERROR, None, barrier_reason)
         return GatewayResponse(
             DoorState.PENDING_CLOSE, self.interim(), "barrier_pending:" + ";".join(status.pending)
         )
