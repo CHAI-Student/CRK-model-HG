@@ -561,7 +561,7 @@ def main() -> int:
                 imgsz=args.imgsz,
                 conf=args.conf,
                 device=args.device,
-                half=True,
+                quantize=16,
                 max_det=args.max_det,
                 classes=class_filter,
                 verbose=False,
