@@ -49,6 +49,7 @@ class MultiZoneGateway:
         clock: Callable[[], float] = time.monotonic,
         close_timeout_s: float = 10.0,  # I17: 상한 타임아웃 (정상 경로 아님)
         worker_stall_timeout_s: float = 120.0,  # queue_pending 전용 상한 (처리 지연 ≠ 유실)
+        finalized_hold_s: float = 15.0,  # FINALIZED 전달 유예시간 — 이후 새 OPEN 없이도 자동 idle 복귀
     ):
         self._settler = settler
         self._event_log = event_log
@@ -56,11 +57,13 @@ class MultiZoneGateway:
         self._clock = clock
         self._close_timeout = close_timeout_s
         self._stall_timeout = max(worker_stall_timeout_s, close_timeout_s)
+        self._finalized_hold = finalized_hold_s
         self.state = DoorState.IDLE
         self.session_id: str | None = None
         self.barrier = CausalBarrier()
         self._close_ts: float | None = None
         self._progress_ts: float | None = None  # 마지막 트리거 처리 완료 시각
+        self._finalized_ts: float | None = None  # FINALIZED 진입 시각 (자동 idle 복귀 기준)
 
     # -- OPEN --
     def handle_open(self, session_id: str) -> GatewayResponse:
@@ -68,6 +71,7 @@ class MultiZoneGateway:
             self.session_id = session_id
             self.barrier = CausalBarrier()  # 세션당 새 배리어
             self._close_ts = None
+        self._finalized_ts = None
         self.state = DoorState.ACTIVE
         return GatewayResponse(DoorState.ACTIVE, self.interim())
 
@@ -94,7 +98,24 @@ class MultiZoneGateway:
         if self.state is DoorState.ACTIVE:
             return GatewayResponse(DoorState.ACTIVE, self.interim(), "processing")
         if self.state is DoorState.FINALIZED:
-            # I11: 재폴링에도 동일 결과 (settler 멱등 캐시)
+            if (
+                self._finalized_ts is not None
+                and self._clock() - self._finalized_ts >= self._finalized_hold
+            ):
+                # 유예시간(finalized_hold_s) 경과 — 새 OPEN 없이 CLOSE만 반복
+                # 폴링해도 FINALIZED가 영구 고착되지 않도록 idle로 자동 복귀.
+                # (issue #5: multi-zone close stuck — CLOSE 폴링이 status=complete를
+                # 무한 반복하며 다음 세션으로 진행하지 못하던 문제)
+                logger.info(
+                    "[GATEWAY] session=%s FINALIZED->IDLE (auto-reset after %.1fs, no new OPEN)",
+                    self.session_id, self._finalized_hold,
+                )
+                finished_session_id = self.session_id
+                self.state = DoorState.IDLE
+                self.session_id = None
+                self._finalized_ts = None
+                return GatewayResponse(DoorState.IDLE, None, f"session_expired:{finished_session_id}")
+            # I11: 유예시간 내 재폴링에는 동일 결과 (settler 멱등 캐시)
             return GatewayResponse(DoorState.FINALIZED, self._settle())
         if self.state is not DoorState.PENDING_CLOSE:
             return GatewayResponse(self.state, None)
@@ -110,6 +131,7 @@ class MultiZoneGateway:
                 )
                 return GatewayResponse(DoorState.ERROR, settlement, settlement.block_reason)
             self.state = DoorState.FINALIZED
+            self._finalized_ts = self._clock()
             logger.info(
                 "[GATEWAY] session=%s FINALIZED: totalPrice=%d products=%d notes=%s",
                 self.session_id, settlement.total_price,
