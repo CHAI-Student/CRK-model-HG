@@ -19,6 +19,7 @@ Jetson CUDA/TensorRT 런타임 경로가 필요하면 이 스크립트를 실행
 from __future__ import annotations
 
 import argparse
+import glob
 import logging
 import shutil
 import subprocess
@@ -31,11 +32,44 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 LOGGER = logging.getLogger("live_engine_preview")
 
 
-def _parse_source(value: str) -> int | str:
+def _build_csi_pipeline(sensor_id: int, width: int, height: int, fps: float) -> str:
+    width = width if width > 0 else 1280
+    height = height if height > 0 else 720
+    fps = fps if fps > 0 else 30.0
+    return (
+        f"nvarguscamerasrc sensor-id={sensor_id} ! "
+        f"video/x-raw(memory:NVMM),width={width},height={height},framerate={fps:g}/1 ! "
+        "nvvidconv ! video/x-raw,format=BGRx ! videoconvert ! video/x-raw,format=BGR ! "
+        "appsink drop=1"
+    )
+
+
+def _parse_source(
+    value: str, width: int = 0, height: int = 0, fps: float = 0.0
+) -> tuple[int | str, str | None]:
+    """Parse the --source value.
+
+    Returns a (source, forced_backend) tuple. forced_backend is None unless the
+    source syntax implies a specific capture backend (e.g. csi:/gst: always
+    need CAP_GSTREAMER regardless of --backend).
+    """
     text = value.strip()
+
+    if text.startswith("csi:"):
+        sensor_id_text = text[len("csi:") :].strip()
+        sensor_id = int(sensor_id_text) if sensor_id_text else 0
+        return _build_csi_pipeline(sensor_id, width, height, fps), "gstreamer"
+
+    if text.startswith("gst:"):
+        return text[len("gst:") :], "gstreamer"
+
+    if text.startswith("/dev/video"):
+        return text, None
+
     if text.isdigit():
-        return int(text)
-    return text
+        return int(text), None
+
+    return text, None
 
 
 def _parse_classes(value: str | None) -> list[int] | None:
@@ -49,9 +83,150 @@ def _parse_classes(value: str | None) -> list[int] | None:
     return classes
 
 
+def _list_video_devices() -> list[str]:
+    return sorted(glob.glob("/dev/video*"))
+
+
+def _run_v4l2_ctl_list_devices() -> str | None:
+    if not shutil.which("v4l2-ctl"):
+        return None
+    try:
+        result = subprocess.run(
+            ["v4l2-ctl", "--list-devices"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return f"(v4l2-ctl --list-devices failed to run: {exc})"
+    output = (result.stdout or "") + (result.stderr or "")
+    return output.strip() or "(v4l2-ctl --list-devices returned no output)"
+
+
+def _find_device_holders(device: str) -> str | None:
+    """Return a human-readable description of processes holding `device` open.
+
+    Tries `fuser` first, then falls back to `lsof`. Returns None if neither
+    tool is available (caller should treat that as "skipped", not "free").
+    """
+    if shutil.which("fuser"):
+        try:
+            result = subprocess.run(
+                ["fuser", device],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        pids = (result.stdout or result.stderr or "").strip()
+        return pids or ""
+
+    if shutil.which("lsof"):
+        try:
+            result = subprocess.run(
+                ["lsof", "-t", device],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        pids = (result.stdout or "").strip().replace("\n", " ")
+        return pids or ""
+
+    return None
+
+
+def _run_diagnostics(log: logging.Logger | None = None) -> list[str]:
+    """Inspect /dev/video* devices and report what is holding them open.
+
+    Runs without any heavy (cv2/ultralytics) imports so it is usable both as
+    `--list-devices` before model load and as an automatic post-mortem after
+    a failed capture open. Returns the discovered device paths.
+    """
+    log = log or LOGGER
+    devices = _list_video_devices()
+
+    if not devices:
+        log.error(
+            "no /dev/video* devices found — if this is a CSI camera "
+            "(e.g. Jetson onboard camera), it cannot be opened by V4L2 index/path. "
+            "Use the nvarguscamerasrc GStreamer pipeline instead, e.g. "
+            "--source csi:0 (see README troubleshooting section)."
+        )
+        return devices
+
+    log.info("found /dev/video* devices: %s", ", ".join(devices))
+    log.info(
+        "hint: USB cameras usually expose 2 device nodes per camera "
+        "(one for video capture, one for metadata) — the odd-numbered node "
+        "(e.g. /dev/video1) is often the metadata node and cannot be opened "
+        "as a capture source."
+    )
+
+    v4l2_ctl_output = _run_v4l2_ctl_list_devices()
+    if v4l2_ctl_output is None:
+        log.info("v4l2-ctl not found in PATH; skipping `v4l2-ctl --list-devices`.")
+    else:
+        log.info("v4l2-ctl --list-devices:\n%s", v4l2_ctl_output)
+
+    any_holder_tool = shutil.which("fuser") or shutil.which("lsof")
+    if not any_holder_tool:
+        log.info("neither fuser nor lsof found in PATH; skipping device-occupancy check.")
+    else:
+        for device in devices:
+            holders = _find_device_holders(device)
+            if holders is None:
+                continue
+            if holders:
+                log.warning(
+                    "%s is held open by pid(s): %s — "
+                    "다른 프로세스(카메라 캡처 서비스로 추정)가 장치를 점유 중 — "
+                    "프리뷰 전에 해당 서비스를 중지하거나 사용하지 않는 장치를 지정하세요.",
+                    device,
+                    holders,
+                )
+            else:
+                log.info("%s is not currently held open by any process.", device)
+
+    return devices
+
+
+def _print_open_failure_help(args: argparse.Namespace) -> None:
+    LOGGER.error(
+        "camera/video source could not be opened source=%s backend=%s",
+        args.source,
+        args.backend,
+    )
+    devices = _run_diagnostics()
+
+    model_hint = args.model
+    example_lines = []
+    if devices:
+        first = devices[0]
+        example_lines.append(
+            f"  python scripts/live_engine_preview.py --model {model_hint} "
+            f"--source {first} --backend v4l2"
+        )
+    else:
+        example_lines.append(
+            f"  python scripts/live_engine_preview.py --model {model_hint} "
+            "--source /dev/video1 --backend v4l2"
+        )
+    example_lines.append(
+        f"  python scripts/live_engine_preview.py --model {model_hint} --source csi:0"
+    )
+    example_lines.append(
+        f"  python scripts/live_engine_preview.py --model {model_hint} "
+        "--source 'gst:<custom gstreamer pipeline>'"
+    )
+    LOGGER.error("try one of the following commands:\n%s", "\n".join(example_lines))
+
+
 def _open_capture(args: argparse.Namespace) -> cv2.VideoCapture:
-    source = _parse_source(args.source)
-    backend = args.backend
+    source, forced_backend = _parse_source(args.source, args.width, args.height, args.fps)
+    backend = forced_backend or args.backend
 
     if backend == "gstreamer":
         capture = cv2.VideoCapture(source, cv2.CAP_GSTREAMER)
@@ -61,10 +236,12 @@ def _open_capture(args: argparse.Namespace) -> cv2.VideoCapture:
         capture = cv2.VideoCapture(source, cv2.CAP_FFMPEG)
     elif isinstance(source, int):
         capture = cv2.VideoCapture(source, cv2.CAP_V4L2)
+    elif isinstance(source, str) and source.startswith("/dev/video"):
+        capture = cv2.VideoCapture(source, cv2.CAP_V4L2)
     else:
         capture = cv2.VideoCapture(source)
 
-    if isinstance(source, int):
+    if isinstance(source, int) or (isinstance(source, str) and source.startswith("/dev/video")):
         if args.width > 0:
             capture.set(cv2.CAP_PROP_FRAME_WIDTH, args.width)
         if args.height > 0:
@@ -262,7 +439,13 @@ def parse_args() -> argparse.Namespace:
         help="Path to TensorRT .engine file.",
     )
     parser.add_argument(
-        "--source", default="0", help="Camera index, video path, RTSP URL, or GStreamer pipeline."
+        "--source",
+        default="0",
+        help=(
+            "Camera index (e.g. 0), /dev/videoN path, video file path, RTSP URL, "
+            "csi:N for a Jetson CSI sensor (nvarguscamerasrc), or gst:<pipeline> "
+            "for a custom GStreamer pipeline."
+        ),
     )
     parser.add_argument(
         "--backend", choices=["auto", "v4l2", "gstreamer", "ffmpeg"], default="auto"
@@ -298,12 +481,26 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"]
     )
+    parser.add_argument(
+        "--list-devices",
+        action="store_true",
+        help=(
+            "Run camera preflight diagnostics (list /dev/video* devices, "
+            "v4l2-ctl info, and which processes hold them open), then exit "
+            "without loading the model. Does not require cv2/ultralytics."
+        ),
+    )
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
     logging.basicConfig(level=getattr(logging, args.log_level), format="%(levelname)s %(message)s")
+
+    if args.list_devices:
+        # Preflight diagnostics only: no cv2/ultralytics import, no model load.
+        devices = _run_diagnostics()
+        return 0 if devices else 1
 
     model_path = Path(args.model)
     if not model_path.is_absolute():
@@ -330,11 +527,7 @@ def main() -> int:
 
     capture = _open_capture(args)
     if not capture.isOpened():
-        LOGGER.error(
-            "camera/video source could not be opened source=%s backend=%s",
-            args.source,
-            args.backend,
-        )
+        _print_open_failure_help(args)
         return 2
 
     class_filter = _parse_classes(args.classes)
