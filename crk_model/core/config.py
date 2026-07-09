@@ -25,6 +25,22 @@ def _env_zones(key: str) -> tuple[int, ...]:
     return tuple(int(z) for z in raw.split(",") if z.strip())
 
 
+_VALID_CABINET_TYPES = ("refrigerated", "freezer")
+
+
+def _env_cabinet_type(key: str, default: str) -> str:
+    raw = os.environ.get(key)
+    if not raw:
+        return default
+    normalized = raw.strip().lower()
+    if normalized not in _VALID_CABINET_TYPES:
+        # 원본 MachineModel.validate_cabinet_type 대응 — 오타/잘못된 값이 조용히
+        # "refrigerated"로 폴백되는 것을 막는다 (fail-closed: 냉동 기기가 냉장
+        # 프로파일로 동작하는 사고 재발 방지).
+        raise ValueError(f"Invalid cabinet type: {raw}")
+    return normalized
+
+
 @dataclass(frozen=True)
 class Settings:
     # I17: 인과 배리어 상한 타임아웃 (정상 경로 아님 — debounce 3s보다 길게)
@@ -35,8 +51,15 @@ class Settings:
     worker_stall_timeout_s: float = 120.0
     # D8: 기본 OFF
     batch_size: int = 1
-    # freezer 프로파일을 적용할 존 목록 (예: "9,10")
+    # freezer 프로파일을 적용할 존 목록 (예: "9,10") — cabinet_type이 정하는
+    # 기본 프로파일에 대한 존 단위 오버라이드로만 쓰인다 (freezer 기기에서
+    # 특정 존만 냉장인 경우 등은 현재 스코프 밖).
     freezer_zones: tuple[int, ...] = field(default_factory=tuple)
+    # 기기 단위 정적 설정 (원본 MachineModel.cabinet_type 대응, config.py
+    # 60-75행). "refrigerated"|"freezer" — 실기가 냉동이면 반드시 명시해야
+    # 한다. 미설정 시 기본값(refrigerated)이 전 존에 ±3g 프로파일을 적용해
+    # 이슈 #6의 공동 원인이 됐다.
+    cabinet_type: str = "refrigerated"
     # D9: Node 합의(P4) 전 기본값은 fail-closed
     error_policy: ErrorSessionPolicy = ErrorSessionPolicy.BLOCK_PAYMENT
     # I7: 트리거 멱등성 TTL
@@ -60,6 +83,7 @@ class Settings:
             worker_stall_timeout_s=_env_float("MODEL__CLOSE__WORKER_STALL_TIMEOUT_S", 120.0),
             batch_size=_env_int("MODEL__VISION__BATCH_SIZE", 1),
             freezer_zones=_env_zones("MODEL__ZONES__FREEZER"),
+            cabinet_type=_env_cabinet_type("MODEL__MACHINE__CABINET_TYPE", "refrigerated"),
             error_policy=ErrorSessionPolicy(policy_raw),
             idempotency_ttl_s=_env_float("MODEL__TRIGGER__IDEMPOTENCY_TTL_S", 5.0),
             outcomes_keep=_env_int("MODEL__TRIGGER__OUTCOMES_KEEP", 256),

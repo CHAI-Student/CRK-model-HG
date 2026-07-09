@@ -19,7 +19,7 @@ from collections import deque
 from collections.abc import Callable, Mapping
 
 from crk_model.core.config import Settings
-from crk_model.core.profiles import FREEZER, SensorProfile
+from crk_model.core.profiles import FREEZER, REFRIGERATOR, SensorProfile
 from crk_model.core.types import ActiveProduct, InterimSummary
 from crk_model.gateway.state_machine import (
     DoorState,
@@ -40,7 +40,18 @@ logger = logging.getLogger(__name__)
 ops_logger = logging.getLogger("crk_model.ops")
 
 
+def _default_profile_from_settings(settings: Settings) -> SensorProfile:
+    """MODEL__MACHINE__CABINET_TYPE 이식 — 기기 단위 기본 프로파일.
+
+    존 미지정(zone이 freezer_zones/profiles dict에 없음) 시에도 냉동 기기는
+    기본으로 FREEZER가 적용돼야 한다 (이슈 #6 공동 원인: cabinet_type 미이식으로
+    미설정 시 전 존이 REFRIGERATOR ±3g로 판정됨)."""
+    return FREEZER if settings.cabinet_type == "freezer" else REFRIGERATOR
+
+
 def _profiles_from_settings(settings: Settings) -> dict[int, SensorProfile]:
+    # MODEL__ZONES__FREEZER는 기본 프로파일에 대한 존 단위 오버라이드로만
+    # 동작한다 — 예: refrigerated 기기에서 특정 존만 FREEZER로 지정.
     profiles: dict[int, SensorProfile] = {}
     for zone in settings.freezer_zones:
         profiles[zone] = FREEZER
@@ -67,9 +78,19 @@ class ModelService:
         self._profiles = (
             dict(profiles) if profiles is not None else _profiles_from_settings(self.settings)
         )
+        self._default_profile = _default_profile_from_settings(self.settings)
+        logger.info(
+            "[CONFIG] cabinet_type=%s default_profile=%s freezer_zones=%s",
+            self.settings.cabinet_type, self._default_profile.name, self.settings.freezer_zones,
+        )
         self.snapshots = ActiveProductStore()
         self.event_log = EventLog()
-        self.settler = CloseSettler(self.settings.error_policy)
+        # 판정(pipeline)·정산(settler)·잠정 집계(gateway interim)의 tolerance
+        # 단일 소스 원칙: 존 미지정 시 폴백 프로파일을 세 경로 모두 같은 값으로
+        # 주입한다 (cabinet_type=freezer인데 정산만 냉장 ±3g로 계산되는 불일치 방지).
+        self.settler = CloseSettler(
+            self.settings.error_policy, default_profile=self._default_profile
+        )
         # journal과 동일한 하위호환 원칙: archive를 명시적으로 주지 않으면
         # 비활성(SessionArchive("")) — 기본 생성자로 settings.session_archive_dir
         # 를 자동 활성화하면 테스트/임시 ModelService가 실제 저장소(data/sessions)
@@ -85,8 +106,11 @@ class ModelService:
             close_timeout_s=self.settings.close_timeout_s,
             worker_stall_timeout_s=self.settings.worker_stall_timeout_s,
             on_finalize=self._on_session_finalize,
+            default_profile=self._default_profile,
         )
-        self.pipeline = TriggerPipeline(detector, self._profiles, self.snapshots)
+        self.pipeline = TriggerPipeline(
+            detector, self._profiles, self.snapshots, default_profile=self._default_profile
+        )
         # 동시성: FastAPI sync 엔드포인트(threadpool)와 워커 스레드가 게이트웨이·
         # 이벤트로그·스냅샷을 동시에 건드릴 수 있어 단일 RLock으로 코스 그레인
         # 보호한다. 폴링은 10초/1회, 트리거는 초당 1건 미만이라 경합은 사실상

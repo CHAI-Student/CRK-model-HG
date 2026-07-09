@@ -229,3 +229,79 @@
 
 - 테스트: `python -m pytest -q` → 165 passed. vision 후보 0 원인은 다음 실기
   재현의 vote_summary로 확정 예정.
+
+---
+
+## 2026-07-09 냉동 기기가 냉장 프로파일로 동작 (cabinet_type 미이식) + weight_only 동일 상품 다수 개수 미지원
+
+- 증상: ① 실기 기기는 냉동(freezer)인데 이 레포는 존 목록 오버라이드
+  `MODEL__ZONES__FREEZER`만 지원해, 이를 설정하지 않으면 전 존이 냉장
+  (REFRIGERATOR ±3g) 프로파일로 판정됨 — 이슈 #6 오판정의 공동 원인. ②
+  직전 수정(위 항목, issue #6 대응)에서 weight_only를 "단일 품목·count=1
+  유일 매칭"으로 과도 제한해, 동일 상품 n개 제거(delta = n × unit_weight)가
+  no_detection으로 빠지는 회귀가 발생.
+
+- 원인: ① 원본(`reference/CRK-model/services/model/model_service/core/config.py`
+  60-75행)은 기기 단위 정적 설정 `MachineModel.cabinet_type`
+  (`MODEL__MACHINE__CABINET_TYPE`, "refrigerated"|"freezer", 기본
+  refrigerated)을 두고 `_is_freezer_mode()`가 이를 참조했는데, 이 설정과
+  기본 프로파일 결정 로직이 이관 과정에서 누락되어 존 단위 오버라이드
+  (`freezer_zones`)만 남았음. ② 직전 결함 수정이 issue #6(2품목 우연 조합
+  오청구)을 막으려고 weight_only의 count를 아예 1로 고정해버려, "동일 상품
+  n개"라는 정상 케이스까지 함께 차단했음(다품목 조합 금지와 동일 상품 개수
+  허용을 구분하지 않은 과도 일반화).
+
+- 해결방안:
+  1. `crk_model/core/config.py`: `Settings.cabinet_type: str = "refrigerated"`
+     추가, `from_env()`가 `MODEL__MACHINE__CABINET_TYPE`을 읽어 원본처럼
+     `strip().lower()` 정규화 후 `"refrigerated"|"freezer"` 외 값이면
+     `ValueError`(원본 `validate_cabinet_type` 대응, 오타로 조용히 냉장이
+     되는 사고 방지).
+  2. `crk_model/service/model_service.py`: `_default_profile_from_settings()`
+     신설(cabinet_type=="freezer"면 FREEZER, 아니면 REFRIGERATOR) —
+     `ModelService.__init__`이 이를 계산해 `self._default_profile`로 보관하고
+     기동 로그(`[CONFIG] cabinet_type=... default_profile=... freezer_zones=...`)
+     1줄을 남긴다. `MODEL__ZONES__FREEZER`(freezer_zones)는 여전히 기본
+     프로파일에 대한 존 단위 오버라이드로만 동작(의미 변경 없음).
+  3. `crk_model/service/pipeline.py`: `TriggerPipeline`에 `default_profile`
+     파라미터(기본값 `REFRIGERATOR`, 기존 동작과 100% 호환) 추가,
+     `_process`의 하드코딩된 `self._profiles.get(req.zone, REFRIGERATOR)`
+     폴백을 `self._profiles.get(req.zone, self._default_profile)`로 교체.
+     `ModelService`가 생성 시 `default_profile=self._default_profile`을
+     주입해 존 미지정 시에도 냉동 기기는 기본이 FREEZER가 되게 한다(다른
+     로직은 변경 없음, 최소 diff).
+  4. `crk_model/ledger/settler.py`·`crk_model/gateway/state_machine.py`:
+     CLOSE 정산/잠정 집계의 존 프로파일 폴백도 REFRIGERATOR 하드코딩이어서,
+     cabinet_type=freezer일 때 판정(pipeline)은 FREEZER인데 정산의
+     tolerance·count gate는 냉장 ±3g로 계산되는 불일치가 남아 있었음
+     (판정·정산 tolerance 단일 소스 원칙 위반, 결제 금액에 직접 영향 —
+     예: removal -100g 후 return +90g이 freezer ±15g면 반품 매칭으로 0원,
+     냉장 폴백이면 미매칭으로 1개 과금). `_profile()`/`pass_same_zone()`/
+     `interim_summary()`에 `default`(기본값 REFRIGERATOR, 하위호환) 파라미터,
+     `CloseSettler`·`MultiZoneGateway`에 `default_profile` 생성자 파라미터를
+     추가하고, `ModelService`가 세 경로(pipeline·settler·gateway interim)
+     모두에 같은 `self._default_profile`을 주입.
+  5. `crk_model/judgment/strategies.py`의 `NoCandidateFallbackStrategy`
+     weight_only 로직 확장: 각 상품 p에 대해 n ∈ 1..min(stock,
+     `StrictWeightMatcher.max_items`=6)에서 `|target − n×unit_weight| ≤
+     tolerance`인 (p, n) 쌍을 전수 수집. 결과가 정확히 1쌍이면 채택
+     (reason="weight_only", count=n, I12: n ≤ stock), 2쌍 이상(서로 다른
+     상품이거나 같은 상품에 서로 다른 n이 동시에 그럴듯한 경우 포함)이면
+     `weight_only_ambiguous`로 NO_DETECTION(기존 fail-closed 유지), 0쌍이면
+     `no_candidates_forced_final`. 서로 다른 상품을 섞는 다품목 조합 탐색은
+     여전히 금지(issue #6 재발 방지 유지) — 이번 확장은 "동일 상품 n개"만
+     구제한다. freezer 억제(`loadcell_identity_suppressed`)는 그대로 유지.
+
+- 관련 파일: `crk_model/core/config.py`, `crk_model/service/model_service.py`,
+  `crk_model/service/pipeline.py`(default_profile 파라미터 추가, 최소 diff),
+  `crk_model/ledger/settler.py`·`crk_model/gateway/state_machine.py`
+  (정산/잠정 집계 폴백 프로파일 주입), `crk_model/judgment/strategies.py`,
+  `tests/test_judgment.py`(`TestWeightOnlySameProductCount` 신규 3건 + 다품목
+  조합 금지 회귀 테스트를 실제 다품목 케이스로 정정), `tests/test_lifecycle.py`
+  (`TestCabinetTypeDefaultProfile` 신규 4건 — freezer 기본 프로파일 판정 E2E,
+  refrigerated 회귀 방지, CLOSE 정산 freezer tolerance E2E, 잘못된
+  cabinet_type 값 거부), `README.md`(Configuration 표에
+  `MODEL__MACHINE__CABINET_TYPE` 행 추가).
+
+- 테스트: `python -m pytest -q` → 172 passed (기존 165 + 신규 7). `ruff check .`
+  → All checks passed.

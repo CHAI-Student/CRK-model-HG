@@ -77,6 +77,11 @@ class TriggerPipeline:
         filters: DetectionFilterChain | None = None,
         early_termination_enabled: bool = True,
         analyzer_factory=None,  # SensorProfile -> LoadcellAnalyzer (테스트/튜닝 주입점)
+        default_profile: SensorProfile = REFRIGERATOR,
+        # zone이 profiles dict에 없을 때 쓰는 폴백 프로파일. 기본은 기존
+        # 동작(REFRIGERATOR)과 동일 — cabinet_type=freezer 기기에서는
+        # ModelService가 FREEZER를 주입해 존 미지정 시에도 냉동 프로파일이
+        # 기본이 되게 한다 (MODEL__MACHINE__CABINET_TYPE 이식).
     ):
         self._detector = detector
         self._profiles = dict(profiles)
@@ -85,6 +90,7 @@ class TriggerPipeline:
         self._filters = filters or DetectionFilterChain()
         self._et_enabled = early_termination_enabled
         self._analyzer_factory = analyzer_factory or LoadcellAnalyzer
+        self._default_profile = default_profile
 
     def process(self, session_id: str, req: TriggerRequest) -> TriggerOutcome:
         try:
@@ -108,7 +114,7 @@ class TriggerPipeline:
             return TriggerOutcome(event, TriggerTrace(reason_codes=["processing_error"]))
 
     def _process(self, session_id: str, req: TriggerRequest) -> TriggerOutcome:
-        profile = self._profiles.get(req.zone, REFRIGERATOR)
+        profile = self._profiles.get(req.zone, self._default_profile)
         snapshot = self._snapshots.snapshot()
         trace = TriggerTrace()
         if snapshot.source == "last_valid":

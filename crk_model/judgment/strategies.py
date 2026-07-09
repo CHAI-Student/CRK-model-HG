@@ -269,9 +269,17 @@ class NoCandidateFallbackStrategy:
     전혀 없는 상태에서 다품목 조합이 우연히 무게 합을 맞추는 것은 사실상 우연의
     일치이고, 이것이 issue #6 실제 오청구(2품목 우연 일치, confidence 0.3, 둘 다
     오판)의 원인이었다. 원본 `judge_by_weight_only`/`_try_loadcell_nearest_single`
-    (engine/decision_engine.py)처럼 단일 품목 최근접 매칭만 시도하고, 두 개 이상의
-    품목이 허용오차 내에서 동시에 그럴듯하면(모호) 과금하지 않는다 — 과청구가
-    미청구보다 나쁘다는 fail-closed 방향(I13/D9)을 여기도 적용한다.
+    (engine/decision_engine.py)처럼 단일 품목 최근접 매칭만 시도하고, 서로 다른
+    품목이 섞인 조합은 여전히 금지한다 — 과청구가 미청구보다 나쁘다는 fail-closed
+    방향(I13/D9)을 여기도 적용한다.
+
+    후속 수정 (동일 상품 다수 개수 지원): "단일 품목"을 count=1로 고정하면
+    동일 상품 n개 제거(delta = n × unit_weight)가 no_detection으로 빠지는
+    과잉 제약이었다. 각 상품 p에 대해 n ∈ 1..min(stock, max_items)에서
+    |target − n×unit_weight| ≤ tolerance인 (p, n) 쌍을 전수 수집해, 정확히
+    1쌍이면 채택하고 2쌍 이상(서로 다른 product_id가 걸리는 경우)이면 여전히
+    weight_only_ambiguous로 거부한다. 다품목 조합(서로 다른 상품 섞기)은
+    계속 금지 — 이번 확장은 "동일 상품 n개"만 구제한다.
     """
 
     name = "no_candidate_fallback"
@@ -287,32 +295,38 @@ class NoCandidateFallbackStrategy:
             return JudgmentResult(
                 JudgmentStatus.NO_DETECTION, reason="loadcell_identity_suppressed"
             )
-        # weight_only: vision 필터 없이 전 재고 대상, 단일 품목 최근접 매칭만
-        # 시도한다(원본 _try_loadcell_nearest_single과 동일하게 count는 항상 1 —
-        # 동일 품목 n개 매칭은 same_product_count의 몫이며, 이 폴백은 vision 후보가
-        # 전혀 없을 때만 발동하므로 다품목 조합 탐색은 하지 않는다).
+        # weight_only: vision 필터 없이 전 재고 대상. 각 상품 p에 대해
+        # n=1..min(stock, matcher.max_items)를 전수 탐색해 (p, n) 쌍을 모은다
+        # (동일 상품 n개 제거 지원). 서로 다른 상품을 섞는 조합은 여전히 금지
+        # (same_product_count/segment/strict 등 vision-backed 전략의 몫).
         target = abs(ctx.delta_weight)
         tol = ctx.profile.tolerance_grams
         pool = [p for p in ctx.active_products if p.stock_qty > 0 and p.unit_weight > 0]
-        within_tolerance = [
-            (abs(target - p.unit_weight), p) for p in pool
-            if abs(target - p.unit_weight) <= tol
-        ]
-        if not within_tolerance:
+        max_n = self._matcher.max_items
+        matches: list[tuple[float, ActiveProduct, int]] = []
+        for p in pool:
+            upper = min(p.stock_qty, max_n)  # I12
+            for n in range(1, upper + 1):
+                err = abs(target - n * p.unit_weight)
+                if err <= tol:
+                    matches.append((err, p, n))
+        if not matches:
             return JudgmentResult(
                 JudgmentStatus.NO_DETECTION, reason="no_candidates_forced_final"
             )
-        if len({p.product_id for _, p in within_tolerance}) >= 2:
-            # 모호: 허용오차 내에 서로 다른 품목이 2개 이상 그럴듯함 (원본의
-            # best/second-best 근접-동률 거부를 tolerance 창 스타일로 적용) —
-            # 과청구가 미청구보다 나쁘다(I13/D9) → 청구하지 않는다.
+        if len(matches) >= 2:
+            # 모호: 허용오차 내에 그럴듯한 (품목, 개수) 쌍이 2개 이상 — 서로
+            # 다른 품목이 걸리는 경우뿐 아니라 같은 품목에 대해 서로 다른 n이
+            # 동시에 허용오차를 통과하는 경우도 포함한다(원본의 best/second-best
+            # 근접-동률 거부를 tolerance 창 스타일로 적용) — 과청구가 미청구보다
+            # 나쁘다(I13/D9) → 청구하지 않는다.
             return JudgmentResult(
                 JudgmentStatus.NO_DETECTION, reason="weight_only_ambiguous"
             )
-        _, p = within_tolerance[0]
+        _, p, n = matches[0]
         return JudgmentResult(
             JudgmentStatus.COMPLETE,
-            (ProductCount(p, 1),),
+            (ProductCount(p, n),),
             confidence=0.3,
             reason="weight_only",
         )

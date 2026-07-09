@@ -364,3 +364,91 @@ class TestLockSmoke:
         worker = SerialTriggerWorker(pipeline, gateway)  # lock=None 기본값
         assert worker.pending == 0
         assert worker.drain() == 0
+
+
+# ---------------------------------------------------------------------------
+# 5) MODEL__MACHINE__CABINET_TYPE — 기기 단위 기본 프로파일 (E2E)
+# ---------------------------------------------------------------------------
+class TestCabinetTypeDefaultProfile:
+    """cabinet_type=freezer면 존 미지정(profiles dict 미주입) 시에도 기본
+    프로파일이 FREEZER가 되어야 한다 (이슈 #6 공동 원인 회귀 방지).
+
+    weight_only(no_candidate_fallback)는 freezer에서 억제되므로
+    (loadcell_identity_suppressed), 실제 판정 결과로 기본 프로파일 적용
+    여부를 검증한다 — REFRIGERATOR가 남아 있으면 weight_only가 그대로
+    COMPLETE를 내 회귀를 놓친다."""
+
+    def test_freezer_cabinet_type_suppresses_weight_only_without_zone_override(self, cola):
+        settings = Settings(cabinet_type="freezer")
+        svc = ModelService(
+            FakeDetector(detections=[]),  # vision 후보 0 → no_candidate_fallback 경로
+            clock=FakeClock(),
+            settings=settings,
+        )  # profiles 미주입 — cabinet_type만으로 기본 프로파일 결정
+        assert svc._default_profile.name == "freezer"
+        svc.handle_multi_zone(open_payload(cola))
+        svc.handle_trigger(trigger_payload())  # delta=-100g == cola.unit_weight
+        svc.process_pending()
+        outcome = svc.worker.outcomes[-1]
+        assert outcome.event.judgment.reason == "loadcell_identity_suppressed"
+        assert outcome.event.judgment.status.value == "no_detection"
+
+    def test_refrigerated_default_keeps_weight_only(self, cola):
+        # 회귀 방지: 기본값(refrigerated)에서는 기존처럼 weight_only가 유지된다.
+        settings = Settings(cabinet_type="refrigerated")
+        svc = ModelService(
+            FakeDetector(detections=[]),
+            clock=FakeClock(),
+            settings=settings,
+        )
+        assert svc._default_profile.name == "refrigerator"
+        svc.handle_multi_zone(open_payload(cola))
+        svc.handle_trigger(trigger_payload())
+        svc.process_pending()
+        outcome = svc.worker.outcomes[-1]
+        assert outcome.event.judgment.reason == "weight_only"
+        assert outcome.event.judgment.status.value == "complete"
+
+    def test_freezer_cabinet_type_applies_to_close_settlement(self, cola):
+        """CLOSE 정산도 기본 프로파일을 따라야 한다 (판정·정산 tolerance 단일
+        소스). removal -100g(콜라 1) 후 return +90g: freezer tolerance(±15g)면
+        |90-100|=10g ≤ 15g로 반품이 매칭돼 청구 0원. settler/gateway 폴백이
+        REFRIGERATOR(±3g)로 남아 있으면 반품 미매칭 → 콜라 1개가 그대로
+        청구된다 (net_delta 교정도 cola 100g > excess+tol=93g라 불가) —
+        이 delta는 정확히 폴백 프로파일 차이만 가른다."""
+        settings = Settings(cabinet_type="freezer")
+        svc = ModelService(
+            FakeDetector(),  # class_id=1(콜라) 검출 → freezer_vision_first 판정
+            clock=FakeClock(),
+            settings=settings,
+        )  # profiles 미주입 — 존 미지정 상태에서 기본 프로파일이 정산까지 적용
+        svc.handle_multi_zone(open_payload(cola))
+        svc.handle_trigger(trigger_payload(seq=0))  # removal: delta -100g
+        svc.process_pending()
+        return_payload = {
+            "zone": 1,
+            "frames": {"top": moving_frames(8), "side": moving_frames(8)},
+            "loadcells": samples(400, 490),  # return: delta +90g
+            "ts": 2.0,
+            "video_paths": {"top": "/r0.avi", "side": "/rs0.avi"},
+        }
+        svc.handle_trigger(return_payload)
+        svc.process_pending()
+        close = svc.handle_multi_zone({"session_id": "s", "state": "CLOSE"})
+        assert close["status"] == "complete"
+        assert close["totalPrice"] == 0  # freezer ±15g: 반품 매칭 → 청구 없음
+        assert close["productCount"] == 0
+
+    def test_invalid_cabinet_type_rejected(self):
+        import os
+
+        os.environ["MODEL__MACHINE__CABINET_TYPE"] = "frozen"
+        try:
+            try:
+                Settings.from_env()
+                raised = False
+            except ValueError:
+                raised = True
+            assert raised
+        finally:
+            del os.environ["MODEL__MACHINE__CABINET_TYPE"]

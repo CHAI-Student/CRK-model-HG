@@ -164,12 +164,13 @@ class TestGuards:
         assert result.products[0].count == 1
 
     def test_weight_only_no_longer_tries_multi_item_combination(self, cola, water):
-        # issue #6 오청구 재발 방지: cola(100g)+water(200g)=300g는 예전엔 다품목
-        # 조합으로 우연히 맞춰졌지만, 단일 품목 중엔 아무도 300g 근처가 아니므로
-        # (|300-100|=200, |300-200|=100, 둘 다 tolerance=3.0 초과) 더 이상 청구하지
-        # 않는다.
+        # issue #6 오청구 재발 방지: cola(100g)+water(200g)이 섞인 조합으로
+        # 우연히 맞춰지던 delta(-290g)는, 동일 상품 n개 확장 이후에도 여전히
+        # 청구하지 않는다 — cola×n(100,200,300,...)·water×n(200,400,...) 어느
+        # 배수도 tolerance(3.0g) 내로 290g에 들어오지 않으므로(다품목 조합은
+        # 여전히 탐색하지 않는다) no_candidates_forced_final로 빠진다.
         router = JudgmentRouter()
-        result = router.judge(ctx(-300.0, [cola, water], []))
+        result = router.judge(ctx(-290.0, [cola, water], []))
         assert result.strategy == "no_candidate_fallback"
         assert result.status is JudgmentStatus.NO_DETECTION
         assert result.reason == "no_candidates_forced_final"
@@ -190,6 +191,54 @@ class TestGuards:
         router.judge(ctx(-100.0, [cola], [cand(1)]))
         router.judge(ctx(-100.0, [cola], [cand(1)]))
         assert router.telemetry["strict"] == 2
+
+
+class TestWeightOnlySameProductCount:
+    """weight_only 확장: 동일 상품 n개 제거도 유일 매칭이면 채택한다
+    (직전 수정이 count=1 유일 매칭으로 과도 제한했던 것을 완화)."""
+
+    def test_same_product_two_units_unique_match(self):
+        # 2 x 79g = 158g delta — 동일 상품 2개 제거가 유일하게 tolerance(3.0g)
+        # 내로 들어오면 count=2로 채택한다.
+        from crk_model.core.types import ActiveProduct
+
+        snack = ActiveProduct(
+            "P079", "스낵79", class_id=7, unit_weight=79.0, unit_price=1200, stock_qty=5
+        )
+        router = JudgmentRouter()
+        result = router.judge(ctx(-158.0, [snack], []))
+        assert result.strategy == "no_candidate_fallback"
+        assert result.reason == "weight_only"
+        assert result.status is JudgmentStatus.COMPLETE
+        assert result.products[0].product.product_id == "P079"
+        assert result.products[0].count == 2
+
+    def test_two_products_both_plausible_is_ambiguous(self, cola):
+        # cola(100g) x2 = 200g와 water2(200g) x1 = 200g가 동시에 delta=-200g의
+        # tolerance(3.0g) 내로 들어오면 — 서로 다른 (product, n) 쌍 2개가 모두
+        # 그럴듯하므로 여전히 weight_only_ambiguous로 거부한다.
+        from dataclasses import replace
+
+        water2 = replace(cola, product_id="P200", class_id=8, unit_weight=200.0)
+        router = JudgmentRouter()
+        result = router.judge(ctx(-200.0, [cola, water2], []))
+        assert result.strategy == "no_candidate_fallback"
+        assert result.status is JudgmentStatus.NO_DETECTION
+        assert result.reason == "weight_only_ambiguous"
+
+    def test_count_exceeding_stock_excludes_candidate(self):
+        # stock=2인 상품에 대해 n=3(=237g)이 필요한 delta는 후보에서 제외되고
+        # (I12), 다른 매칭도 없으면 no_candidates_forced_final로 빠진다.
+        from crk_model.core.types import ActiveProduct
+
+        limited = ActiveProduct(
+            "P079L", "스낵79한정", class_id=9, unit_weight=79.0, unit_price=1200, stock_qty=2
+        )
+        router = JudgmentRouter()
+        result = router.judge(ctx(-237.0, [limited], []))
+        assert result.strategy == "no_candidate_fallback"
+        assert result.status is JudgmentStatus.NO_DETECTION
+        assert result.reason == "no_candidates_forced_final"
 
 
 class TestNoCandidateFreezerSuppression:

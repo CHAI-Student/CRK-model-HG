@@ -15,7 +15,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
 
-from crk_model.core.profiles import SensorProfile
+from crk_model.core.profiles import REFRIGERATOR, SensorProfile
 from crk_model.core.types import FinalizedSettlement, InterimSummary
 from crk_model.ledger.barrier import CausalBarrier
 from crk_model.ledger.events import EventLog, TriggerEvent
@@ -120,10 +120,15 @@ class MultiZoneGateway:
         close_timeout_s: float = 10.0,  # I17: 상한 타임아웃 (정상 경로 아님)
         worker_stall_timeout_s: float = 120.0,  # queue_pending 전용 상한 (처리 지연 ≠ 유실)
         on_finalize: Callable[[str, DoorState, FinalizedSettlement], None] | None = None,
+        default_profile: SensorProfile = REFRIGERATOR,
+        # zone이 profiles dict에 없을 때의 폴백 프로파일 (cabinet_type 이식) —
+        # interim 집계의 tolerance가 판정(pipeline)·정산(settler)과 같은 기본
+        # 프로파일을 쓰게 한다. 기본값은 기존 동작(REFRIGERATOR)과 동일.
     ):
         self._settler = settler
         self._event_log = event_log
         self._profiles = dict(profiles)
+        self._default_profile = default_profile
         self._clock = clock
         self._close_timeout = close_timeout_s
         self._stall_timeout = max(worker_stall_timeout_s, close_timeout_s)
@@ -247,7 +252,10 @@ class MultiZoneGateway:
     def interim(self) -> InterimSummary:
         assert self.session_id is not None
         return interim_summary(
-            self.session_id, self._event_log.events_for(self.session_id), self._profiles
+            self.session_id,
+            self._event_log.events_for(self.session_id),
+            self._profiles,
+            self._default_profile,
         )
 
     def _settle(self) -> FinalizedSettlement:

@@ -81,8 +81,16 @@ def _ok_events(events: Iterable[TriggerEvent]) -> list[TriggerEvent]:
     ]
 
 
-def _profile(profiles: Mapping[int, SensorProfile], zone: int) -> SensorProfile:
-    return profiles.get(zone, REFRIGERATOR)
+def _profile(
+    profiles: Mapping[int, SensorProfile],
+    zone: int,
+    default: SensorProfile = REFRIGERATOR,
+) -> SensorProfile:
+    # zone 미지정 시 폴백 — MODEL__MACHINE__CABINET_TYPE 이식: 판정(pipeline)과
+    # 정산(settle)의 tolerance/count gate 단일 소스 원칙을 지키기 위해 호출측
+    # (ModelService → CloseSettler/MultiZoneGateway)이 기기 단위 기본 프로파일을
+    # 주입한다. 기본값 REFRIGERATOR는 기존 동작과의 하위호환.
+    return profiles.get(zone, default)
 
 
 def _notes_for_zone(notes: Sequence[str], zone: int) -> tuple[str, ...]:
@@ -97,14 +105,16 @@ def _notes_for_zone(notes: Sequence[str], zone: int) -> tuple[str, ...]:
 
 
 def pass_same_zone(
-    events: Sequence[TriggerEvent], profiles: Mapping[int, SensorProfile]
+    events: Sequence[TriggerEvent],
+    profiles: Mapping[int, SensorProfile],
+    default_profile: SensorProfile = REFRIGERATOR,
 ) -> tuple[dict[int, _Basket], list[tuple[int, float]]]:
     """1층: 동존 즉시 복구 — removal은 판정 품목 축적, return은 무게 매칭 차감."""
     baskets: dict[int, _Basket] = defaultdict(_Basket)
     unmatched: list[tuple[int, float]] = []
     for e in sorted(events, key=lambda e: e.ts):
         b = baskets[e.zone]
-        tol = _profile(profiles, e.zone).tolerance_grams
+        tol = _profile(profiles, e.zone, default_profile).tolerance_grams
         if e.delta_weight < 0:
             for pc in e.judgment.products:
                 b.add(pc.product, pc.count)
@@ -129,8 +139,16 @@ def _match_return(b: _Basket, ret_weight: float, tol: float) -> bool:
 
 
 class CloseSettler:
-    def __init__(self, error_policy: ErrorSessionPolicy = ErrorSessionPolicy.BLOCK_PAYMENT):
+    def __init__(
+        self,
+        error_policy: ErrorSessionPolicy = ErrorSessionPolicy.BLOCK_PAYMENT,
+        default_profile: SensorProfile = REFRIGERATOR,
+    ):
         self.error_policy = error_policy
+        # zone이 profiles dict에 없을 때의 폴백 프로파일 (cabinet_type 이식) —
+        # ModelService가 기기 단위 기본 프로파일을 주입한다. 기본값은 기존
+        # 동작(REFRIGERATOR)과 동일한 하위호환.
+        self.default_profile = default_profile
         self._finalized: dict[str, FinalizedSettlement] = {}
 
     def settle(
@@ -153,10 +171,10 @@ class CloseSettler:
             }
         )
 
-        baskets, unmatched = pass_same_zone(ok, profiles)
-        self._pass_net_delta(baskets, ok, profiles, unmatched, notes)
-        self._pass_cross_zone(baskets, unmatched, profiles, notes)
-        self._freezer_resolve(baskets, ok, profiles, notes)
+        baskets, unmatched = pass_same_zone(ok, profiles, self.default_profile)
+        self._pass_net_delta(baskets, ok, profiles, unmatched, notes, self.default_profile)
+        self._pass_cross_zone(baskets, unmatched, profiles, notes, self.default_profile)
+        self._freezer_resolve(baskets, ok, profiles, notes, self.default_profile)
 
         # OPS 로그용: basket이 비어 있어도(예: unmatched_return만 있던 zone)
         # 이벤트가 발생했던 zone은 요약에 나와야 한다 — events는 ok+error 전체
@@ -219,10 +237,11 @@ class CloseSettler:
         profiles: Mapping[int, SensorProfile],
         unmatched: list[tuple[int, float]],
         notes: list[str],
+        default_profile: SensorProfile = REFRIGERATOR,
     ) -> None:
         """2층: 세션 net delta와 어긋난 과잉 청구 교정."""
         for zone, b in baskets.items():
-            tol = _profile(profiles, zone).tolerance_grams
+            tol = _profile(profiles, zone, default_profile).tolerance_grams
             net = sum(e.delta_weight for e in events if e.zone == zone)
             excess = b.weight() - max(0.0, -net)
             while excess > tol:
@@ -245,6 +264,7 @@ class CloseSettler:
         unmatched: list[tuple[int, float]],
         profiles: Mapping[int, SensorProfile],
         notes: list[str],
+        default_profile: SensorProfile = REFRIGERATOR,
     ) -> None:
         """3층: 미매칭 반품을 다른 존 장바구니와 매칭 (존 착오 반납)."""
         for zone, wt in unmatched:
@@ -252,7 +272,7 @@ class CloseSettler:
             for oz, b in baskets.items():
                 if oz == zone:
                     continue
-                tol = _profile(profiles, oz).tolerance_grams
+                tol = _profile(profiles, oz, default_profile).tolerance_grams
                 for p, _c in b.items():
                     if abs(wt - p.unit_weight) <= tol:
                         b.remove_one(p.product_id)
@@ -272,10 +292,11 @@ class CloseSettler:
         events: Sequence[TriggerEvent],
         profiles: Mapping[int, SensorProfile],
         notes: list[str],
+        default_profile: SensorProfile = REFRIGERATOR,
     ) -> None:
         """4층: freezer 부호있는 net basket 재solve (불안정 close 대비, QA Q6)."""
         for zone, b in list(baskets.items()):
-            prof = _profile(profiles, zone)
+            prof = _profile(profiles, zone, default_profile)
             if prof.weight_is_discriminative:
                 continue
             gate = prof.count_gate
@@ -308,9 +329,10 @@ def interim_summary(
     session_id: str,
     events: Sequence[TriggerEvent],
     profiles: Mapping[int, SensorProfile],
+    default_profile: SensorProfile = REFRIGERATOR,
 ) -> InterimSummary:
     """잠정 집계 (I10) — 1층(동존)만 반영. 결제 전달 금지 타입."""
-    baskets, _ = pass_same_zone(_ok_events(events), profiles)
+    baskets, _ = pass_same_zone(_ok_events(events), profiles, default_profile)
     return InterimSummary(
         session_id, tuple(baskets[z].to_zone(z) for z in sorted(baskets))
     )
