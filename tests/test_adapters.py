@@ -3,8 +3,6 @@
 ultralytics/cv2가 필요한 경로는 Jetson 전용(G4)이라 여기서 검증하지 않는다.
 fastapi가 없는 환경에서는 HTTP 테스트를 skip한다.
 """
-from dataclasses import asdict
-
 import pytest
 
 from crk_model.core.profiles import REFRIGERATOR
@@ -12,6 +10,31 @@ from crk_model.frames.bundle import FrameBundle
 from crk_model.service import ActiveProductStore, ModelService, TriggerPipeline, TriggerRequest
 
 from test_service import FakeClock, FakeDetector, frame, moving_frames, samples
+
+
+def _node_product(p):
+    """ActiveProduct → Node/Edge wire 상품 포맷 (REFERENCE.md 계약)."""
+    return {
+        "product_idx": p.product_id,
+        "product_name": p.name,
+        "yolo_class_id": p.class_id,
+        "product_weight": str(p.unit_weight),
+        "sale_price": p.unit_price,
+        "stock_qty": p.stock_qty,
+    }
+
+
+def _wire_loadcells(samples_):
+    """LoadcellSample 목록 → 계약 loadcell wire(raw/filtered 문자열)."""
+    return [
+        {
+            "timestamp": s.ts,
+            "raw_value": [f"{v:+.1f}" for v in s.values],
+            "filtered_value": [f"{v:+.1f}" for v in s.values],
+            "filter_method": "none",
+        }
+        for s in samples_
+    ]
 
 
 class TestFrameBundle:
@@ -44,7 +67,7 @@ class TestHttpAdapter:
         client, svc = client_and_service
         r = client.post(
             "/api/judge/multi-zone",
-            json={"session_id": "s1", "state": "OPEN", "active_products": [asdict(cola)]},
+            json={"session_id": "OPEN", "products": [_node_product(cola)]},
         )
         assert r.json()["status"] == "processing"
 
@@ -53,20 +76,17 @@ class TestHttpAdapter:
             json={
                 "zone": 1,
                 "videos": {"top": "/data/t.avi", "side": "/data/s.avi"},
-                "loadcells": [
-                    {"timestamp": s.ts, "values": list(s.values)}
-                    for s in samples(500, 400)
-                ],
+                "loadcells": _wire_loadcells(samples(500, 400)),
             },
         )
         assert r.json()["status"] == "queued"  # 202 의미론 (디코드 전 즉시 응답)
 
         # 큐 미소진 CLOSE → 배리어 보류 (I17)
-        r = client.post("/api/judge/multi-zone", json={"session_id": "s1", "state": "CLOSE"})
+        r = client.post("/api/judge/multi-zone", json={"session_id": "CLOSE"})
         assert r.json()["status"] == "processing"
 
         svc.process_pending()  # 워커 스레드 대행
-        r = client.post("/api/judge/multi-zone", json={"session_id": "s1", "state": "CLOSE"})
+        r = client.post("/api/judge/multi-zone", json={"session_id": "CLOSE"})
         body = r.json()
         assert body["status"] == "complete"
         assert body["totalPrice"] == 1500
@@ -83,12 +103,19 @@ class TestHttpAdapter:
         client, svc = client_and_service
         client.post(
             "/api/judge/multi-zone",
-            json={"session_id": "s1", "state": "OPEN", "active_products": [asdict(cola)]},
+            json={"session_id": "OPEN", "products": [_node_product(cola)]},
         )
         payload = {
             "zone": 1,
             "videos": {"top": "/data/t.avi"},
-            "loadcells": [{"timestamp": 0.0, "values": [250.0, 250.0]}],
+            "loadcells": [
+                {
+                    "timestamp": 0.0,
+                    "raw_value": ["+250.0", "+250.0"],
+                    "filtered_value": ["+250.0", "+250.0"],
+                    "filter_method": "none",
+                }
+            ],
         }
         first = client.post("/trigger", json=payload).json()
         second = client.post("/trigger", json=payload).json()
