@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 
+import itertools
 from dataclasses import replace
 
 from crk_model.core.types import (
@@ -72,9 +73,23 @@ class FreezerVisionFirstStrategy:
     """순위 1: 냉동고 — vision 정체성 우선, 무게는 개수 게이트(±15g, I3)로만.
 
     178g 사건 재발 방지: 근접 단일 후보가 있으면 후보들을 합쳐 청구하지 않는다.
+
+    한 트리거 다품종 (카메라가 연속 동작을 한 녹화로 합치는 실기 특성):
+    - 단일 설명은 최상위 후보만이 아니라 **득표순으로 전 정체성**에 시도한다 —
+      최상위가 오검출(반사 등, 이슈 #8의 메로나)이어도 실제 상품의 단일 설명이
+      조합보다 앞선다.
+    - 조합은 2종 상한이 아니라 k=2..max_kinds(기본 4)종까지, vision이 실제로 본
+      상위 identity_pool개 안에서 탐색한다. 종류 수가 적은 설명 우선(특이도),
+      같은 k에서는 무게 오차 최소 → 득표 합 최대 순으로 채택 (전부 I3 게이트
+      통과 필수, I12 stock 상한).
     """
 
     name = "freezer_vision_first"
+
+    def __init__(self, max_kinds: int = 4, identity_pool: int = 6, max_total_items: int = 12):
+        self._max_kinds = max_kinds
+        self._identity_pool = identity_pool
+        self._max_total_items = max_total_items
 
     def precondition(self, ctx: JudgmentContext) -> bool:
         return (
@@ -89,12 +104,14 @@ class FreezerVisionFirstStrategy:
         by_class = _product_by_class(ctx)
         ranked = sorted(ctx.vision_candidates, key=lambda c: (-c.vote_count, -c.confidence))
         identities = [(by_class[c.class_id], c) for c in ranked if c.class_id in by_class]
+        identities = identities[: self._identity_pool]
         if not identities:
             return None
 
-        # 단일 정체성 우선 (I3 게이트)
-        p, cand = identities[0]
-        if p.unit_weight > 0:
+        # ① 단일 정체성 우선 (I3 게이트, 178g 원칙) — 득표순 전 정체성 시도
+        for p, cand in identities:
+            if p.unit_weight <= 0:
+                continue
             count = min(max(1, round(target / p.unit_weight)), p.stock_qty)  # I12
             if abs(target - count * p.unit_weight) <= gate:
                 return JudgmentResult(
@@ -104,26 +121,48 @@ class FreezerVisionFirstStrategy:
                     reason="freezer_vision_first_single",
                 )
 
-        # 2정체성 조합 (여전히 게이트 통과 필수 — I3)
-        if len(identities) >= 2:
-            q, cand_q = identities[1]
-            for c1 in range(1, p.stock_qty + 1):
-                rem = target - c1 * p.unit_weight
-                if rem <= -gate:
-                    break
-                if q.unit_weight <= 0:
-                    continue
-                c2 = round(rem / q.unit_weight)
-                if c2 < 1 or c2 > q.stock_qty:
-                    continue
-                if abs(target - (c1 * p.unit_weight + c2 * q.unit_weight)) <= gate:
-                    return JudgmentResult(
-                        JudgmentStatus.COMPLETE,
-                        (ProductCount(p, c1), ProductCount(q, c2)),
-                        confidence=(cand.confidence + cand_q.confidence) / 2,
-                        reason="freezer_vision_first_combo",
+        # ② k정체성 조합 (k=2..max_kinds, 종류 적은 설명 우선 — 여전히 I3 필수)
+        pool = [(p, c) for p, c in identities if p.unit_weight > 0]
+        for k in range(2, min(self._max_kinds, len(pool)) + 1):
+            best: tuple[tuple[float, int], tuple, tuple] | None = None
+            for subset in itertools.combinations(pool, k):
+                for alloc in self._allocations([p for p, _ in subset], target, gate):
+                    weight = sum(c * p.unit_weight for (p, _), c in zip(subset, alloc, strict=True))
+                    key = (
+                        abs(target - weight),
+                        -sum(cand.vote_count for _, cand in subset),
                     )
+                    if best is None or key < best[0]:
+                        best = (key, subset, alloc)
+            if best is not None:
+                _, subset, alloc = best
+                return JudgmentResult(
+                    JudgmentStatus.COMPLETE,
+                    tuple(ProductCount(p, c) for (p, _), c in zip(subset, alloc, strict=True)),
+                    confidence=sum(cand.confidence for _, cand in subset) / len(subset),
+                    reason="freezer_vision_first_combo",
+                )
         return None
+
+    def _allocations(self, products: list[ActiveProduct], target: float, gate: float):
+        """각 종류 최소 1개(부분집합 크기가 곧 종류 수)로 target±gate를 설명하는
+        개수 배분을 백트래킹으로 열거. I12(stock)·총 개수 상한·무게 초과 가지치기."""
+
+        def rec(i: int, counts: list[int], weight: float, items: int):
+            if i == len(products):
+                if abs(target - weight) <= gate:  # I3
+                    yield tuple(counts)
+                return
+            p = products[i]
+            for c in range(1, p.stock_qty + 1):  # I12
+                w = weight + c * p.unit_weight
+                if w > target + gate or items + c > self._max_total_items:
+                    break
+                counts.append(c)
+                yield from rec(i + 1, counts, w, items + c)
+                counts.pop()
+
+        yield from rec(0, [], 0.0, 0)
 
 
 class AugmentStageWeightGateStage:

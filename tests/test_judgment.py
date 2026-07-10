@@ -2,7 +2,13 @@
 from conftest import cand
 
 from crk_model.core.profiles import FREEZER, REFRIGERATOR
-from crk_model.core.types import JudgmentResult, JudgmentStatus, ProductCount, WeightSegment
+from crk_model.core.types import (
+    ActiveProduct,
+    JudgmentResult,
+    JudgmentStatus,
+    ProductCount,
+    WeightSegment,
+)
 from crk_model.judgment import (
     JudgmentContext,
     JudgmentRouter,
@@ -105,6 +111,59 @@ class TestFreezer:
         result = router.judge(ctx(-178.0, [cola], [cand(1)], profile=FREEZER))
         assert result.strategy != "freezer_vision_first"
         assert result.status is not JudgmentStatus.COMPLETE  # I6 방어
+
+    # 다품종 조합 테스트용 커스텀 무게 — freezer 게이트(±15g)에서 1·2종
+    # 조합으로는 우연 설명이 불가능하도록 서로 소인 큰 무게를 쓴다.
+    @staticmethod
+    def _multi_kind_products():
+        pa = ActiveProduct("PA", "A", class_id=11, unit_weight=970.0, unit_price=1000, stock_qty=5)
+        pb = ActiveProduct("PB", "B", class_id=12, unit_weight=610.0, unit_price=2000, stock_qty=5)
+        pc_ = ActiveProduct("PC", "C", class_id=13, unit_weight=210.0, unit_price=3000, stock_qty=5)
+        return pa, pb, pc_
+
+    def test_three_kind_combo_in_single_trigger(self):
+        # 한 트리거에 서로 다른 3종 (카메라가 연속 동작을 한 녹화로 합침):
+        # 2종 상한이던 조합을 k=2..4종으로 일반화 — 970+610+210=1790g은
+        # 1·2종 어떤 배분으로도 ±15g 내 설명 불가, 3종 1/1/1만 정답.
+        pa, pb, pc_ = self._multi_kind_products()
+        router = JudgmentRouter()
+        result = router.judge(ctx(
+            -1790.0, [pa, pb, pc_],
+            [cand(11, conf=0.7, votes=30), cand(12, conf=0.6, votes=20),
+             cand(13, conf=0.5, votes=10)],
+            profile=FREEZER,
+        ))
+        assert result.strategy == "freezer_vision_first"
+        assert result.reason == "freezer_vision_first_combo"
+        counts = {p.product.product_id: p.count for p in result.products}
+        assert counts == {"PA": 1, "PB": 1, "PC": 1}
+
+    def test_single_of_lower_ranked_identity_beats_combo(self, water, bar178):
+        # 이슈 #8 계열: 최상위 후보가 오검출(반사 등)이어도 하위 정체성의 단일
+        # 설명이 조합보다 우선 — 400g을 bar178(오검출 1위) 조합으로 왜곡하지
+        # 않고 water×2 단일로 잡는다 (178g 원칙의 득표순 확장).
+        router = JudgmentRouter()
+        result = router.judge(ctx(
+            -400.0, [water, bar178],
+            [cand(4, conf=0.9, votes=50), cand(2, conf=0.6, votes=10)],  # bar178이 1위
+            profile=FREEZER,
+        ))
+        assert result.reason == "freezer_vision_first_single"
+        assert result.products[0].product.product_id == "P002"
+        assert result.products[0].count == 2
+
+    def test_combo_prefers_fewer_kinds(self):
+        # 특이도: 2종으로 설명 가능하면(970+610=1580) 3종 조합을 만들지 않는다
+        pa, pb, pc_ = self._multi_kind_products()
+        router = JudgmentRouter()
+        result = router.judge(ctx(
+            -1580.0, [pa, pb, pc_],
+            [cand(11, votes=30), cand(12, votes=20), cand(13, votes=10)],
+            profile=FREEZER,
+        ))
+        assert result.reason == "freezer_vision_first_combo"
+        counts = {p.product.product_id: p.count for p in result.products}
+        assert counts == {"PA": 1, "PB": 1}
 
 
 class TestSegmentMatching:
