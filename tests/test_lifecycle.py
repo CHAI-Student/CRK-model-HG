@@ -62,7 +62,7 @@ def moving_frames(n):
 def samples(start, end, n=10, dt=0.1):
     out, ts = [], 0.0
     for value in [start] * n + [end] * n:
-        out.append(LoadcellSample(ts, (value / 2, value / 2)))
+        out.append(LoadcellSample(ts, (float(value), 300.0)))  # 변화는 ch0 셀에만 (전제 3)
         ts += dt
     return out
 
@@ -375,10 +375,10 @@ class TestCabinetTypeDefaultProfile:
     """cabinet_type=freezer면 존 미지정(profiles dict 미주입) 시에도 기본
     프로파일이 FREEZER가 되어야 한다 (이슈 #6 공동 원인 회귀 방지).
 
-    weight_only(no_candidate_fallback)는 freezer에서 억제되므로
-    (loadcell_identity_suppressed), 실제 판정 결과로 기본 프로파일 적용
-    여부를 검증한다 — REFRIGERATOR가 남아 있으면 weight_only가 그대로
-    COMPLETE를 내 회귀를 놓친다."""
+    v2에서 무게 단독 정체성 채택(weight_unique)은 냉장에서만 허용되고
+    냉동에서는 weight_identity_suppressed로 보류되므로, 실제 판정 결과로
+    기본 프로파일 적용 여부를 검증한다 — REFRIGERATOR가 남아 있으면
+    weight_unique가 그대로 COMPLETE를 내 회귀를 놓친다."""
 
     def test_freezer_cabinet_type_suppresses_weight_only_without_zone_override(self, cola):
         settings = Settings(cabinet_type="freezer", close_grace_s=0.0)
@@ -392,11 +392,12 @@ class TestCabinetTypeDefaultProfile:
         svc.handle_trigger(trigger_payload())  # delta=-100g == cola.unit_weight
         svc.process_pending()
         outcome = svc.worker.outcomes[-1]
-        assert outcome.event.judgment.reason == "loadcell_identity_suppressed"
         assert outcome.event.judgment.status.value == "no_detection"
+        assert outcome.event.judgment.strategy == "cell_pending"
+        assert outcome.event.cells[0].reason == "weight_identity_suppressed"
 
     def test_refrigerated_default_keeps_weight_only(self, cola):
-        # 회귀 방지: 기본값(refrigerated)에서는 기존처럼 weight_only가 유지된다.
+        # 회귀 방지: 기본값(refrigerated)에서는 무게 단독 채택이 유지된다.
         settings = Settings(cabinet_type="refrigerated", close_grace_s=0.0)
         svc = ModelService(
             FakeDetector(detections=[]),
@@ -408,8 +409,8 @@ class TestCabinetTypeDefaultProfile:
         svc.handle_trigger(trigger_payload())
         svc.process_pending()
         outcome = svc.worker.outcomes[-1]
-        assert outcome.event.judgment.reason == "weight_only"
         assert outcome.event.judgment.status.value == "complete"
+        assert outcome.event.cells[0].reason == "weight_unique"
 
     def test_freezer_cabinet_type_applies_to_close_settlement(self, cola):
         """CLOSE 정산도 기본 프로파일을 따라야 한다 (판정·정산 tolerance 단일

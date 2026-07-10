@@ -54,9 +54,11 @@ def moving_frames(n):
 
 
 def samples(start, end, n=10, dt=0.1):
+    # 전제 2·3: 상품은 존의 좌/우 로드셀 중 하나 위에 있다 — 변화는 그 채널(ch0)
+    # 에만 실리고 이웃 셀(ch1)은 불변이다 (v1은 채널 합산이라 절반씩 나눠도 됐음).
     out, ts = [], 0.0
     for value in [start] * n + [end] * n:
-        out.append(LoadcellSample(ts, (value / 2, value / 2)))
+        out.append(LoadcellSample(ts, (float(value), 300.0)))
         ts += dt
     return out
 
@@ -242,7 +244,7 @@ class TestGuards:
             TriggerRequest(1, {"top": moving_frames(4)}, samples(500, 496), 1.0),
         )
         assert outcome.event.judgment.reason == "below_min_weight_change"
-        assert outcome.event.judgment.strategy == "low_weight_skip"
+        assert outcome.event.judgment.strategy == "no_signal"
         assert detector.calls == 0
 
     def test_processing_error_propagates_as_error_event(self, cola):

@@ -118,44 +118,59 @@ class TestEarlyTermination:
             profile, EarlyTerminationConfig(min_lead_votes=5, lead_margin=3, hand_exit_frames=5)
         )
 
+    @staticmethod
+    def _cells(*deltas):
+        from crk_model.core.types import CellOutcome
+
+        return [CellOutcome(channel=i, delta_weight=d) for i, d in enumerate(deltas)]
+
     def test_converged_removal_stops(self, cola):
         assert self._terminator().should_stop(
-            delta_weight=-100.0,
+            cells=self._cells(-100.0),
             candidates=[cand(1, votes=10)],
             active_products=[cola],
             frames_since_hand_exit=6,
         )
 
     def test_freezer_never_stops(self, cola):
-        # I15: freezer 금지
+        # freezer 금지 (후반 프레임 증거 중요 — v1 승계)
         assert not self._terminator(FREEZER).should_stop(
-            delta_weight=-100.0, candidates=[cand(1, votes=10)],
+            cells=self._cells(-100.0), candidates=[cand(1, votes=10)],
             active_products=[cola], frames_since_hand_exit=6,
         )
 
     def test_return_never_stops(self, cola):
-        # I15: +delta(반품) 금지
+        # +delta(반품) 포함 시 금지 (v1 승계)
         assert not self._terminator().should_stop(
-            delta_weight=100.0, candidates=[cand(1, votes=10)],
+            cells=self._cells(100.0), candidates=[cand(1, votes=10)],
             active_products=[cola], frames_since_hand_exit=6,
         )
 
     def test_hand_still_present_blocks(self, cola):
         assert not self._terminator().should_stop(
-            delta_weight=-100.0, candidates=[cand(1, votes=10)],
+            cells=self._cells(-100.0), candidates=[cand(1, votes=10)],
             active_products=[cola], frames_since_hand_exit=2,
         )
 
     def test_unexplained_delta_blocks(self, cola):
-        # D7: judge()와 동일 tolerance(±3g) 단일 소스 — 50g 오차는 설명 불가
+        # 판정(router)과 동일 tolerance(±3g) 단일 소스 — 50g 오차는 설명 불가
         assert not self._terminator().should_stop(
-            delta_weight=-150.0, candidates=[cand(1, votes=10)],
+            cells=self._cells(-150.0), candidates=[cand(1, votes=10)],
             active_products=[cola], frames_since_hand_exit=6,
+        )
+
+    def test_second_cell_unexplained_blocks(self, cola, water):
+        # 두 셀이 움직이면 둘 다 설명돼야 중단 가능 (v2) — -140은 어느 후보로도 불가
+        assert not self._terminator().should_stop(
+            cells=self._cells(-100.0, -140.0),
+            candidates=[cand(1, votes=10)],
+            active_products=[cola, water],
+            frames_since_hand_exit=6,
         )
 
     def test_no_margin_blocks(self, cola, water):
         assert not self._terminator().should_stop(
-            delta_weight=-100.0,
+            cells=self._cells(-100.0),
             candidates=[cand(1, votes=6), cand(2, votes=5)],  # 마진 1 < 3
             active_products=[cola, water],
             frames_since_hand_exit=6,

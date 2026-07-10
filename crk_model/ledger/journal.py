@@ -22,6 +22,7 @@ from pathlib import Path
 
 from crk_model.core.types import (
     ActiveProduct,
+    CellOutcome,
     JudgmentResult,
     JudgmentStatus,
     ProductCount,
@@ -53,6 +54,8 @@ def event_to_dict(e: TriggerEvent) -> dict:
         # 진단 강화 (issue #6): G2 코퍼스 재생의 입력이 되므로 저널에도 남긴다.
         "vision_candidates": [asdict(c) for c in e.vision_candidates],
         "video_paths": {k: v for k, v in e.video_paths},
+        # 설계 v2: 셀별 관측+판정 — replay 정산의 셀 net 입력
+        "cells": [asdict(c) for c in e.cells],
     }
 
 
@@ -82,6 +85,19 @@ def event_from_dict(d: dict) -> TriggerEvent:
             VisionCandidate(**c) for c in d.get("vision_candidates", ())
         ),
         video_paths=tuple(d.get("video_paths", {}).items()),
+        cells=tuple(
+            CellOutcome(
+                channel=c["channel"],
+                delta_weight=c["delta_weight"],
+                segments=tuple(WeightSegment(**s) for s in c.get("segments", ())),
+                stabilized=c.get("stabilized", True),
+                resolved=c.get("resolved", False),
+                product_id=c.get("product_id", ""),
+                count=c.get("count", 0),
+                reason=c.get("reason", ""),
+            )
+            for c in d.get("cells", ())
+        ),
     )
 
 

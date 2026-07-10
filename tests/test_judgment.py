@@ -1,405 +1,270 @@
-"""judgment: 라우터 순서(D3), strict(I5·I12), I6, freezer(I3), 세그먼트(D4), I8."""
-from conftest import cand
+"""판정 라우터 v2 — 셀 단위 4경로 (설계 전제 3개만 사용).
+
+전제: 상품 ≤10 (class_id ≤11, hand=0) · 5존 × 좌/우 셀 · 셀당 한 상품 종류.
+그 외 어떤 가정도 테스트에 넣지 않는다 (예: "상품 무게는 서로 다르다" 금지 —
+bar170/bar178은 freezer ±15g에서 서로 겹치는 실사고 케이스다).
+"""
+import pytest
 
 from crk_model.core.profiles import FREEZER, REFRIGERATOR
-from crk_model.core.types import (
-    ActiveProduct,
-    JudgmentResult,
-    JudgmentStatus,
-    ProductCount,
-    WeightSegment,
-)
-from crk_model.judgment import (
-    JudgmentContext,
-    JudgmentRouter,
-    StrictWeightMatcher,
-    default_pipeline,
-    enforce_full_delta_match,
-)
+from crk_model.core.types import ActiveProduct, CellOutcome, JudgmentStatus
+from crk_model.judgment import JudgmentContext, JudgmentRouter
+from tests.conftest import cand
 
 
-def ctx(delta, products, candidates, profile=REFRIGERATOR, segments=(), vision_only=False):
-    return JudgmentContext(
-        zone=1, profile=profile, delta_weight=delta,
-        segments=tuple(segments), vision_candidates=tuple(candidates),
-        active_products=tuple(products), vision_only=vision_only,
+def cell(channel, delta, stabilized=True, reason=""):
+    return CellOutcome(
+        channel=channel, delta_weight=delta, stabilized=stabilized, reason=reason
     )
 
 
-class TestPipelineOrder:
-    def test_diagram5_order_preserved(self):
-        names = [e.name for e in default_pipeline()]
-        assert names == [
-            "vision_only", "freezer_vision_first", "augment_stage_weight_gate",
-            "segment_weight_matching", "stage_count_combo", "no_candidate_fallback",
-            "min_weight_gate", "same_weight_collision_guard", "strict",
-            "stage_count_combo", "same_product_count", "relaxed",
-            "relaxed_loadcell_only", "vision_first_identity_partial",
-            "detected_single_item_fallback", "relaxed_partial", "forced_final",
+def ctx(
+    cells,
+    products,
+    candidates=(),
+    identities=None,
+    profile=REFRIGERATOR,
+    vision_only=False,
+    zone=1,
+):
+    return JudgmentContext(
+        zone=zone,
+        profile=profile,
+        cells=tuple(cells),
+        vision_candidates=tuple(candidates),
+        active_products=tuple(products),
+        identities=identities or {},
+        vision_only=vision_only,
+    )
+
+
+@pytest.fixture
+def router():
+    return JudgmentRouter()
+
+
+class TestCellDelta:
+    """① 주 경로 — 정체성 p의 n×w 설명."""
+
+    def test_known_identity_counts_from_weight(self, router, cola):
+        d = router.judge(ctx([cell(0, -200.0)], [cola], identities={0: "P001"}))
+        assert d.result.status is JudgmentStatus.COMPLETE
+        assert d.result.strategy == "cell_delta"
+        assert [(pc.product.product_id, pc.count) for pc in d.result.products] == [
+            ("P001", 2)
+        ]
+        assert d.cells[0].resolved and d.cells[0].count == 2
+
+    def test_known_identity_works_without_vision(self, router, cola):
+        # 알려진 셀은 비전이 실패해도(김서림·가림) 무게만으로 판정된다
+        d = router.judge(ctx([cell(0, -100.0)], [cola], identities={0: "P001"}))
+        assert d.result.status is JudgmentStatus.COMPLETE
+        assert d.result.products[0].count == 1
+
+    def test_two_cells_resolve_independently(self, router, cola, water):
+        # 한 트리거에 좌/우 셀 동시 동작 — v1 "다품종 조합"의 자연 분해
+        d = router.judge(
+            ctx(
+                [cell(0, -100.0), cell(1, -400.0)],
+                [cola, water],
+                identities={0: "P001", 1: "P002"},
+            )
+        )
+        assert d.result.status is JudgmentStatus.COMPLETE
+        got = {(pc.product.product_id, pc.count) for pc in d.result.products}
+        assert got == {("P001", 1), ("P002", 2)}
+
+    def test_unknown_cell_adopts_vision_weight_intersection(self, router, cola, water):
+        # 미지 셀: V ∩ W 유일 → 채택 (신념 갱신 입력)
+        d = router.judge(
+            ctx([cell(0, -100.0)], [cola, water], candidates=[cand(1, conf=0.9)])
+        )
+        assert d.result.status is JudgmentStatus.COMPLETE
+        assert d.cells[0].product_id == "P001"
+        assert d.cells[0].reason == "vision_weight_match"
+
+    def test_unknown_cell_weight_unique_refrigerator(self, router, cola, water):
+        # -200은 cola 2개로도 water 1개로도 설명 → 유일 아님 → 보류
+        d = router.judge(ctx([cell(0, -200.0)], [cola, water]))
+        assert d.result.status is not JudgmentStatus.COMPLETE
+        # -300: cola 3개(300) = water 1.5개(비정수) → cola 유일 → 무게 단독 채택 (냉장)
+        d2 = router.judge(ctx([cell(0, -300.0)], [cola, water]))
+        assert d2.result.status is JudgmentStatus.COMPLETE
+        assert d2.cells[0].reason == "weight_unique"
+        assert d2.result.products[0].count == 3
+
+    def test_return_resolved_charges_nothing(self, router, cola):
+        d = router.judge(ctx([cell(0, +100.0)], [cola], identities={0: "P001"}))
+        assert d.result.status is JudgmentStatus.COMPLETE
+        assert d.result.products == ()
+        assert d.result.reason == "return_resolved"
+        assert d.cells[0].resolved and d.cells[0].count == 1
+
+    def test_stock_cap_blocks_removal(self, router, cola):
+        # 재고 5개인데 -600(6개) — 셀에 없는 것은 꺼낼 수 없음
+        d = router.judge(ctx([cell(0, -600.0)], [cola], identities={0: "P001"}))
+        assert d.result.status is not JudgmentStatus.COMPLETE
+        assert not d.cells[0].resolved
+
+
+class TestFreezerSuppression:
+    """냉동(±15g)은 무게 단독 정체성 채택 보류 — 178g 사건·이슈 #6 억제 원리."""
+
+    def test_weight_only_identity_suppressed_in_freezer(self, router, bar170):
+        d = router.judge(ctx([cell(0, -170.0)], [bar170], profile=FREEZER))
+        assert d.result.status is JudgmentStatus.NO_DETECTION
+        assert d.cells[0].reason == "weight_identity_suppressed"
+        assert not d.cells[0].product_id
+
+    def test_freezer_vision_plus_weight_still_adopts(self, router, bar170, bar178):
+        # ±15g에서 -170은 bar178(res 8)로도 설명되지만 비전이 bar170만 지목 → V∩W 유일
+        d = router.judge(
+            ctx(
+                [cell(0, -170.0)],
+                [bar170, bar178],
+                candidates=[cand(3, conf=0.8)],
+                profile=FREEZER,
+            )
+        )
+        assert d.result.status is JudgmentStatus.COMPLETE
+        assert d.cells[0].product_id == "P170"
+
+    def test_known_freezer_cell_resolves_without_vision(self, router, bar170):
+        # 학습이 끝난 냉동 셀은 김서림으로 비전이 죽어도 무게로 판정
+        d = router.judge(
+            ctx([cell(0, -340.0)], [bar170], identities={0: "P170"}, profile=FREEZER)
+        )
+        assert d.result.status is JudgmentStatus.COMPLETE
+        assert d.result.products[0].count == 2
+
+
+class TestCellPending:
+    """② 모호 — 확실한 만큼만, 확정은 close 셀 net으로."""
+
+    def test_identity_ambiguous_pends(self, router, bar170, bar178):
+        # freezer ±15g에서 -174는 두 상품 모두 설명 + 비전도 둘 다 지목 → 보류
+        d = router.judge(
+            ctx(
+                [cell(0, -174.0)],
+                [bar170, bar178],
+                candidates=[cand(3), cand(4)],
+                profile=FREEZER,
+            )
+        )
+        assert d.result.status is JudgmentStatus.NO_DETECTION
+        assert d.result.strategy == "cell_pending"
+        assert d.cells[0].reason == "identity_ambiguous"
+
+    def test_count_ambiguous_confirms_identity_only(self, router):
+        light = ActiveProduct(
+            "P020", "젤리", class_id=5, unit_weight=20.0, unit_price=500, stock_qty=10
+        )
+        # w=20 ≤ 2×15 → freezer에서 -30은 n=1(res 10)과 n=2(res 10) 모두 tol 이내
+        d = router.judge(
+            ctx([cell(0, -30.0)], [light], candidates=[cand(5)], profile=FREEZER)
+        )
+        assert not d.cells[0].resolved
+        assert d.cells[0].reason == "count_pending"
+        assert d.cells[0].product_id == "P020"  # 정체성은 확정 (신념 증거)
+
+    def test_partial_when_one_cell_pends(self, router, cola, bar170, bar178):
+        d = router.judge(
+            ctx(
+                [cell(0, -100.0), cell(1, -174.0)],
+                [cola, bar170, bar178],
+                candidates=[cand(1), cand(3), cand(4)],
+                identities={0: "P001"},
+                profile=FREEZER,
+            )
+        )
+        assert d.result.status is JudgmentStatus.PARTIAL
+        assert d.result.strategy == "cell_pending"
+        assert [(pc.product.product_id, pc.count) for pc in d.result.products] == [
+            ("P001", 1)
         ]
 
-
-class TestStrictMatcher:
-    def test_prefers_simpler_combination(self, cola, water):
-        # simplicity_score: 같은 오차·conf면 종류 수가 적은 조합 우선
-        m = StrictWeightMatcher()
-        best = m.best([cand(1), cand(2)], -300.0, [cola, water], 3.0)
-        counts = {pc.product.product_id: pc.count for pc in best.products}
-        assert counts == {"P001": 3}
-
-    def test_combination_across_kinds_when_stock_limits(self, cola, water):
-        # I12: stock 제한으로 단일 종류가 막히면 종류 조합으로
-        from dataclasses import replace
-
-        cola1 = replace(cola, stock_qty=1)
-        best = StrictWeightMatcher().best([cand(1), cand(2)], -300.0, [cola1, water], 3.0)
-        counts = {pc.product.product_id: pc.count for pc in best.products}
-        assert counts == {"P001": 1, "P002": 1}
-
-    def test_stock_zero_excluded(self, cola):
-        # I5: 품절 하드필터
-        from dataclasses import replace
-
-        sold_out = replace(cola, stock_qty=0)
-        assert StrictWeightMatcher().best([cand(1)], -100.0, [sold_out], 3.0) is None
-
-    def test_count_capped_by_stock(self, cola):
-        # I12: count ≤ stock (stock=5, 600g은 6개 필요 → 매칭 불가)
-        assert StrictWeightMatcher().best([cand(1)], -600.0, [cola], 3.0) is None
-
-    def test_target_below_tolerance_empty(self, cola):
-        assert StrictWeightMatcher().find_valid_combinations([cand(1)], -2.0, [cola], 3.0) == []
-
-    def test_vision_unseen_excluded(self, cola, water):
-        best = StrictWeightMatcher().best([cand(1)], -200.0, [cola, water], 3.0)
-        # water(200g)는 vision 미검출 → cola×2로만 설명
-        assert {pc.product.product_id: pc.count for pc in best.products} == {"P001": 2}
-
-
-class TestFullDeltaMatch:
-    def test_downgrades_partial_explanation(self, cola):
-        # I6: 부분 설명으로 과금 금지
-        r = JudgmentResult(JudgmentStatus.COMPLETE, (ProductCount(cola, 1),), 0.9, "strict")
-        out = enforce_full_delta_match(r, -250.0, 3.0)
-        assert out.status is JudgmentStatus.PARTIAL
-        assert "full_delta_unexplained" in out.reason
-
-    def test_relaxed_overreach_downgraded_by_router(self, cola):
-        # relaxed(tol×2)가 200g 조합을 내도 delta -178과 22g 차이 → I6이 PARTIAL 강등
-        router = JudgmentRouter()
-        result = router.judge(ctx(-178.0, [cola], [cand(1)]))
-        assert result.status is not JudgmentStatus.COMPLETE
-
-
-class TestFreezer:
-    def test_vision_first_single_not_summed(self, bar170, bar178, cola):
-        # 178g 사건 재발 방지: 근접 단일 후보(170g, 오차 8g ≤ 15g)가 있으면
-        # 후보들을 합쳐 청구하지 않는다 (I3 게이트)
-        router = JudgmentRouter()
-        result = router.judge(ctx(
-            -178.0, [bar170, bar178, cola],
-            [cand(3, conf=0.9, votes=10), cand(4, conf=0.5, votes=3), cand(1, conf=0.4, votes=2)],
-            profile=FREEZER,
-        ))
-        assert result.strategy == "freezer_vision_first"
-        assert len(result.products) == 1
-        assert result.products[0].count == 1
-
-    def test_gate_failure_falls_through(self, cola):
-        # I3: 게이트(±15g) 실패 → freezer_vision_first 불발 → 폴백은 COMPLETE 금지
-        router = JudgmentRouter()
-        result = router.judge(ctx(-178.0, [cola], [cand(1)], profile=FREEZER))
-        assert result.strategy != "freezer_vision_first"
-        assert result.status is not JudgmentStatus.COMPLETE  # I6 방어
-
-    # 다품종 조합 테스트용 커스텀 무게 — freezer 게이트(±15g)에서 1·2종
-    # 조합으로는 우연 설명이 불가능하도록 서로 소인 큰 무게를 쓴다.
-    @staticmethod
-    def _multi_kind_products():
-        pa = ActiveProduct("PA", "A", class_id=11, unit_weight=970.0, unit_price=1000, stock_qty=5)
-        pb = ActiveProduct("PB", "B", class_id=12, unit_weight=610.0, unit_price=2000, stock_qty=5)
-        pc_ = ActiveProduct("PC", "C", class_id=13, unit_weight=210.0, unit_price=3000, stock_qty=5)
-        return pa, pb, pc_
-
-    def test_three_kind_combo_in_single_trigger(self):
-        # 한 트리거에 서로 다른 3종 (카메라가 연속 동작을 한 녹화로 합침):
-        # 2종 상한이던 조합을 k=2..4종으로 일반화 — 970+610+210=1790g은
-        # 1·2종 어떤 배분으로도 ±15g 내 설명 불가, 3종 1/1/1만 정답.
-        pa, pb, pc_ = self._multi_kind_products()
-        router = JudgmentRouter()
-        result = router.judge(ctx(
-            -1790.0, [pa, pb, pc_],
-            [cand(11, conf=0.7, votes=30), cand(12, conf=0.6, votes=20),
-             cand(13, conf=0.5, votes=10)],
-            profile=FREEZER,
-        ))
-        assert result.strategy == "freezer_vision_first"
-        assert result.reason == "freezer_vision_first_combo"
-        counts = {p.product.product_id: p.count for p in result.products}
-        assert counts == {"PA": 1, "PB": 1, "PC": 1}
-
-    def test_single_of_lower_ranked_identity_beats_combo(self, water, bar178):
-        # 이슈 #8 계열: 최상위 후보가 오검출(반사 등)이어도 하위 정체성의 단일
-        # 설명이 조합보다 우선 — 400g을 bar178(오검출 1위) 조합으로 왜곡하지
-        # 않고 water×2 단일로 잡는다 (178g 원칙의 득표순 확장).
-        router = JudgmentRouter()
-        result = router.judge(ctx(
-            -400.0, [water, bar178],
-            [cand(4, conf=0.9, votes=50), cand(2, conf=0.6, votes=10)],  # bar178이 1위
-            profile=FREEZER,
-        ))
-        assert result.reason == "freezer_vision_first_single"
-        assert result.products[0].product.product_id == "P002"
-        assert result.products[0].count == 2
-
-    def test_combo_prefers_fewer_kinds(self):
-        # 특이도: 2종으로 설명 가능하면(970+610=1580) 3종 조합을 만들지 않는다
-        pa, pb, pc_ = self._multi_kind_products()
-        router = JudgmentRouter()
-        result = router.judge(ctx(
-            -1580.0, [pa, pb, pc_],
-            [cand(11, votes=30), cand(12, votes=20), cand(13, votes=10)],
-            profile=FREEZER,
-        ))
-        assert result.reason == "freezer_vision_first_combo"
-        counts = {p.product.product_id: p.count for p in result.products}
-        assert counts == {"PA": 1, "PB": 1}
-
-
-class TestSegmentMatching:
-    def test_segments_resolve_aggregate_ambiguity(self, bar170, bar178):
-        # 합계 348g은 모호해도 구간 -170/-178은 각각 유일 (QA Q3)
-        segments = [WeightSegment(0, 1, -170.0), WeightSegment(1, 2, -178.0)]
-        router = JudgmentRouter()
-        result = router.judge(ctx(-348.0, [bar170, bar178], [cand(3), cand(4)], segments=segments))
-        assert result.strategy == "segment_weight_matching"
-        counts = {pc.product.product_id: pc.count for pc in result.products}
-        assert counts == {"P170": 1, "P178": 1}
-
-    def test_single_segment_falls_to_strict(self, cola):
-        router = JudgmentRouter()
-        result = router.judge(
-            ctx(-100.0, [cola], [cand(1)], segments=[WeightSegment(0, 1, -100.0)])
+    def test_unstable_cell_pends(self, router, cola):
+        d = router.judge(
+            ctx(
+                [cell(0, -100.0, stabilized=False, reason="needs_return_stabilization")],
+                [cola],
+                identities={0: "P001"},
+            )
         )
-        assert result.strategy == "strict"
+        assert d.result.status is JudgmentStatus.NO_DETECTION
+        assert d.result.strategy == "cell_pending"
 
 
-class TestGuards:
-    def test_min_weight_gate(self, cola):
-        router = JudgmentRouter()
-        result = router.judge(ctx(-2.0, [cola], [cand(1)]))
-        assert result.status is JudgmentStatus.NO_DETECTION
-        assert result.reason == "below_min_weight_change"  # I8 사유 코드
-
-    def test_same_weight_collision_prefers_confidence(self, cola):
-        twin = cola.__class__(**{**cola.__dict__, "product_id": "P099", "class_id": 9})
-        router = JudgmentRouter()
-        result = router.judge(ctx(-100.0, [cola, twin], [cand(1, conf=0.6), cand(9, conf=0.9)]))
-        assert result.strategy == "same_weight_collision_guard"
-        assert result.products[0].product.product_id == "P099"
-
-    def test_vision_only_count_one(self, cola):
-        router = JudgmentRouter()
-        result = router.judge(ctx(0.0, [cola], [cand(1, conf=0.8)], vision_only=True))
-        assert result.strategy == "vision_only"
-        assert result.products[0].count == 1
-        assert abs(result.confidence - 0.8 * 0.7) < 1e-9
-
-    def test_no_candidates_weight_only(self, cola):
-        router = JudgmentRouter()
-        result = router.judge(ctx(-100.0, [cola], []))
-        assert result.strategy == "no_candidate_fallback"
-        assert result.reason == "weight_only"
-
-    def test_weight_only_single_match_with_nontrivial_pool(self, cola, water):
-        # issue #6 결함 수정: 풀에 2개 품목이 있어도 tolerance 내에 하나만
-        # 들어오면(cola=100g, water=200g, delta=-100g) 여전히 단일 매치로 확정된다.
-        router = JudgmentRouter()
-        result = router.judge(ctx(-100.0, [cola, water], []))
-        assert result.strategy == "no_candidate_fallback"
-        assert result.reason == "weight_only"
-        assert result.status is JudgmentStatus.COMPLETE
-        assert result.products[0].product.product_id == "P001"
-        assert result.products[0].count == 1
-
-    def test_weight_only_no_longer_tries_multi_item_combination(self, cola, water):
-        # issue #6 오청구 재발 방지: cola(100g)+water(200g)이 섞인 조합으로
-        # 우연히 맞춰지던 delta(-290g)는, 동일 상품 n개 확장 이후에도 여전히
-        # 청구하지 않는다 — cola×n(100,200,300,...)·water×n(200,400,...) 어느
-        # 배수도 tolerance(3.0g) 내로 290g에 들어오지 않으므로(다품목 조합은
-        # 여전히 탐색하지 않는다) no_candidates_forced_final로 빠진다.
-        router = JudgmentRouter()
-        result = router.judge(ctx(-290.0, [cola, water], []))
-        assert result.strategy == "no_candidate_fallback"
-        assert result.status is JudgmentStatus.NO_DETECTION
-        assert result.reason == "no_candidates_forced_final"
-
-    def test_weight_only_ambiguous_rejects_charge(self, cola):
-        from dataclasses import replace
-
-        # cola(100g)의 근접 쌍둥이(102g) — 둘 다 delta=-101g의 tolerance(3.0g) 내.
-        twin = replace(cola, product_id="P099", class_id=9, unit_weight=102.0)
-        router = JudgmentRouter()
-        result = router.judge(ctx(-101.0, [cola, twin], []))
-        assert result.strategy == "no_candidate_fallback"
-        assert result.status is JudgmentStatus.NO_DETECTION
-        assert result.reason == "weight_only_ambiguous"
-
-    def test_telemetry_counts_hits(self, cola):
-        router = JudgmentRouter()
-        router.judge(ctx(-100.0, [cola], [cand(1)]))
-        router.judge(ctx(-100.0, [cola], [cand(1)]))
-        assert router.telemetry["strict"] == 2
-
-
-class TestWeightOnlySameProductCount:
-    """weight_only 확장: 동일 상품 n개 제거도 유일 매칭이면 채택한다
-    (직전 수정이 count=1 유일 매칭으로 과도 제한했던 것을 완화)."""
-
-    def test_same_product_two_units_unique_match(self):
-        # 2 x 79g = 158g delta — 동일 상품 2개 제거가 유일하게 tolerance(3.0g)
-        # 내로 들어오면 count=2로 채택한다.
-        from crk_model.core.types import ActiveProduct
-
-        snack = ActiveProduct(
-            "P079", "스낵79", class_id=7, unit_weight=79.0, unit_price=1200, stock_qty=5
+class TestVisionCrossCheck:
+    def test_mismatch_noted_but_judgment_holds(self, router, cola, water):
+        # 알려진 셀: 제거는 물리적으로 그 셀 상품 — 비전 불일치는 note만
+        d = router.judge(
+            ctx(
+                [cell(0, -100.0)],
+                [cola, water],
+                candidates=[cand(2, conf=0.9)],  # water 지목 — 그러나 -100은 water로 설명 불가
+                identities={0: "P001"},
+            )
         )
-        router = JudgmentRouter()
-        result = router.judge(ctx(-158.0, [snack], []))
-        assert result.strategy == "no_candidate_fallback"
-        assert result.reason == "weight_only"
-        assert result.status is JudgmentStatus.COMPLETE
-        assert result.products[0].product.product_id == "P079"
-        assert result.products[0].count == 2
+        assert d.result.status is JudgmentStatus.COMPLETE
+        assert "vision_mismatch:P002" in d.cells[0].reason
+        assert d.contradictions == ()  # 무게가 water를 지지하지 않음 — 강등 증거 아님
 
-    def test_two_products_both_plausible_is_ambiguous(self, cola):
-        # cola(100g) x2 = 200g와 water2(200g) x1 = 200g가 동시에 delta=-200g의
-        # tolerance(3.0g) 내로 들어오면 — 서로 다른 (product, n) 쌍 2개가 모두
-        # 그럴듯하므로 여전히 weight_only_ambiguous로 거부한다.
-        from dataclasses import replace
-
-        water2 = replace(cola, product_id="P200", class_id=8, unit_weight=200.0)
-        router = JudgmentRouter()
-        result = router.judge(ctx(-200.0, [cola, water2], []))
-        assert result.strategy == "no_candidate_fallback"
-        assert result.status is JudgmentStatus.NO_DETECTION
-        assert result.reason == "weight_only_ambiguous"
-
-    def test_count_exceeding_stock_excludes_candidate(self):
-        # stock=2인 상품에 대해 n=3(=237g)이 필요한 delta는 후보에서 제외되고
-        # (I12), 다른 매칭도 없으면 no_candidates_forced_final로 빠진다.
-        from crk_model.core.types import ActiveProduct
-
-        limited = ActiveProduct(
-            "P079L", "스낵79한정", class_id=9, unit_weight=79.0, unit_price=1200, stock_qty=2
+    def test_mismatch_with_weight_support_reports_contradiction(
+        self, router, cola, water
+    ):
+        # 비전이 water를 지목하고 -200이 water 1개로도 설명됨 → 강등 증거
+        d = router.judge(
+            ctx(
+                [cell(0, -200.0)],
+                [cola, water],
+                candidates=[cand(2, conf=0.9)],
+                identities={0: "P001"},
+            )
         )
-        router = JudgmentRouter()
-        result = router.judge(ctx(-237.0, [limited], []))
-        assert result.strategy == "no_candidate_fallback"
-        assert result.status is JudgmentStatus.NO_DETECTION
-        assert result.reason == "no_candidates_forced_final"
+        assert d.contradictions == ((0, "P002"),)
 
 
-class TestNoCandidateFreezerSuppression:
-    """결함 수정: 후보 없음 상태에서 freezer는 weight_only로 "식별"하지 않는다."""
+class TestNoSignalAndVisionOnly:
+    def test_below_gate_is_no_detection(self, router, cola):
+        d = router.judge(ctx([cell(0, -2.0), cell(1, 1.0)], [cola]))
+        assert d.result.status is JudgmentStatus.NO_DETECTION
+        assert d.result.strategy == "no_signal"
 
-    def test_freezer_suppresses_identity(self, bar170):
-        # freezer + vision 후보 없음 → loadcell_identity_suppressed (I3, QA Q1)
-        router = JudgmentRouter()
-        result = router.judge(ctx(-178.0, [bar170], [], profile=FREEZER))
-        assert result.strategy == "no_candidate_fallback"
-        assert result.reason == "loadcell_identity_suppressed"
-        assert result.status is JudgmentStatus.NO_DETECTION
-        assert result.products == ()
-
-    def test_refrigerator_keeps_weight_only(self, cola):
-        # 냉장고는 weight_is_discriminative=True → 기존 weight_only 유지 (회귀 방지)
-        router = JudgmentRouter()
-        result = router.judge(ctx(-100.0, [cola], [], profile=REFRIGERATOR))
-        assert result.strategy == "no_candidate_fallback"
-        assert result.reason == "weight_only"
-        assert result.status is JudgmentStatus.COMPLETE
-
-
-class TestStageCountCombination:
-    def test_no_vision_uses_segment_targets(self, cola):
-        # 후보없음 체인 SC1: vision 후보가 없어도 segment_targets로 개수 조합 성립
-        segments = [WeightSegment(0, 1, -100.0), WeightSegment(1, 2, -100.0)]
-        router = JudgmentRouter()
-        result = router.judge(ctx(-200.0, [cola], [], segments=segments))
-        assert result.strategy == "stage_count_combo"
-        assert result.status is JudgmentStatus.COMPLETE
-        assert result.products[0].count == 2
-
-    def test_single_match_ignored_falls_through(self, cola):
-        # 원본 차별점: total_count<2인 단일 매치는 이 전략의 몫이 아님 →
-        # 세그먼트가 1개뿐이면 애초에 precondition 불충족(len>=2 요구) → strict로
-        router = JudgmentRouter()
-        result = router.judge(
-            ctx(-100.0, [cola], [cand(1)], segments=[WeightSegment(0, 1, -100.0)])
+    def test_vision_only_top_candidate(self, router, cola, water):
+        d = router.judge(
+            ctx(
+                [cell(0, 0.0, stabilized=False, reason="insufficient_samples")],
+                [cola, water],
+                candidates=[cand(2, conf=0.8, votes=12), cand(1, conf=0.9, votes=3)],
+                vision_only=True,
+            )
         )
-        assert result.strategy != "stage_count_combo"
+        assert d.result.status is JudgmentStatus.COMPLETE
+        assert d.result.strategy == "vision_only"
+        assert d.result.products[0].product.product_id == "P002"  # 최다득표
+        assert d.result.products[0].count == 1
+        assert d.result.confidence == pytest.approx(0.8 * 0.7)
 
+    def test_vision_only_without_candidates(self, router, cola):
+        d = router.judge(ctx([cell(0, 0.0)], [cola], vision_only=True))
+        assert d.result.status is JudgmentStatus.NO_DETECTION
+        assert d.result.reason == "no_vision_candidates"
 
-class TestDetectedSingleItemFallback:
-    def test_rescues_when_strict_and_relaxed_miss(self, cola):
-        # strict(tol=3)·relaxed(tol*2=6) 둘 다 놓치는 잔차(8g)를 detected_single
-        # (tol*3=9)이 구제 — 단, I6이 원래 tolerance로 재검증해 PARTIAL 강등
-        router = JudgmentRouter()
-        result = router.judge(ctx(-108.0, [cola], [cand(1, votes=10, conf=0.9)]))
-        assert result.strategy == "detected_single_item_fallback"
-        assert result.products[0].count == 1
-        assert result.products[0].product.product_id == "P001"
-
-    def test_two_detected_kinds_not_applied(self, cola, water):
-        # "사실상 1종뿐"만 대상 — top 후보만 보므로 2종 감지에서도 동작 자체는
-        # 하지만 same_weight 등 앞선 전략이 이미 처리 못 한 잔차만 넘어옴을 확인
-        # (여기서는 top 후보가 명확한 상황에서도 다른 전략이 우선함을 검증)
-        router = JudgmentRouter()
-        result = router.judge(
-            ctx(-300.0, [cola, water], [cand(1, votes=10, conf=0.9), cand(2, votes=1, conf=0.3)])
+    def test_hand_class_never_matches(self, router):
+        unmapped = ActiveProduct(
+            "P999", "미매핑", class_id=-1, unit_weight=100.0, unit_price=1000, stock_qty=5
         )
-        # cola*3=300은 strict가 정확히 잡음 → detected_single까지 갈 필요 없음
-        assert result.strategy == "strict"
-
-
-class TestRelaxedLoadcellOnly:
-    def test_allowlist_mismatch_fridge_only(self, cola):
-        # vision이 active_products에 없는 클래스를 감지 → allowlist 완전 불일치
-        # → relaxed_loadcell_only가 전 재고에서 nearest-single 탐색 (냉장고만)
-        router = JudgmentRouter()
-        result = router.judge(ctx(-99.0, [cola], [cand(999, votes=10, conf=0.9)]))
-        assert result.strategy == "relaxed_loadcell_only"
-        assert result.status is JudgmentStatus.PARTIAL
-        assert result.products[0].product.product_id == "P001"
-
-    def test_freezer_suppressed(self, bar170):
-        # freezer는 loadcell_only도 억제 (178g 사건 재발 방지 원리 동일 적용)
-        router = JudgmentRouter()
-        result = router.judge(
-            ctx(-99.0, [bar170], [cand(999, votes=10, conf=0.9)], profile=FREEZER)
+        # hand(0)·미매핑(-1)은 비전 정체성 매칭에서 제외 (이슈 #6 승계)
+        d = router.judge(
+            ctx([cell(0, -100.0)], [unmapped], candidates=[cand(0), cand(-1)])
         )
-        assert result.strategy != "relaxed_loadcell_only"
+        assert d.result.status is not JudgmentStatus.COMPLETE
 
 
-class TestVisionFirstIdentityPartial:
-    def test_freezer_preserves_identity_after_relaxed_miss(self, bar170):
-        # freezer_vision_first 게이트(±15g)도, relaxed(tol*2=30)도 실패하는
-        # 잔차(50g) → 정체성만 보존한 PARTIAL(count=1)
-        router = JudgmentRouter()
-        result = router.judge(
-            ctx(-220.0, [bar170], [cand(3, votes=5, conf=0.7)], profile=FREEZER)
-        )
-        assert result.strategy == "vision_first_identity_partial"
-        assert result.status is JudgmentStatus.PARTIAL
-        assert result.products[0].count == 1
-        assert result.products[0].product.product_id == "P170"
-
-    def test_weight_validated_upgrades_to_complete(self, bar170):
-        # 무게검증이 tolerance 내로 통과하면 COMPLETE (개수 확정)
-        router = JudgmentRouter()
-        result = router.judge(
-            ctx(-170.0, [bar170], [cand(3, votes=5, conf=0.7)], profile=FREEZER)
-        )
-        assert result.products[0].count == 1
-        assert result.status is JudgmentStatus.COMPLETE
+class TestTelemetry:
+    def test_path_hits_recorded(self, router, cola):
+        router.judge(ctx([cell(0, -100.0)], [cola], identities={0: "P001"}))
+        router.judge(ctx([cell(0, -1.0)], [cola]))
+        assert router.telemetry["cell_delta"] == 1
+        assert router.telemetry["no_signal"] == 1

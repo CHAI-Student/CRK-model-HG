@@ -40,6 +40,7 @@ def main() -> None:
     from crk_model.adapters.yolo_detector import UltralyticsEngineDetector
     from crk_model.core.config import Settings
     from crk_model.ledger.archive import SessionArchive
+    from crk_model.ledger.cells import CellBeliefStore
     from crk_model.ledger.journal import EventJournal
     from crk_model.service.model_service import ModelService
 
@@ -61,11 +62,15 @@ def main() -> None:
         settings.session_archive_dir,
         retention_days=settings.session_archive_retention_days,
     )
+    # 설계 v2: 셀 정체성 신념 영속 (자동 추정 상태 — 재기동에도 유지).
+    # MODEL__CELLS__STATE_PATH=""로 메모리 전용 전환 가능(재기동 시 재학습).
+    beliefs = CellBeliefStore(settings.cells_state_path or None)
     service = ModelService(
         detector,
         settings=settings,
         journal=EventJournal(journal_path),
         archive=archive,
+        beliefs=beliefs,
         # 리뷰 #1: 엔진 로드 실패·CUDA 불가 시 여기서 즉시 죽는다 (무증상 기동 금지)
         startup_probe_frame=np.zeros((480, 480, 3), dtype=np.uint8),
     )

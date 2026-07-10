@@ -54,6 +54,25 @@ class WeightSegment:
 
 
 @dataclass(frozen=True)
+class CellOutcome:
+    """셀(존 내 좌/우 로드셀 채널 하나)의 트리거 단위 관측+판정 (설계 v2).
+
+    전제 3(한 로드셀에 한 상품 종류)에 의해 셀 delta는 단일 품종의 정수배 —
+    resolved=True면 product_id/count가 그 설명이다. resolved=False(pending)는
+    close 시점 셀 net으로 이월된다. delta_weight 부호가 방향(−제거/+반품)이다.
+    """
+
+    channel: int
+    delta_weight: float
+    segments: tuple[WeightSegment, ...] = ()
+    stabilized: bool = True
+    resolved: bool = False
+    product_id: str = ""
+    count: int = 0
+    reason: str = ""
+
+
+@dataclass(frozen=True)
 class ProductCount:
     product: ActiveProduct
     count: int

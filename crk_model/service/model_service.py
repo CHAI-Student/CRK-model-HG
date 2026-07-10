@@ -28,6 +28,7 @@ from crk_model.gateway.state_machine import (
 )
 from crk_model.ingest.idempotency import IdempotencyRegistry
 from crk_model.ledger.archive import SessionArchive
+from crk_model.ledger.cells import CellBeliefStore
 from crk_model.ledger.events import EventLog
 from crk_model.ledger.journal import EventJournal
 from crk_model.ledger.settler import CloseSettler
@@ -68,6 +69,7 @@ class ModelService:
         profiles: Mapping[int, SensorProfile] | None = None,
         journal: EventJournal | None = None,
         archive: SessionArchive | None = None,
+        beliefs: CellBeliefStore | None = None,
         clock: Callable[[], float] = time.monotonic,
         startup_probe_frame=None,
     ):
@@ -86,11 +88,20 @@ class ModelService:
         )
         self.snapshots = ActiveProductStore()
         self.event_log = EventLog()
+        # 셀 정체성 신념 (v2) — archive와 동일 주입 원칙: 명시 주입이 없으면
+        # 메모리 전용 (테스트/임시 인스턴스가 실제 저장소에 부작용을 남기지
+        # 않게). 운영 진입점(adapters/serve.py)이 Settings.cells_state_path로
+        # 영속 저장소를 만들어 주입한다.
+        self.beliefs = beliefs if beliefs is not None else CellBeliefStore()
         # 판정(pipeline)·정산(settler)·잠정 집계(gateway interim)의 tolerance
         # 단일 소스 원칙: 존 미지정 시 폴백 프로파일을 세 경로 모두 같은 값으로
         # 주입한다 (cabinet_type=freezer인데 정산만 냉장 ±3g로 계산되는 불일치 방지).
+        # settler는 판정과 같은 신념·상품 스냅샷을 본다 (셀 net 재해석의 소스).
         self.settler = CloseSettler(
-            self.settings.error_policy, default_profile=self._default_profile
+            self.settings.error_policy,
+            default_profile=self._default_profile,
+            beliefs=self.beliefs,
+            catalog=lambda: self.snapshots.snapshot().products,
         )
         # journal과 동일한 하위호환 원칙: archive를 명시적으로 주지 않으면
         # 비활성(SessionArchive("")) — 기본 생성자로 settings.session_archive_dir
@@ -112,6 +123,7 @@ class ModelService:
         )
         self.pipeline = TriggerPipeline(
             detector, self._profiles, self.snapshots, default_profile=self._default_profile,
+            beliefs=self.beliefs,
             # 비전 튜닝 (MODEL__VISION__*, issue #6 2차): 진입 컷·투표 임계는
             # 현장 카메라/조명에 따라 env로 조정한다 (.env.example 참조).
             filters=DetectionFilterChain(
@@ -192,6 +204,8 @@ class ModelService:
                 if products:
                     self.snapshots.update(products)  # OPEN마다 스냅샷 갱신 (I2)
                     # 빈 목록은 재고 스냅샷을 덮어쓰지 않는다 (폴링성 OPEN 보호)
+                    # v2: 진열에서 사라진 상품의 셀 신념 무효화 (철수 자기 교정)
+                    self.beliefs.invalidate_missing({p.product_id for p in products})
                 if self.gateway.state in (DoorState.IDLE, DoorState.FINALIZED, DoorState.ERROR):
                     # 새 문 세션 시작 — ERROR/FINALIZED에서 복구는 여기서만 일어난다
                     session_id = self._next_session_id()

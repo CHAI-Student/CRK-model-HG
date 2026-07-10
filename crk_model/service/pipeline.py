@@ -17,11 +17,17 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 
 from crk_model.core.profiles import REFRIGERATOR, SensorProfile
-from crk_model.core.types import JudgmentResult, JudgmentStatus, VisionCandidate
+from crk_model.core.types import (
+    CellOutcome,
+    JudgmentResult,
+    JudgmentStatus,
+    VisionCandidate,
+)
 from crk_model.frames.motion_gate import Frame, HandLatch, MotionGate
 from crk_model.ingest.loadcell import LoadcellAnalyzer, LoadcellSample
 from crk_model.judgment.interfaces import JudgmentContext
 from crk_model.judgment.router import JudgmentRouter
+from crk_model.ledger.cells import CellBeliefStore
 from crk_model.ledger.events import TriggerEvent
 from crk_model.perception.detector import Detector
 from crk_model.perception.early_termination import EarlyTerminator
@@ -77,6 +83,9 @@ class TriggerPipeline:
         filters: DetectionFilterChain | None = None,
         early_termination_enabled: bool = True,
         analyzer_factory=None,  # SensorProfile -> LoadcellAnalyzer (테스트/튜닝 주입점)
+        beliefs: CellBeliefStore | None = None,
+        # 셀 정체성 신념 (v2) — 미주입 시 메모리 전용 신규 저장소 (독립 사용 하위호환).
+        # 운영은 ModelService가 Settings.cells_state_path 기반 저장소를 주입한다.
         default_profile: SensorProfile = REFRIGERATOR,
         # zone이 profiles dict에 없을 때 쓰는 폴백 프로파일. 기본은 기존
         # 동작(REFRIGERATOR)과 동일 — cabinet_type=freezer 기기에서는
@@ -93,6 +102,7 @@ class TriggerPipeline:
         self._filters = filters or DetectionFilterChain()
         self._et_enabled = early_termination_enabled
         self._analyzer_factory = analyzer_factory or LoadcellAnalyzer
+        self._beliefs = beliefs or CellBeliefStore()
         self._default_profile = default_profile
         self._voting_params = dict(voting_params) if voting_params else {}
 
@@ -132,47 +142,100 @@ class TriggerPipeline:
             )
             return self._outcome(session_id, req, 0.0, (), judgment, trace)
 
-        analysis = self._analyzer_factory(profile).analyze(req.loadcells)
-        vision_only = not analysis.stabilized and analysis.reason in (
-            "insufficient_samples",
-            "insufficient_stable_regions",
-        )  # 로드셀 신뢰 불가 → vision 강제
-        if analysis.reason == "needs_return_stabilization":
-            # 재수집은 장치측 훅 (QA Q3 ① 순서 계약) — 구간화 보류 사실만 기록
+        # 설계 v2: 채널(=셀)별 독립 분석 — 합산 금지 (README "추론 설계 v2")
+        analyses = self._analyzer_factory(profile).analyze_cells(req.loadcells)
+        cells = tuple(
+            CellOutcome(
+                channel=ch,
+                delta_weight=a.delta_weight,
+                segments=a.segments,
+                stabilized=a.stabilized,
+                reason=a.reason,
+            )
+            for ch, a in enumerate(analyses)
+        )
+        delta = sum(a.delta_weight for a in analyses)  # 존 총량 (로그/이벤트 표기용)
+        segments = tuple(s for a in analyses for s in a.segments)
+        # 로드셀 신뢰 불가 (전 셀 무신뢰) → vision 강제 (v1 의미론 유지)
+        vision_only = not analyses or all(
+            not a.stabilized
+            and a.reason in ("insufficient_samples", "insufficient_stable_regions")
+            for a in analyses
+        )
+        if any(a.reason == "needs_return_stabilization" for a in analyses):
+            # 재수집은 장치측 훅 (순서 계약) — 구간화 보류 사실만 기록
             trace.reason_codes.append("return_stabilization_pending")
-        delta = analysis.delta_weight
 
-        if not vision_only and abs(delta) < profile.min_weight_change_grams:
-            # 저무게 스킵: vision 전체 생략 = YOLO 호출 0 (QA Q8)
+        cell_active = any(
+            c.stabilized and abs(c.delta_weight) >= profile.min_weight_change_grams
+            for c in cells
+        )
+        cell_unsettled = any(
+            not c.stabilized and abs(c.delta_weight) > 0 for c in cells
+        )
+        if not vision_only and not cell_active and not cell_unsettled:
+            # 저무게 스킵: 전 셀 게이트 미달 → vision 생략 = YOLO 호출 0
             trace.reason_codes.append("low_weight_skip")
             judgment = JudgmentResult(
                 JudgmentStatus.NO_DETECTION,
                 reason="below_min_weight_change",
-                strategy="low_weight_skip",
+                strategy="no_signal",
             )
-            return self._outcome(session_id, req, delta, analysis.segments, judgment, trace)
+            return self._outcome(
+                session_id, req, delta, segments, judgment, trace, cells=cells
+            )
 
-        candidates = self._run_vision(req, profile, snapshot, delta, trace)
+        candidates = self._run_vision(req, profile, snapshot, cells, trace)
+        identities = self._beliefs.identities_for_zone(
+            req.zone, [c.channel for c in cells]
+        )
         ctx = JudgmentContext(
             zone=req.zone,
             profile=profile,
-            delta_weight=delta,
-            segments=analysis.segments,
+            cells=cells,
             vision_candidates=candidates,
             active_products=snapshot.products,
+            identities=identities,
             vision_only=vision_only,
         )
-        judgment = self._router.judge(ctx)
+        decision = self._router.judge(ctx)
+        self._observe_beliefs(req.zone, decision)
         return self._outcome(
-            session_id, req, delta, analysis.segments, judgment, trace, candidates
+            session_id,
+            req,
+            delta,
+            segments,
+            decision.result,
+            trace,
+            candidates,
+            cells=decision.cells,
         )
+
+    def _observe_beliefs(self, zone: int, decision) -> None:
+        """판정의 독립 증거만 신념에 반영한다 (README "셀 정체성 추정").
+
+        - 미지 셀의 V∩W/무게 단독 채택(vision_weight_match·weight_unique·
+          count_pending)은 새 증거 → observe (제거=강, 반품=약).
+        - known_identity 판정은 신념 자신을 근거로 하므로 반영하지 않는다
+          (자기 강화 루프 방지).
+        - contradiction(알려진 셀에서 비전+무게가 함께 다른 상품 지목)은 강한
+          모순 증거 — 반복되면 CellBeliefStore가 강등한다 (재배치 자기 교정).
+        """
+        for c in decision.cells:
+            if not c.product_id or c.reason.startswith("known_"):
+                continue
+            self._beliefs.observe(
+                zone, c.channel, c.product_id, strong=c.delta_weight < 0
+            )
+        for channel, rival in decision.contradictions:
+            self._beliefs.observe(zone, channel, rival, strong=True)
 
     def _run_vision(
         self,
         req: TriggerRequest,
         profile: SensorProfile,
         snapshot: ProductSnapshot,
-        delta: float,
+        cells: tuple[CellOutcome, ...],
         trace: TriggerTrace,
     ) -> tuple[VisionCandidate, ...]:
         voting = VotingEnsemble(**self._voting_params)
@@ -203,7 +266,7 @@ class TriggerPipeline:
                     voting.add_frame(camera, detections)
                     latch.update_after_inference(any(d.is_hand for d in detections))
                     if terminator.should_stop(
-                        delta_weight=delta,
+                        cells=cells,
                         candidates=voting.combine(),
                         active_products=snapshot.products,
                         frames_since_hand_exit=latch.frames_since_exit,
@@ -235,7 +298,7 @@ class TriggerPipeline:
 
     @staticmethod
     def _outcome(
-        session_id, req, delta, segments, judgment, trace, candidates=()
+        session_id, req, delta, segments, judgment, trace, candidates=(), cells=()
     ) -> TriggerOutcome:
         event = TriggerEvent(
             session_id,
@@ -247,5 +310,6 @@ class TriggerPipeline:
             req.seq,
             vision_candidates=tuple(candidates),
             video_paths=tuple(req.video_paths.items()),
+            cells=tuple(cells),
         )
         return TriggerOutcome(event, trace)

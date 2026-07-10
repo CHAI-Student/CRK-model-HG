@@ -58,7 +58,7 @@ def samples(start, end, n=10, dt=0.1):
 
     out, ts = [], 0.0
     for value in [start] * n + [end] * n:
-        out.append(LoadcellSample(ts, (value / 2, value / 2)))
+        out.append(LoadcellSample(ts, (float(value), 300.0)))  # 변화는 ch0 셀에만 (전제 3)
         ts += dt
     return out
 
@@ -162,14 +162,20 @@ class TestOpsCloseLogging:
 
     def test_zone_basket_carries_weight_delta_trigger_count_notes(self, cola, water):
         # settler 직접 호출 단위 테스트: zone별 weight_delta/trigger_count/notes.
+        from crk_model.core.types import CellOutcome
+
         removal = TriggerEvent(
             "s1", 1, 1.0, -cola.unit_weight,
-            (), JudgmentResult(JudgmentStatus.COMPLETE, (ProductCount(cola, 1),), 0.9, "strict"),
+            (),
+            JudgmentResult(JudgmentStatus.COMPLETE, (ProductCount(cola, 1),), 0.9, "cell_delta"),
+            cells=(CellOutcome(0, -cola.unit_weight, resolved=True,
+                               product_id=cola.product_id, count=1),),
         )
-        # zone=1: 반품 100g 이지만 basket이 이미 소진되어 다른 zone(2)의 water와
-        # 매칭되지 않으면 unmatched_return으로 남아 zone=1은 products=none이 된다.
+        # zone=1 ch1: +55g 미확정 반품 — 어느 장바구니 무게와도 안 맞아
+        # unmatched_return으로 기록만 남는다 (감산 없음).
         unmatched_return = TriggerEvent(
-            "s1", 1, 2.0, 55.0, (), JudgmentResult(JudgmentStatus.NO_DETECTION)
+            "s1", 1, 2.0, 55.0, (), JudgmentResult(JudgmentStatus.NO_DETECTION),
+            cells=(CellOutcome(1, 55.0),),
         )
 
         settlement = CloseSettler().settle(
@@ -178,4 +184,5 @@ class TestOpsCloseLogging:
         zone1 = next(z for z in settlement.zones if z.zone == 1)
         assert zone1.trigger_count == 2
         assert zone1.weight_delta == pytest.approx(-cola.unit_weight + 55.0)
-        assert any("zone1" in n for n in zone1.notes)
+        assert any("unmatched_return" in n for n in zone1.notes)
+        assert zone1.products[0].count == 1  # ch0 net -100 → cola 1개 유지

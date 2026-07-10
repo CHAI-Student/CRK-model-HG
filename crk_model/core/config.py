@@ -79,6 +79,9 @@ class Settings:
     # 세션 YAML 아카이브 (issue #6: 오판정 사후 분석용) — 빈 문자열이면 비활성.
     session_archive_dir: str = "data/sessions"
     session_archive_retention_days: int = 14
+    # 셀 정체성 신념 영속 파일 (설계 v2) — 자동 추정 상태, 사람이 편집하는
+    # 배치표가 아니다. 빈 문자열이면 메모리 전용(재기동 시 재학습).
+    cells_state_path: str = "data/cells.json"
     # ---- 비전 투표 튜닝 (issue #6 2차: 실기 vote_summary로 conf_floor 전멸 확정) ----
     # 카메라별 투표 진입 임계 — 원본 top/side_confidence_threshold 대응 (코드 기본
     # 0.70, 원본 운영 .env.example은 0.50). 이 값 미만 검출은 투표에 진입하지 못해
@@ -115,6 +118,7 @@ class Settings:
             session_archive_retention_days=_env_int(
                 "MODEL__SESSION__ARCHIVE_RETENTION_DAYS", 14
             ),
+            cells_state_path=os.environ.get("MODEL__CELLS__STATE_PATH", "data/cells.json"),
             top_confidence_threshold=_env_float(
                 "MODEL__VISION__TOP_CONFIDENCE_THRESHOLD", 0.70
             ),

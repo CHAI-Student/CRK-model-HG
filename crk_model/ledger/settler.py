@@ -1,20 +1,28 @@
-"""close-time 단일 글로벌 정산기 (D5, L6, QA Q6·Q7).
+"""close-time 단일 정산기 v2 — 셀 net 우선 2단계 (README "추론 설계 v2").
 
-반품 복구 3계층 + freezer close resolver(4층)를 하나의 정산기로 통합.
-3계층은 내부 매칭 우선순위로 강등: 동존 즉시 > net-delta > 교차존.
+v1의 4계층(동존 즉시 → net-delta 교정 → 교차존 → freezer 재solve)을 2단계로
+대체한다. 전제 3(한 로드셀에 한 상품 종류)에 의해 셀 net이 곧 진실이다:
 
-불변식:
-- I11: finalize 멱등 — 같은 session_id는 항상 같은 결과 객체.
-- I14: 반품 정산이 존별 count를 음수로 만들 수 없음 (환수 > 청구 금지).
-- I13: 에러 trigger 존재 시 무성 확정 금지 — ErrorSessionPolicy로만 처리.
-- I3: freezer close 재solve도 개수 게이트 통과 필수, 실패 시 증분 결과 유지.
-- I8: 모든 보정은 notes에 사유 코드로 기록.
+① 셀 net 우선 — 세션 전체 셀 순변화 net_c를 정체성 p의 n×w로 재해석.
+   게이트 통과 → net으로 개수 확정 (트리거 증분 덮어씀 — "꺼냈다 되돌림",
+   트리거 오판, pending 이월분이 전부 여기서 자기 교정). 게이트 실패 →
+   증분(트리거별 판정) 유지 (fail-closed, v1 keep_incremental 승계).
+② 오배치 반품 교정 — 셀 net의 설명 안 되는 +잔차를 타 셀 장바구니 상품
+   무게와 최근접 매칭해 감산 (v1 cross_zone_return의 셀 단위 정밀화).
+   완전 동률은 감산 보류 + note, 미매칭은 기록만 (감산 없음 — 과소청구 방향).
+
+보존 계약 (실기 검증):
+- finalize 멱등 — 같은 session_id는 항상 같은 결과 객체.
+- 반품 정산이 count를 음수로 만들 수 없음 (환수 > 청구 금지).
+- 에러 trigger 존재 시 무성 확정 금지 — ErrorSessionPolicy로만 처리.
+- 모든 보정은 notes에 사유 코드로 기록.
+- 개수 모호(이웃 정수도 게이트 이내) 시 작은 n 채택 (보수 청구).
 """
 from __future__ import annotations
 
 import re
 from collections import defaultdict
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 
 from crk_model.core.policy import ErrorSessionPolicy
 from crk_model.core.profiles import REFRIGERATOR, SensorProfile
@@ -26,51 +34,10 @@ from crk_model.core.types import (
     ProductCount,
     ZoneBasket,
 )
+from crk_model.ledger.cells import CellBeliefStore
 from crk_model.ledger.events import EventLog, TriggerEvent
 
-
-class _Basket:
-    def __init__(self) -> None:
-        self.counts: dict[str, int] = {}
-        self.products: dict[str, ActiveProduct] = {}
-
-    def add(self, product: ActiveProduct, count: int = 1) -> None:
-        self.products[product.product_id] = product
-        self.counts[product.product_id] = self.counts.get(product.product_id, 0) + count
-
-    def remove_one(self, product_id: str) -> bool:
-        if self.counts.get(product_id, 0) <= 0:
-            return False  # I14: 음수 금지
-        self.counts[product_id] -= 1
-        return True
-
-    def set_count(self, product_id: str, count: int) -> None:
-        assert count >= 0  # I14
-        self.counts[product_id] = count
-
-    def weight(self) -> float:
-        return sum(self.products[pid].unit_weight * c for pid, c in self.counts.items())
-
-    def items(self) -> list[tuple[ActiveProduct, int]]:
-        return [(self.products[pid], c) for pid, c in self.counts.items() if c > 0]
-
-    def to_zone(
-        self,
-        zone: int,
-        weight_delta: float = 0.0,
-        trigger_count: int = 0,
-        notes: tuple[str, ...] = (),
-    ) -> ZoneBasket:
-        return ZoneBasket(
-            zone,
-            tuple(
-                ProductCount(p, c)
-                for p, c in sorted(self.items(), key=lambda t: t[0].product_id)
-            ),
-            weight_delta,
-            trigger_count,
-            notes,
-        )
+_LEGACY_CHANNEL = -1  # cells 없는 이벤트(구 저널/에러 경로)의 존 직접 귀속
 
 
 def _ok_events(events: Iterable[TriggerEvent]) -> list[TriggerEvent]:
@@ -86,56 +53,59 @@ def _profile(
     zone: int,
     default: SensorProfile = REFRIGERATOR,
 ) -> SensorProfile:
-    # zone 미지정 시 폴백 — MODEL__MACHINE__CABINET_TYPE 이식: 판정(pipeline)과
-    # 정산(settle)의 tolerance/count gate 단일 소스 원칙을 지키기 위해 호출측
-    # (ModelService → CloseSettler/MultiZoneGateway)이 기기 단위 기본 프로파일을
-    # 주입한다. 기본값 REFRIGERATOR는 기존 동작과의 하위호환.
+    # zone 미지정 시 폴백 — 판정(pipeline)과 정산의 tolerance/count gate 단일
+    # 소스 원칙: 호출측(ModelService)이 기기 단위 기본 프로파일을 주입한다.
     return profiles.get(zone, default)
 
 
 def _notes_for_zone(notes: Sequence[str], zone: int) -> tuple[str, ...]:
-    """OPS 로그용 근사 매칭: note 문자열이 `zone{N}:` 또는 `zone{N}->`로 시작하는
-    패턴에 걸리는 것만 해당 zone에 귀속시킨다. `zone{N}` 뒤에 경계 구분자
-    (`:` 또는 `->`)까지 확인해 zone=1이 zone=11에 오매칭되지 않게 한다.
-    cross_zone_return(`zone{origin}->zone{dest}:...`)은 origin(반품 시작 zone)
-    표기가 항상 문자열 맨 앞에 오므로, 이 매칭 방식은 origin 쪽에만 귀속시킨다
-    (도착 zone 쪽 완전 매칭은 하지 않음 — 근사 처리, 최종 보고에 근거 명시)."""
+    """OPS 로그용 매칭: note가 `zone{N}:` 또는 `zone{N}->` 패턴을 포함하면
+    해당 zone에 귀속. `zone{N}` 뒤 경계 구분자까지 확인해 zone=1이 zone=11에
+    오매칭되지 않게 한다."""
     pattern = re.compile(rf"zone{zone}(?::|->)")
     return tuple(n for n in notes if pattern.search(n))
 
 
-def pass_same_zone(
-    events: Sequence[TriggerEvent],
-    profiles: Mapping[int, SensorProfile],
-    default_profile: SensorProfile = REFRIGERATOR,
-) -> tuple[dict[int, _Basket], list[tuple[int, float]]]:
-    """1층: 동존 즉시 복구 — removal은 판정 품목 축적, return은 무게 매칭 차감."""
-    baskets: dict[int, _Basket] = defaultdict(_Basket)
-    unmatched: list[tuple[int, float]] = []
-    for e in sorted(events, key=lambda e: e.ts):
-        b = baskets[e.zone]
-        tol = _profile(profiles, e.zone, default_profile).tolerance_grams
-        if e.delta_weight < 0:
-            for pc in e.judgment.products:
-                b.add(pc.product, pc.count)
-        elif e.delta_weight > 0:
-            if not _match_return(b, e.delta_weight, tol):
-                unmatched.append((e.zone, e.delta_weight))
-    return baskets, unmatched
+class _CellLedger:
+    """셀 하나의 세션 집계 — net, 증분(트리거별 확정), 정체성 증거."""
+
+    def __init__(self, zone: int, channel: int):
+        self.zone = zone
+        self.channel = channel
+        self.net = 0.0
+        self.incremental: dict[str, int] = {}  # pid -> count (제거 −반품, 확정분만)
+        self.identity_votes: dict[str, int] = {}  # 이벤트에 기록된 정체성 증거
+        self.unstable = False
+
+    def add(self, cell) -> None:
+        self.net += cell.delta_weight
+        if not cell.stabilized:
+            self.unstable = True
+        if cell.product_id:
+            self.identity_votes[cell.product_id] = (
+                self.identity_votes.get(cell.product_id, 0) + 1
+            )
+        if cell.resolved and cell.product_id:
+            sign = 1 if cell.delta_weight < 0 else -1
+            self.incremental[cell.product_id] = (
+                self.incremental.get(cell.product_id, 0) + sign * cell.count
+            )
+
+    def majority_identity(self) -> str | None:
+        if not self.identity_votes:
+            return None
+        return max(self.identity_votes.items(), key=lambda kv: kv[1])[0]
+
+    def incremental_counts(self) -> dict[str, int]:
+        return {pid: c for pid, c in self.incremental.items() if c > 0}
 
 
-def _match_return(b: _Basket, ret_weight: float, tol: float) -> bool:
-    for p, _c in b.items():
-        if abs(ret_weight - p.unit_weight) <= tol:
-            return b.remove_one(p.product_id)
-    items = b.items()
-    for i, (p1, c1) in enumerate(items):
-        for j, (p2, _c2) in enumerate(items):
-            if j < i or (i == j and c1 < 2):
-                continue
-            if abs(ret_weight - (p1.unit_weight + p2.unit_weight)) <= tol:
-                return b.remove_one(p1.product_id) and b.remove_one(p2.product_id)
-    return False
+def _count_candidates(target: float, w: float, gate: float) -> list[int]:
+    """target ≈ n×w를 게이트 이내로 설명하는 n 후보 (이웃 정수 포함)."""
+    if w <= 0 or target <= 0:
+        return []
+    n = round(target / w)
+    return [k for k in (n - 1, n, n + 1) if k >= 1 and abs(target - k * w) <= gate]
 
 
 class CloseSettler:
@@ -143,12 +113,15 @@ class CloseSettler:
         self,
         error_policy: ErrorSessionPolicy = ErrorSessionPolicy.BLOCK_PAYMENT,
         default_profile: SensorProfile = REFRIGERATOR,
+        beliefs: CellBeliefStore | None = None,
+        catalog: Callable[[], Sequence[ActiveProduct]] | None = None,
+        # catalog: close 시점 상품 정보 소스 (ModelService가 스냅샷 getter 주입).
+        # 미주입 시 이벤트에 실린 judgment.products에서만 상품 정보를 얻는다.
     ):
         self.error_policy = error_policy
-        # zone이 profiles dict에 없을 때의 폴백 프로파일 (cabinet_type 이식) —
-        # ModelService가 기기 단위 기본 프로파일을 주입한다. 기본값은 기존
-        # 동작(REFRIGERATOR)과 동일한 하위호환.
         self.default_profile = default_profile
+        self.beliefs = beliefs or CellBeliefStore()
+        self._catalog = catalog
         self._finalized: dict[str, FinalizedSettlement] = {}
 
     def settle(
@@ -159,7 +132,7 @@ class CloseSettler:
         event_log: EventLog | None = None,
     ) -> FinalizedSettlement:
         if session_id in self._finalized:
-            return self._finalized[session_id]  # I11: 멱등
+            return self._finalized[session_id]  # 멱등
 
         notes: list[str] = []
         ok = _ok_events(events)
@@ -170,42 +143,31 @@ class CloseSettler:
                 if e.status != "ok" or e.judgment.status is JudgmentStatus.ERROR
             }
         )
+        products = self._product_catalog(ok)
 
-        baskets, unmatched = pass_same_zone(ok, profiles, self.default_profile)
-        self._pass_net_delta(baskets, ok, profiles, unmatched, notes, self.default_profile)
-        self._pass_cross_zone(baskets, unmatched, profiles, notes, self.default_profile)
-        self._freezer_resolve(baskets, ok, profiles, notes, self.default_profile)
+        ledgers, legacy = self._collect(ok)
+        baskets: dict[int, dict[str, int]] = defaultdict(dict)  # zone -> pid -> count
+        unmatched_returns: list[tuple[int, int, float]] = []  # (zone, ch, +g)
 
-        # OPS 로그용: basket이 비어 있어도(예: unmatched_return만 있던 zone)
-        # 이벤트가 발생했던 zone은 요약에 나와야 한다 — events는 ok+error 전체
-        # 원본 파라미터 기준으로 zone 집합을 넓힌다 (error_zones 필터링은 이후).
-        all_zones = sorted(set(baskets) | {e.zone for e in events})
+        # ---- ① 셀 net 우선 ----
+        for ledger in ledgers.values():
+            self._resolve_cell(ledger, profiles, products, baskets, unmatched_returns, notes)
+        # cells 없는 구형 이벤트: 존 직접 증분 (net 정보 없음 — 교정 불가, 기록만)
+        for zone, counts in legacy.items():
+            for pid, c in counts.items():
+                if c > 0:
+                    baskets[zone][pid] = baskets[zone].get(pid, 0) + c
 
-        zones = []
-        for zone in all_zones:
-            # trigger_count는 ok+error 포함 전체 이벤트 수(그 zone에 실제 발생한
-            # 트리거 횟수)로 센다 — error_zones는 이미 별도로 추적되므로, zone별
-            # trigger_count는 "그 zone에 도달한 전체 이벤트 수"를 나타내는 것이
-            # 원본(다이어그램/원본 로그 예시)의 의미에 더 가깝다고 판단.
-            zone_events = [e for e in events if e.zone == zone]
-            weight_delta = sum(e.delta_weight for e in zone_events)
-            trigger_count = len(zone_events)
-            zone_notes = _notes_for_zone(notes, zone)
-            basket = baskets.get(zone)
-            zb = (
-                basket.to_zone(zone, weight_delta, trigger_count, zone_notes)
-                if basket is not None
-                else _Basket().to_zone(zone, weight_delta, trigger_count, zone_notes)
-            )
-            for pc in zb.products:
-                assert pc.count >= 0  # I14 (구조상 보장, 방어적 확인)
-            zones.append(zb)
+        # ---- ② 오배치 반품 교정 ----
+        self._cross_cell_returns(unmatched_returns, baskets, profiles, products, notes)
+
+        zones = self._zone_baskets(events, baskets, products, notes)
 
         blocked = False
         block_reason = ""
         if error_zones:
             if self.error_policy is ErrorSessionPolicy.BLOCK_PAYMENT:
-                blocked = True  # I13: 무성 확정 금지 (fail-closed 기본)
+                blocked = True  # 무성 확정 금지 (fail-closed 기본)
                 block_reason = f"error_trigger_present:zones={error_zones}"
             else:  # FINALIZE_ERROR_FREE_ZONES (Node 합의 시에만)
                 zones = [z for z in zones if z.zone not in error_zones]
@@ -223,106 +185,197 @@ class CloseSettler:
         return settlement
 
     def prune(self, keep_session_ids: set[str]) -> None:
-        """무한 성장 방지 (24h+ soak): _finalized 멱등 캐시(I11)를 최근
-        keep_session_ids만 남기고 정리한다. 호출측이 현재+직전 K개 세션을
-        넘겨야 하며, 여기서는 교집합만 수행한다 (현재 활성 세션은 아직
-        _finalized에 없을 수 있으므로 삭제 대상이 아니다)."""
+        """무한 성장 방지: 멱등 캐시를 최근 세션만 남기고 정리 (v1 승계)."""
         for sid in [s for s in self._finalized if s not in keep_session_ids]:
             del self._finalized[sid]
 
-    @staticmethod
-    def _pass_net_delta(
-        baskets: dict[int, _Basket],
-        events: Sequence[TriggerEvent],
-        profiles: Mapping[int, SensorProfile],
-        unmatched: list[tuple[int, float]],
-        notes: list[str],
-        default_profile: SensorProfile = REFRIGERATOR,
-    ) -> None:
-        """2층: 세션 net delta와 어긋난 과잉 청구 교정."""
-        for zone, b in baskets.items():
-            tol = _profile(profiles, zone, default_profile).tolerance_grams
-            net = sum(e.delta_weight for e in events if e.zone == zone)
-            excess = b.weight() - max(0.0, -net)
-            while excess > tol:
-                cands = [p for p, _c in b.items() if p.unit_weight <= excess + tol]
-                if not cands:
-                    break
-                p = min(cands, key=lambda p: abs(p.unit_weight - excess))
-                b.remove_one(p.product_id)
-                notes.append(f"net_delta_correction:zone{zone}:{p.product_id}-1")
-                # 이 보정이 설명한 동존 미매칭 반품 소거 (교차존 이중 차감 방지)
-                for k, (z, wt) in enumerate(unmatched):
-                    if z == zone and abs(wt - p.unit_weight) <= tol:
-                        unmatched.pop(k)
-                        break
-                excess -= p.unit_weight
+    # ---- 수집 ----
+    def _product_catalog(self, events: Sequence[TriggerEvent]) -> dict[str, ActiveProduct]:
+        products: dict[str, ActiveProduct] = {}
+        if self._catalog is not None:
+            for p in self._catalog():
+                products[p.product_id] = p
+        for e in events:  # 이벤트에 실린 상품 정보로 보강 (스냅샷 부재 대비)
+            for pc in e.judgment.products:
+                products.setdefault(pc.product.product_id, pc.product)
+        return products
 
     @staticmethod
-    def _pass_cross_zone(
-        baskets: dict[int, _Basket],
-        unmatched: list[tuple[int, float]],
+    def _collect(
+        events: Sequence[TriggerEvent],
+    ) -> tuple[dict[tuple[int, int], _CellLedger], dict[int, dict[str, int]]]:
+        ledgers: dict[tuple[int, int], _CellLedger] = {}
+        legacy: dict[int, dict[str, int]] = defaultdict(dict)
+        for e in sorted(events, key=lambda e: e.ts):
+            if e.cells:
+                for c in e.cells:
+                    key = (e.zone, c.channel)
+                    if key not in ledgers:
+                        ledgers[key] = _CellLedger(e.zone, c.channel)
+                    ledgers[key].add(c)
+            elif e.delta_weight < 0:
+                for pc in e.judgment.products:
+                    legacy[e.zone][pc.product.product_id] = (
+                        legacy[e.zone].get(pc.product.product_id, 0) + pc.count
+                    )
+        return ledgers, legacy
+
+    # ---- ① 셀 net ----
+    def _resolve_cell(
+        self,
+        ledger: _CellLedger,
         profiles: Mapping[int, SensorProfile],
+        products: Mapping[str, ActiveProduct],
+        baskets: dict[int, dict[str, int]],
+        unmatched_returns: list[tuple[int, int, float]],
         notes: list[str],
-        default_profile: SensorProfile = REFRIGERATOR,
     ) -> None:
-        """3층: 미매칭 반품을 다른 존 장바구니와 매칭 (존 착오 반납)."""
-        for zone, wt in unmatched:
-            hit = False
-            for oz, b in baskets.items():
-                if oz == zone:
-                    continue
-                tol = _profile(profiles, oz, default_profile).tolerance_grams
-                for p, _c in b.items():
-                    if abs(wt - p.unit_weight) <= tol:
-                        b.remove_one(p.product_id)
-                        notes.append(
-                            f"cross_zone_return:zone{zone}->zone{oz}:{p.product_id}-1"
+        zone, ch = ledger.zone, ledger.channel
+        prof = _profile(profiles, zone, self.default_profile)
+        gate = prof.count_gate
+        net = ledger.net
+        incremental = ledger.incremental_counts()
+        tag = f"zone{zone}:ch{ch}"
+
+        def keep_incremental(reason: str) -> None:
+            for pid, c in incremental.items():
+                baskets[zone][pid] = baskets[zone].get(pid, 0) + c
+            notes.append(f"{reason}:{tag}:keep_incremental")
+
+        if abs(net) <= gate:
+            # 순변화 없음 (전량 반품 포함) → 과금 없음
+            if incremental:
+                notes.append(f"cell_net_clear:{tag}")
+            return
+
+        identity = self.beliefs.identity(zone, ch) or ledger.majority_identity()
+        p = products.get(identity) if identity else None
+
+        if net < 0:
+            if p is None:
+                # 미지 셀 제거: 무게 단독 유일 매칭 (냉장만 — 냉동 억제 원리)
+                if prof.weight_is_discriminative:
+                    fits = [
+                        (q, ns)
+                        for q in products.values()
+                        if (ns := _count_candidates(-net, q.unit_weight, gate))
+                        and min(ns) <= q.stock_qty
+                    ]
+                    if len(fits) == 1:
+                        q, ns = fits[0]
+                        n = min(ns)
+                        baskets[zone][q.product_id] = (
+                            baskets[zone].get(q.product_id, 0) + n
                         )
-                        hit = True
-                        break
-                if hit:
-                    break
-            if not hit:
-                notes.append(f"unmatched_return:zone{zone}:{wt:+.1f}g")
-
-    @staticmethod
-    def _freezer_resolve(
-        baskets: dict[int, _Basket],
-        events: Sequence[TriggerEvent],
-        profiles: Mapping[int, SensorProfile],
-        notes: list[str],
-        default_profile: SensorProfile = REFRIGERATOR,
-    ) -> None:
-        """4층: freezer 부호있는 net basket 재solve (불안정 close 대비, QA Q6)."""
-        for zone, b in list(baskets.items()):
-            prof = _profile(profiles, zone, default_profile)
-            if prof.weight_is_discriminative:
-                continue
-            gate = prof.count_gate
-            net = sum(e.delta_weight for e in events if e.zone == zone)
-            if net >= -gate:
-                # 순변화 없음(전량 반품 포함) → 과금 없음
-                if b.items():
-                    notes.append(f"freezer_close_resolve:zone{zone}:net~0->clear")
-                    for pid in list(b.counts):
-                        b.set_count(pid, 0)
-                continue
-            kinds = b.items()
-            if len(kinds) == 1:
-                p, _c = kinds[0]
-                count = round(-net / p.unit_weight) if p.unit_weight > 0 else 0
-                if (
-                    1 <= count <= p.stock_qty  # I12
-                    and abs(-net - count * p.unit_weight) <= gate  # I3
-                ):
-                    b.set_count(p.product_id, count)
-                    notes.append(f"freezer_close_resolve:zone{zone}:{p.product_id}={count}")
+                        notes.append(
+                            f"cell_net_weight_unique:{tag}:{q.product_id}={n}"
+                        )
+                        return
+                # fail-closed: 추측 과금 금지 — 매출 누락 방향으로 기록만
+                if incremental:
+                    keep_incremental("cell_identity_unknown")
                 else:
-                    # I3: 게이트 실패 시 다품목/재solve 확정 금지 → 증분 결과 유지
-                    notes.append(f"freezer_close_gate_failed:zone{zone}:keep_incremental")
-            elif len(kinds) > 1:
-                notes.append(f"freezer_close_multi_kind:zone{zone}:keep_incremental")
+                    notes.append(f"cell_identity_unknown:{tag}:no_charge:{net:+.1f}g")
+                return
+            ns = _count_candidates(-net, p.unit_weight, gate)
+            if not ns or min(ns) > p.stock_qty:
+                keep_incremental("cell_net_gate_failed")
+                return
+            n = min(ns)  # 모호 시 작은 n (보수 청구)
+            baskets[zone][p.product_id] = baskets[zone].get(p.product_id, 0) + n
+            if len(ns) > 1:
+                notes.append(f"count_ambiguous_floor:{tag}:{p.product_id}={n}")
+            notes.append(f"cell_net_resolve:{tag}:{p.product_id}={n}")
+            return
+
+        # net > gate: 셀이 무거워짐 — 자기 상품 반납이면 과금 없음(count ≥ 0),
+        # 설명 안 되면 오배치 반품 후보로 ② 단계에 넘긴다.
+        if p is not None and _count_candidates(net, p.unit_weight, gate):
+            notes.append(f"surplus_return:{tag}")
+            return
+        unmatched_returns.append((zone, ch, net))
+
+    # ---- ② 오배치 반품 ----
+    def _cross_cell_returns(
+        self,
+        unmatched: list[tuple[int, int, float]],
+        baskets: dict[int, dict[str, int]],
+        profiles: Mapping[int, SensorProfile],
+        products: Mapping[str, ActiveProduct],
+        notes: list[str],
+    ) -> None:
+        for zone, ch, ret in unmatched:
+            remaining = ret
+            deducted = True
+            while deducted:
+                deducted = False
+                candidates: list[tuple[float, int, ActiveProduct]] = []
+                for bz, counts in baskets.items():
+                    tol = _profile(profiles, bz, self.default_profile).count_gate
+                    for pid, c in counts.items():
+                        if c <= 0 or pid not in products:
+                            continue
+                        q = products[pid]
+                        dist = abs(remaining - q.unit_weight)
+                        if dist <= tol:
+                            candidates.append((dist, bz, q))
+                if not candidates:
+                    break
+                candidates.sort(key=lambda t: t[0])
+                best = candidates[0]
+                ties = [
+                    c
+                    for c in candidates[1:]
+                    if c[0] == best[0] and c[2].product_id != best[2].product_id
+                ]
+                if ties:
+                    # 완전 동률 — 감산 보류 (과금 오류 방지 우선, README 규칙)
+                    notes.append(
+                        f"cross_cell_return_ambiguous:zone{zone}:ch{ch}:{remaining:+.1f}g"
+                    )
+                    return
+                _dist, bz, q = best
+                baskets[bz][q.product_id] -= 1  # count ≥ 0 (감산 전 c > 0 확인)
+                notes.append(
+                    f"cross_cell_return:zone{zone}:ch{ch}->zone{bz}:{q.product_id}-1"
+                )
+                remaining -= q.unit_weight
+                deducted = remaining > _profile(
+                    profiles, zone, self.default_profile
+                ).count_gate
+            if remaining > _profile(profiles, zone, self.default_profile).count_gate:
+                notes.append(f"unmatched_return:zone{zone}:ch{ch}:{remaining:+.1f}g")
+
+    # ---- 존 집계 ----
+    def _zone_baskets(
+        self,
+        events: Sequence[TriggerEvent],
+        baskets: Mapping[int, Mapping[str, int]],
+        products: Mapping[str, ActiveProduct],
+        notes: Sequence[str],
+    ) -> list[ZoneBasket]:
+        all_zones = sorted(set(baskets) | {e.zone for e in events})
+        zones = []
+        for zone in all_zones:
+            zone_events = [e for e in events if e.zone == zone]
+            weight_delta = sum(e.delta_weight for e in zone_events)
+            pcs = tuple(
+                ProductCount(products[pid], c)
+                for pid, c in sorted(baskets.get(zone, {}).items())
+                if c > 0 and pid in products
+            )
+            for pc in pcs:
+                assert pc.count >= 0  # 구조상 보장, 방어적 확인
+            zones.append(
+                ZoneBasket(
+                    zone,
+                    pcs,
+                    weight_delta,
+                    len(zone_events),
+                    _notes_for_zone(notes, zone),
+                )
+            )
+        return zones
 
 
 def interim_summary(
@@ -331,8 +384,34 @@ def interim_summary(
     profiles: Mapping[int, SensorProfile],
     default_profile: SensorProfile = REFRIGERATOR,
 ) -> InterimSummary:
-    """잠정 집계 (I10) — 1층(동존)만 반영. 결제 전달 금지 타입."""
-    baskets, _ = pass_same_zone(_ok_events(events), profiles, default_profile)
-    return InterimSummary(
-        session_id, tuple(baskets[z].to_zone(z) for z in sorted(baskets))
-    )
+    """잠정 집계 — 셀별 확정 증분만 반영 (결제 전달 금지 타입).
+
+    pending 셀·net 재해석은 반영하지 않는다 — 확정은 close 정산기 한 곳에서.
+    """
+    del profiles, default_profile  # v2: 증분 집계는 프로파일 불필요 (시그니처 유지)
+    zone_counts: dict[int, dict[str, int]] = defaultdict(dict)
+    catalog: dict[str, ActiveProduct] = {}
+    for e in sorted(_ok_events(events), key=lambda e: e.ts):
+        for pc in e.judgment.products:
+            catalog.setdefault(pc.product.product_id, pc.product)
+        if e.cells:
+            for c in e.cells:
+                if c.resolved and c.product_id:
+                    sign = 1 if c.delta_weight < 0 else -1
+                    zone_counts[e.zone][c.product_id] = (
+                        zone_counts[e.zone].get(c.product_id, 0) + sign * c.count
+                    )
+        elif e.delta_weight < 0:
+            for pc in e.judgment.products:
+                zone_counts[e.zone][pc.product.product_id] = (
+                    zone_counts[e.zone].get(pc.product.product_id, 0) + pc.count
+                )
+    zones = []
+    for zone in sorted(zone_counts):
+        pcs = tuple(
+            ProductCount(catalog[pid], c)
+            for pid, c in sorted(zone_counts[zone].items())
+            if c > 0 and pid in catalog
+        )
+        zones.append(ZoneBasket(zone, pcs))
+    return InterimSummary(session_id, tuple(zones))

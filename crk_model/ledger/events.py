@@ -4,7 +4,7 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import dataclass, field
 
-from crk_model.core.types import JudgmentResult, VisionCandidate, WeightSegment
+from crk_model.core.types import CellOutcome, JudgmentResult, VisionCandidate, WeightSegment
 
 
 @dataclass(frozen=True)
@@ -12,11 +12,13 @@ class TriggerEvent:
     session_id: str
     zone: int
     ts: float
-    delta_weight: float
+    delta_weight: float  # 존 총량 (셀 delta 합) — OPS 로그/하위호환
     segments: tuple[WeightSegment, ...]
     judgment: JudgmentResult
-    seq: int | None = None  # D2: 카메라 시퀀스 (선택 — 없어도 동작)
-    status: str = "ok"  # "ok" | "error" (I1: 처리 실패는 에러로 전파)
+    seq: int | None = None  # 카메라 시퀀스 (선택 — 없어도 동작)
+    status: str = "ok"  # "ok" | "error" (처리 실패는 에러로 전파)
+    # 설계 v2: 셀(채널)별 관측+판정 — close 정산의 셀 net 입력
+    cells: tuple[CellOutcome, ...] = ()
     # 진단 강화 (issue #6): 투표 앙상블 최종 후보 전체(채택 안 된 것 포함).
     # 오판정 사후 분석의 핵심 — 어떤 후보들이 경쟁했는지 남긴다.
     vision_candidates: tuple[VisionCandidate, ...] = ()
