@@ -1,5 +1,9 @@
 # ARCHITECTURE_DIAGRAMS
 
+> **[ARCHIVED 2026-07-10]** 이 문서는 더 이상 구속력 있는 설계 방침이 아니다.
+> 원본(CRK-model) 로직의 기록용 참고 자료로만 유지한다. 현행 설계는 `README.md`의
+> "추론 설계 v2 (셀 단위 모델)"가 유일한 기준이다.
+
 # CRK-Model 추론·결제 로직 시각화 (재작성용 참조 문서)
 
 > 목적: `engine/decision_engine.py`(10.4k L) 와 `session/*`(집계·결제) 를 **처음부터 다시 짜기** 위해
