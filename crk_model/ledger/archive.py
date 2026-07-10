@@ -32,7 +32,7 @@ from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from crk_model.core.types import FinalizedSettlement, ZoneBasket
+from crk_model.core.types import ActiveProduct, FinalizedSettlement, ZoneBasket
 from crk_model.ledger.events import TriggerEvent
 
 if TYPE_CHECKING:
@@ -61,8 +61,14 @@ def _trace_to_dict(trace: TriggerTrace | None) -> dict:
 
 
 def _event_to_dict(
-    event: TriggerEvent, trace: TriggerTrace | None, processing_time_ms: float
+    event: TriggerEvent,
+    trace: TriggerTrace | None,
+    processing_time_ms: float,
+    by_class: Mapping[int, ActiveProduct] | None = None,
+    by_pid: Mapping[str, ActiveProduct] | None = None,
 ) -> dict:
+    by_class = by_class or {}
+    by_pid = by_pid or {}
     j = event.judgment
     return {
         "ts": event.ts,
@@ -89,15 +95,34 @@ def _event_to_dict(
                 for pc in j.products
             ],
         },
-        # 진단 핵심: 채택 안 된 후보 포함 전체 — 오판정 시 "무엇과 경쟁했는지"
+        # 진단 핵심: 채택 안 된 후보 포함 전체 — 오판정 시 "무엇과 경쟁했는지".
+        # 상품명 병기 (이슈 #9 분석 갭): class_id만으로는 아카이브 단독 분석 불가.
         "vision_candidates": [
             {
                 "class_id": c.class_id,
+                "product_id": (
+                    by_class[c.class_id].product_id if c.class_id in by_class else ""
+                ),
+                "name": by_class[c.class_id].name if c.class_id in by_class else "",
                 "confidence": c.confidence,
                 "vote_count": c.vote_count,
                 "vote_ratio": c.vote_ratio,
             }
             for c in event.vision_candidates
+        ],
+        # 설계 v2: 셀별 관측+판정 — pending 사유·정체성까지 아카이브 단독 재구성
+        "cells": [
+            {
+                "channel": c.channel,
+                "delta_weight": c.delta_weight,
+                "stabilized": c.stabilized,
+                "resolved": c.resolved,
+                "product_id": c.product_id,
+                "name": by_pid[c.product_id].name if c.product_id in by_pid else "",
+                "count": c.count,
+                "reason": c.reason,
+            }
+            for c in event.cells
         ],
         "video_paths": dict(event.video_paths),
         "trace": _trace_to_dict(trace),
@@ -133,14 +158,18 @@ def build_session_document(
     processing_times_ms: Mapping[TriggerEvent, float],
     finalized_at: float,
     error_detail: str = "",
+    products: Sequence[ActiveProduct] = (),
 ) -> dict:
     """세션 전체를 아카이브 문서(dict)로 조립 — YAML/JSON 공용 직렬화 입력.
 
     원본 YAML 포맷(door_session_id/zone/status/triggers/aggregated_products/
-    summary)을 우리 도메인(세션+존별+트리거별)으로 재해석했다."""
+    summary)을 우리 도메인(세션+존별+트리거별)으로 재해석했다.
+    products: 확정 시점 상품 스냅샷 — 비전 후보·셀에 상품명 병기용 (이슈 #9)."""
+    by_class = {p.class_id: p for p in products if p.class_id > 0}
+    by_pid = {p.product_id: p for p in products}
     ordered_events = sorted(events, key=lambda e: e.ts)
     triggers = [
-        _event_to_dict(e, traces.get(e), processing_times_ms.get(e, 0.0))
+        _event_to_dict(e, traces.get(e), processing_times_ms.get(e, 0.0), by_class, by_pid)
         for e in ordered_events
     ]
 
@@ -216,6 +245,7 @@ class SessionArchive:
         processing_times_ms: Mapping[TriggerEvent, float] | None = None,
         error_detail: str = "",
         finalized_at: float | None = None,
+        products: Sequence[ActiveProduct] = (),
     ) -> Path | None:
         """세션 문서를 조립해 디스크에 쓴다. 실패해도 예외를 전파하지 않는다
         (아카이브는 부가 기능 — 서비스 경로를 절대 죽이지 않는다).
@@ -233,6 +263,7 @@ class SessionArchive:
                 processing_times_ms or {},
                 error_detail,
                 finalized_at,
+                products,
             )
         except Exception:
             logger.warning(
@@ -251,6 +282,7 @@ class SessionArchive:
         processing_times_ms: Mapping[TriggerEvent, float],
         error_detail: str,
         finalized_at: float | None,
+        products: Sequence[ActiveProduct] = (),
     ) -> Path:
         assert self._dir is not None
         today = self._today()
@@ -265,6 +297,7 @@ class SessionArchive:
             processing_times_ms,
             finalized_at if finalized_at is not None else 0.0,
             error_detail,
+            products,
         )
 
         date_dir = self._dir / today.strftime(_DATE_FMT)

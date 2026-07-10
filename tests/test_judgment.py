@@ -195,6 +195,71 @@ class TestCellPending:
         assert d.result.strategy == "cell_pending"
 
 
+class TestColdStart:
+    """이슈 #9: 미지 셀 V∩W 복수 시 득표순 채택 (v1 vision-first 의미론).
+
+    신념이 빈 초기 구간의 학습 교착·매출 누락 방지. 완전 동률만 보류
+    (TestCellPending.test_identity_ambiguous_pends가 동률 케이스)."""
+
+    def test_ranked_adoption_picks_higher_votes(self, router, bar170, bar178):
+        # ±15g에서 -174는 둘 다 설명 — 득표가 높은 bar170 채택
+        d = router.judge(
+            ctx(
+                [cell(0, -174.0)],
+                [bar170, bar178],
+                candidates=[cand(3, conf=0.6, votes=36), cand(4, conf=0.9, votes=9)],
+                profile=FREEZER,
+            )
+        )
+        assert d.result.status is JudgmentStatus.COMPLETE
+        assert d.cells[0].product_id == "P170"
+        assert d.cells[0].reason == "vision_first_cold_start"
+
+    def test_leader_failing_gate_falls_to_next_rank(self, router, cola, bar170, bar178):
+        # 이슈 #9 ses-6 재현: 득표 1위(cola 100g)는 -178을 설명 못 함 →
+        # 게이트 통과하는 차순위(bar170/bar178 중 득표 높은 쪽) 채택
+        d = router.judge(
+            ctx(
+                [cell(0, -178.0)],
+                [cola, bar170, bar178],
+                candidates=[cand(1, conf=0.6, votes=36), cand(4, conf=0.7, votes=9),
+                            cand(3, conf=0.7, votes=3)],
+                profile=FREEZER,
+            )
+        )
+        assert d.result.status is JudgmentStatus.COMPLETE
+        assert d.cells[0].product_id == "P178"
+        assert d.cells[0].reason == "vision_first_cold_start"
+
+    def test_cold_start_adoption_accrues_low_belief_weight(self, bar170, bar178):
+        # cold start 채택은 신념 저가중(0.5) — 강한 증거(1.0)의 2배 관측 필요
+        from crk_model.ledger.cells import CellBeliefStore
+        from crk_model.service.pipeline import TriggerPipeline
+        from crk_model.service.snapshot import ActiveProductStore
+
+        store = ActiveProductStore()
+        store.update([bar170, bar178])
+        beliefs = CellBeliefStore()
+        router = JudgmentRouter()
+        pipe = TriggerPipeline(
+            object(), {9: FREEZER}, store, router=router, beliefs=beliefs
+        )
+        d = router.judge(
+            ctx(
+                [cell(0, -174.0)],
+                [bar170, bar178],
+                candidates=[cand(3, votes=36), cand(4, votes=9)],
+                profile=FREEZER,
+                zone=9,
+            )
+        )
+        for _ in range(5):  # 0.5 × 5 = 2.5 < promote_score 3.0
+            pipe._observe_beliefs(9, d)
+        assert beliefs.identity(9, 0) is None
+        pipe._observe_beliefs(9, d)  # 6회째 = 3.0 → 승격
+        assert beliefs.identity(9, 0) == "P170"
+
+
 class TestVisionCrossCheck:
     def test_mismatch_noted_but_judgment_holds(self, router, cola, water):
         # 알려진 셀: 제거는 물리적으로 그 셀 상품 — 비전 불일치는 note만

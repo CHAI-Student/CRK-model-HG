@@ -282,6 +282,28 @@ class TestJournalRoundTrip:
 
 
 class TestBuildSessionDocument:
+    def test_candidates_and_cells_carry_product_names(self, cola, water):
+        # 이슈 #9 분석 갭: class_id만으로는 아카이브 단독 분석 불가 → 상품명 병기
+        from crk_model.core.types import CellOutcome
+
+        event = TriggerEvent(
+            "s9", 4, 1.0, -100.0, (),
+            JudgmentResult(JudgmentStatus.NO_DETECTION, strategy="cell_pending"),
+            vision_candidates=(cand(1, conf=0.9, votes=30), cand(9, conf=0.5, votes=5)),
+            cells=(CellOutcome(0, -100.0, resolved=True,
+                               product_id=cola.product_id, count=1),),
+        )
+        doc = build_session_document(
+            "s9", "finalized", [event], None, {}, {}, 0.0, products=[cola, water]
+        )
+        cands = doc["triggers"][0]["vision_candidates"]
+        assert cands[0]["product_id"] == cola.product_id
+        assert cands[0]["name"] == cola.name
+        assert cands[1]["name"] == ""  # 미등록 class는 빈 이름 (매핑 갭 가시화)
+        cells = doc["triggers"][0]["cells"]
+        assert cells[0]["product_id"] == cola.product_id
+        assert cells[0]["name"] == cola.name
+
     def test_error_without_settlement_reconstructs_zone_summary(self):
         events = [
             TriggerEvent(

@@ -39,13 +39,14 @@ def cellout(channel, delta, product=None, count=0, resolved=False, reason=""):
     )
 
 
-def ev(sid, zone, ts, cells, charged=()):
+def ev(sid, zone, ts, cells, charged=(), candidates=()):
     """트리거 이벤트 — charged: 판정이 과금한 (product, count) 목록."""
     pcs = tuple(ProductCount(p, c) for p, c in charged)
     status = JudgmentStatus.COMPLETE if pcs else JudgmentStatus.NO_DETECTION
     j = JudgmentResult(status, pcs, 0.9, "cell_delta", "cell_delta")
     return TriggerEvent(
-        sid, zone, ts, sum(c.delta_weight for c in cells), (), j, cells=tuple(cells)
+        sid, zone, ts, sum(c.delta_weight for c in cells), (), j,
+        cells=tuple(cells), vision_candidates=tuple(candidates),
     )
 
 
@@ -237,6 +238,62 @@ class TestCellNetPass:
         for z in result.zones:
             for pc in z.products:
                 assert pc.count >= 0
+
+
+class TestCloseVisionRank:
+    """이슈 #9 B: 미지 셀 net을 세션 비전 득표순 ∩ 게이트로 재해석 (과금 경로)."""
+
+    def test_unknown_freezer_cell_resolved_by_vision_rank(self, cola, bar170, bar178):
+        # ses-6 재현: 득표 1위(cola)는 net -178을 설명 못 함 → 차순위 bar178 과금
+        from tests.conftest import cand
+
+        s = settler(catalog=[cola, bar170, bar178])
+        events = [
+            ev(
+                "s1", 9, 1.0,
+                [cellout(0, -178.0, reason="identity_ambiguous")],
+                candidates=[cand(1, conf=0.6, votes=36), cand(4, conf=0.7, votes=9)],
+            )
+        ]
+        result = s.settle("s1", events, PROFILES)
+        assert result.total_price == bar178.unit_price
+        assert any("cell_net_vision_rank:zone9:ch0:P178=1" in n for n in result.notes)
+
+    def test_vision_rank_feeds_belief_with_cold_weight(self, bar170, bar178):
+        from tests.conftest import cand
+
+        beliefs = CellBeliefStore()
+        # 세션 6개를 순차 정산 — cold 0.5×6 = 3.0에서 승격
+        for i in range(6):
+            s = settler(catalog=[bar170, bar178], beliefs=beliefs)
+            events = [
+                ev(
+                    f"s{i}", 9, 1.0,
+                    [cellout(0, -170.0, reason="identity_ambiguous")],
+                    candidates=[cand(3, conf=0.8, votes=30), cand(4, conf=0.7, votes=5)],
+                )
+            ]
+            s.settle(f"s{i}", events, PROFILES)
+            if i < 5:
+                assert beliefs.identity(9, 0) is None  # 저가중 — 조기 확신 방지
+        assert beliefs.identity(9, 0) == "P170"
+
+    def test_exact_tie_withholds_and_fails_closed(self, bar170, bar178):
+        # 1·2위가 완전 동률(득표·conf 동일) — 순위 근거 없음 → 과금 보류 + 기록
+        from tests.conftest import cand
+
+        s = settler(catalog=[bar170, bar178])
+        events = [
+            ev(
+                "s1", 9, 1.0,
+                [cellout(0, -174.0, reason="identity_ambiguous")],
+                candidates=[cand(3, conf=0.8, votes=10), cand(4, conf=0.8, votes=10)],
+            )
+        ]
+        result = s.settle("s1", events, PROFILES)
+        assert result.total_price == 0
+        assert any("cell_net_vision_tie" in n for n in result.notes)
+        assert any("cell_identity_unknown" in n for n in result.notes)
 
 
 class TestCrossCellReturns:

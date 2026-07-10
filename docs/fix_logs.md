@@ -532,3 +532,47 @@
 - 테스트: `python -m pytest -q` → 188 passed. E2E 스모크: 워터마크 CLOSE →
   awaiting_triggers 보류 → 0.66s 후 트리거 도착 → 유예 없이 즉시 3,700원 확정.
   Node 측 구현은 Edge_Environment 팀 몫 (README 가이드 참조).
+
+---
+
+## 2026-07-10 v2 cold start — 미지 셀 전건 pending으로 0원 확정 (GitHub issue #9)
+
+- 증상: v2(`redesign/v2-cell-model`) 실기 적용 첫 세션들에서 실물 1개 제거가
+  전부 0원 확정. ses-5(햄버거, ch1 -189.4g)·ses-6(만두, ch0 -233.1g) 모두
+  트리거 판정 `identity_ambiguous` → close `cell_identity_unknown:no_charge`.
+
+- 원인: cold start(신념 빈 상태)에서 정보를 버리는 지점이 2곳. ① 미지 셀
+  판정이 V∩W를 **집합**으로 보고 유일할 때만 채택 — 냉동 ±15g 창에는 비전이
+  본 상품이 2개 이상 들어오기 쉬워 전 트리거가 pending. v1
+  freezer_vision_first는 **득표순 순차 시도**로 같은 상황을 판정했다(두 세션
+  모두 v1이면 정확 과금 추정). ② close 셀 net 재해석이 이벤트에 실린
+  vision_candidates(순위 포함)를 참조하지 않아 두 번째 기회도 fail-closed.
+  또한 `identity_ambiguous` pending은 신념 증거를 남기지 않아 **학습이
+  시작조차 못 하는 교착** — cold start가 시간이 지나도 안 풀릴 수 있었다.
+
+- 해결방안 (사용자 방향: "초기에는 원래 judgment 우선"):
+  ① [B·과금 경로] settler `_vision_rank_fit`: 미지 셀 net(<0)을 세션 비전
+  득표순 ∩ 개수 게이트로 재해석해 첫 통과 상품을 과금
+  (`cell_net_vision_rank`), 1·2위 완전 동률(득표·conf 동일)만 보류
+  (`cell_net_vision_tie`). 채택은 신념에 **cold 저가중(0.5)**으로 반영.
+  ② [A·신념/interim] 라우터 미지 셀 V∩W 복수 시 득표순 첫 게이트 통과 후보
+  채택(`vision_first_cold_start`) — interim 표시·신념 증거 축적용, 역시 cold
+  저가중(pipeline이 reason의 `cold_start`로 판별). 완전 동률만
+  `identity_ambiguous` 유지. 신념 승격 후에는 known_identity 경로가 우선하므로
+  cold start 규칙은 자연히 물러난다.
+  ③ [진단] 세션 아카이브 vision_candidates·cells에 product_id/상품명 병기
+  (class_id만으로 아카이브 단독 분석이 불가했던 갭), cells 자체도 아카이브에
+  기록.
+
+- 관련 파일: `crk_model/judgment/router.py`(_rank_vw, vision_first_cold_start),
+  `crk_model/ledger/settler.py`(_CellLedger.vision, _vision_rank_fit),
+  `crk_model/ledger/cells.py`(cold_weight), `crk_model/service/pipeline.py`
+  (_observe_beliefs cold), `crk_model/ledger/archive.py`·
+  `crk_model/service/model_service.py`(상품명 병기), `tests/test_judgment.py`
+  (TestColdStart — ses-6 순위 폴백 재현 포함), `tests/test_ledger.py`
+  (TestCloseVisionRank), `tests/test_session_archive.py`.
+
+- 테스트: `python -m pytest -q` → 205 passed, `ruff check .` clean.
+  실기 재검증 대기 — 잔여 후보(미착수): 셀 min gate 프로파일화(ses-5 ch0
+  +7.1g 유령 신호), zone4 무게 DB 실측 재등록 확인(155G 라벨 vs -189.4g 실측),
+  class13이 두 세션 연속 득표 1위인 원인(오검출 리더 의심) 확인.

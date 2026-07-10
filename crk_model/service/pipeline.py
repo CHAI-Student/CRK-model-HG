@@ -225,7 +225,12 @@ class TriggerPipeline:
             if not c.product_id or c.reason.startswith("known_"):
                 continue
             self._beliefs.observe(
-                zone, c.channel, c.product_id, strong=c.delta_weight < 0
+                zone,
+                c.channel,
+                c.product_id,
+                strong=c.delta_weight < 0,
+                # cold start 순위 채택(이슈 #9)은 근거가 비전 순위뿐 — 저가중
+                cold="cold_start" in c.reason,
             )
         for channel, rival in decision.contradictions:
             self._beliefs.observe(zone, channel, rival, strong=True)

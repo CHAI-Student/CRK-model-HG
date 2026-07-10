@@ -247,6 +247,28 @@ class JudgmentRouter:
                 return _pending(cell, "count_pending", product_id=p.product_id), conf, None
             return _resolve(cell, p.product_id, n, "vision_weight_match"), conf, None
 
+        if len({p.product_id for p, _n, _a in vw}) > 1:
+            # cold start (이슈 #9): V∩W가 복수면 v1 freezer_vision_first처럼
+            # 득표순으로 첫 게이트 통과 후보를 채택한다 — 집합 유일성만 요구하면
+            # 신념이 빈 초기 구간에 전 트리거가 pending으로 빠져 학습이 시작조차
+            # 못 한다. 채택 근거가 순위뿐이므로 신념 증거는 저가중(cold_start
+            # reason 접두어 계약 — pipeline._observe_beliefs). 완전 동률(득표·
+            # conf 동일)만 판별 불능으로 보류한다.
+            picked = self._rank_vw(ctx.vision_candidates, vw)
+            if picked is not None:
+                cand, p, n, amb = picked
+                if amb:
+                    return (
+                        _pending(cell, "count_pending_cold_start", product_id=p.product_id),
+                        cand.confidence,
+                        None,
+                    )
+                return (
+                    _resolve(cell, p.product_id, n, "vision_first_cold_start"),
+                    cand.confidence,
+                    None,
+                )
+
         if not vision_classes and len({p.product_id for p, _n, _a in pairs}) == 1:
             if profile.weight_is_discriminative:
                 p, n, amb = pairs[0]
@@ -266,6 +288,33 @@ class JudgmentRouter:
 
         reason = "identity_ambiguous" if pairs else "no_identity_evidence"
         return _pending(cell, reason), 0.0, None
+
+    @staticmethod
+    def _rank_vw(
+        candidates: Sequence[VisionCandidate],
+        vw: Sequence[tuple[ActiveProduct, int, bool]],
+    ) -> tuple[VisionCandidate, ActiveProduct, int, bool] | None:
+        """득표순으로 게이트 통과 후보 정렬 — 1위 채택, 1·2위 완전 동률이면 None.
+
+        vw는 이미 무게 게이트를 통과한 (상품, n, 개수모호) 목록이므로 여기서는
+        비전 순위만 매긴다 (v1 freezer_vision_first의 득표순 순차 시도 대응).
+        """
+        ranked = sorted(candidates, key=lambda c: (-c.vote_count, -c.confidence))
+        fitting: list[tuple[VisionCandidate, ActiveProduct, int, bool]] = []
+        seen: set[str] = set()
+        for cand in ranked:
+            for p, n, amb in vw:
+                if p.class_id == cand.class_id and p.product_id not in seen:
+                    fitting.append((cand, p, n, amb))
+                    seen.add(p.product_id)
+                    break
+        if not fitting:
+            return None
+        if len(fitting) > 1:
+            first, second = fitting[0][0], fitting[1][0]
+            if (first.vote_count, first.confidence) == (second.vote_count, second.confidence):
+                return None  # 완전 동률 — 순위 근거 없음
+        return fitting[0]
 
     @staticmethod
     def _judge_known(

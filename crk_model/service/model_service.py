@@ -306,6 +306,8 @@ class ModelService:
             processing_times_ms,
             error_detail=error_detail,
             finalized_at=self._clock(),
+            # 이슈 #9: 비전 후보·셀에 상품명 병기 — 아카이브 단독 분석 가능하게
+            products=self.snapshots.snapshot().products,
         )
         if path is not None:
             ops_logger.info("[OPS][SESSION_ARCHIVE] path=%s", path)

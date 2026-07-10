@@ -67,7 +67,7 @@ def _notes_for_zone(notes: Sequence[str], zone: int) -> tuple[str, ...]:
 
 
 class _CellLedger:
-    """셀 하나의 세션 집계 — net, 증분(트리거별 확정), 정체성 증거."""
+    """셀 하나의 세션 집계 — net, 증분(트리거별 확정), 정체성·비전 증거."""
 
     def __init__(self, zone: int, channel: int):
         self.zone = zone
@@ -75,9 +75,10 @@ class _CellLedger:
         self.net = 0.0
         self.incremental: dict[str, int] = {}  # pid -> count (제거 −반품, 확정분만)
         self.identity_votes: dict[str, int] = {}  # 이벤트에 기록된 정체성 증거
+        self.vision: dict[int, list[float]] = {}  # class_id -> [votes 합, conf 최대]
         self.unstable = False
 
-    def add(self, cell) -> None:
+    def add(self, cell, candidates=()) -> None:
         self.net += cell.delta_weight
         if not cell.stabilized:
             self.unstable = True
@@ -90,11 +91,24 @@ class _CellLedger:
             self.incremental[cell.product_id] = (
                 self.incremental.get(cell.product_id, 0) + sign * cell.count
             )
+        # 비전 후보는 존 단위 관측 — 미지 셀의 close 순위 판별(이슈 #9) 입력으로
+        # 셀 원장에도 누적한다 (득표 합·conf 최대).
+        for c in candidates:
+            agg = self.vision.setdefault(c.class_id, [0.0, 0.0])
+            agg[0] += c.vote_count
+            agg[1] = max(agg[1], c.confidence)
 
     def majority_identity(self) -> str | None:
         if not self.identity_votes:
             return None
         return max(self.identity_votes.items(), key=lambda kv: kv[1])[0]
+
+    def ranked_vision(self) -> list[tuple[int, float, float]]:
+        """(class_id, votes 합, conf 최대) 득표순 정렬."""
+        return sorted(
+            ((cid, v[0], v[1]) for cid, v in self.vision.items() if cid > 0),
+            key=lambda t: (-t[1], -t[2]),
+        )
 
     def incremental_counts(self) -> dict[str, int]:
         return {pid: c for pid, c in self.incremental.items() if c > 0}
@@ -212,7 +226,7 @@ class CloseSettler:
                     key = (e.zone, c.channel)
                     if key not in ledgers:
                         ledgers[key] = _CellLedger(e.zone, c.channel)
-                    ledgers[key].add(c)
+                    ledgers[key].add(c, e.vision_candidates)
             elif e.delta_weight < 0:
                 for pc in e.judgment.products:
                     legacy[e.zone][pc.product.product_id] = (
@@ -253,7 +267,22 @@ class CloseSettler:
 
         if net < 0:
             if p is None:
-                # 미지 셀 제거: 무게 단독 유일 매칭 (냉장만 — 냉동 억제 원리)
+                # 미지 셀 제거 ①: 비전 순위 ∩ 게이트 (이슈 #9 cold start 과금 경로)
+                # — 세션의 비전 득표순으로 net을 설명하는 첫 상품을 채택한다
+                # (v1 freezer_vision_first의 close 재해석 대응). 완전 동률은 보류.
+                picked, tie = self._vision_rank_fit(ledger, products, -net, gate)
+                if tie:
+                    notes.append(f"cell_net_vision_tie:{tag}:{net:+.1f}g")
+                elif picked is not None:
+                    q, n, amb = picked
+                    baskets[zone][q.product_id] = baskets[zone].get(q.product_id, 0) + n
+                    if amb:
+                        notes.append(f"count_ambiguous_floor:{tag}:{q.product_id}={n}")
+                    notes.append(f"cell_net_vision_rank:{tag}:{q.product_id}={n}")
+                    # cold start 채택은 신념에 저가중으로만 반영 (이슈 #9)
+                    self.beliefs.observe(zone, ch, q.product_id, strong=True, cold=True)
+                    return
+                # 미지 셀 제거 ②: 무게 단독 유일 매칭 (냉장만 — 냉동 억제 원리)
                 if prof.weight_is_discriminative:
                     fits = [
                         (q, ns)
@@ -294,6 +323,40 @@ class CloseSettler:
             notes.append(f"surplus_return:{tag}")
             return
         unmatched_returns.append((zone, ch, net))
+
+    @staticmethod
+    def _vision_rank_fit(
+        ledger: _CellLedger,
+        products: Mapping[str, ActiveProduct],
+        target: float,
+        gate: float,
+    ) -> tuple[tuple[ActiveProduct, int, bool] | None, bool]:
+        """세션 비전 득표순으로 target(=−net)을 설명하는 첫 상품.
+
+        반환: (채택 (상품, n, 개수모호) | None, 완전 동률 여부). 동률 = 1·2위
+        게이트 통과 상품의 (득표 합, conf 최대)가 동일 — 순위 근거가 없어 보류.
+        """
+        by_class: dict[int, list[ActiveProduct]] = {}
+        for q in products.values():
+            if q.class_id > 0:
+                by_class.setdefault(q.class_id, []).append(q)
+        fitting: list[tuple[float, float, ActiveProduct, int, bool]] = []
+        seen: set[str] = set()
+        for class_id, votes, conf in ledger.ranked_vision():
+            for q in by_class.get(class_id, ()):
+                if q.product_id in seen:
+                    continue
+                ns = _count_candidates(target, q.unit_weight, gate)
+                if ns and min(ns) <= q.stock_qty:
+                    fitting.append((votes, conf, q, min(ns), len(ns) > 1))
+                    seen.add(q.product_id)
+                    break
+        if not fitting:
+            return None, False
+        if len(fitting) > 1 and (fitting[0][0], fitting[0][1]) == (fitting[1][0], fitting[1][1]):
+            return None, True
+        votes, conf, q, n, amb = fitting[0]
+        return (q, n, amb), False
 
     # ---- ② 오배치 반품 ----
     def _cross_cell_returns(

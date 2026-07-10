@@ -45,6 +45,7 @@ class CellBeliefStore:
         demote_score: float = 2.0,
         strong_weight: float = 1.0,
         weak_weight: float = 0.25,
+        cold_weight: float = 0.5,
     ):
         self._path = Path(path) if path else None
         self._promote_score = promote_score
@@ -52,6 +53,7 @@ class CellBeliefStore:
         self._demote_score = demote_score
         self._strong = strong_weight
         self._weak = weak_weight
+        self._cold = cold_weight
         self._lock = threading.Lock()
         self._scores: dict[str, dict[str, float]] = {}
         self._confirmed: dict[str, str] = {}
@@ -73,16 +75,21 @@ class CellBeliefStore:
             return out
 
     # ---- 증거 ----
-    def observe(self, zone: int, channel: int, product_id: str, *, strong: bool) -> None:
+    def observe(
+        self, zone: int, channel: int, product_id: str, *, strong: bool, cold: bool = False
+    ) -> None:
         """확정 트리거의 (셀 → 상품) 관측 1건.
 
         확신 상태에서 다른 상품의 관측이 들어오면 모순 증거로 누적되고,
         demote_score를 넘으면 강등된다 (약한 증거만으로는 강등 불가 —
         오배치 반품이 신념을 오염시키지 않게 한다).
+
+        cold=True는 cold start 순위 채택(이슈 #9) — 근거가 비전 순위뿐이므로
+        저가중(cold_weight)으로 쌓아 잘못된 리더가 신념으로 굳는 속도를 늦춘다.
         """
         if not product_id:
             return
-        weight = self._strong if strong else self._weak
+        weight = self._cold if cold else (self._strong if strong else self._weak)
         key = _key(zone, channel)
         with self._lock:
             scores = self._scores.setdefault(key, {})
