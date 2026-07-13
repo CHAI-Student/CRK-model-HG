@@ -42,6 +42,8 @@ class TriggerRequest:
     # 진단 강화 (issue #6): 카메라별 원본 AVI 경로 — 오판정 시 즉시 재생 확인용.
     # model_service.handle_trigger가 payload["video_paths"]를 그대로 실어온다.
     video_paths: Mapping[str, str] = field(default_factory=dict)
+    # 0711 교차존 오염: 에피소드 내 change 벽시계 앵커 (카메라 optional 필드).
+    change_timestamps: Sequence[float] = ()
 
 
 @dataclass
@@ -114,6 +116,7 @@ class TriggerPipeline:
                 req.seq,
                 status="error",
                 video_paths=tuple(req.video_paths.items()),
+                change_timestamps=tuple(req.change_timestamps),
             )
             return TriggerOutcome(event, TriggerTrace(reason_codes=["processing_error"]))
 
@@ -247,5 +250,6 @@ class TriggerPipeline:
             req.seq,
             vision_candidates=tuple(candidates),
             video_paths=tuple(req.video_paths.items()),
+            change_timestamps=tuple(req.change_timestamps),
         )
         return TriggerOutcome(event, trace)

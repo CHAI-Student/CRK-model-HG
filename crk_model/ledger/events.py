@@ -23,6 +23,11 @@ class TriggerEvent:
     # 원본 YAML의 video_paths 대응 — 오판정 시 해당 AVI를 즉시 찾는 용도.
     # frozen dataclass라 dict 대신 hashable한 (camera, path) 튜플로 보관한다.
     video_paths: tuple[tuple[str, str], ...] = ()
+    # 0711 교차존 오염 (docs/0711_idea.md): 카메라가 보내는 에피소드 내
+    # 서브이벤트(change) 벽시계 앵커 — 연장 병합된 에피소드의 t0/t2를 CLOSE
+    # 2차 패스가 재구성하는 근거. IO-BOARD 단일 클럭(F7)이라 존 간 비교 가능.
+    # 구버전 카메라는 빈 튜플 — segments/ts 폴백 (cross_zone.sub_event_anchors).
+    change_timestamps: tuple[float, ...] = ()
 
 
 @dataclass

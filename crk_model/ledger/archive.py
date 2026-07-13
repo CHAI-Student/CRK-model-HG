@@ -100,6 +100,8 @@ def _event_to_dict(
             for c in event.vision_candidates
         ],
         "video_paths": dict(event.video_paths),
+        # 0711 교차존 오염 (Phase 1 계측): 에피소드 내 서브이벤트 앵커
+        "change_timestamps": list(event.change_timestamps),
         "trace": _trace_to_dict(trace),
         "processing_time_ms": processing_time_ms,
     }

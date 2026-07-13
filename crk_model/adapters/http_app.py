@@ -245,6 +245,11 @@ def create_app(
                 "loadcells": loadcells,
                 "ts": ts,
                 "seq": payload.get("seq"),
+                # 0711 교차존 오염: 에피소드 내 change 벽시계 앵커 (카메라
+                # optional 필드 — 구버전 카메라는 미전송, 빈 튜플로 폴백).
+                "change_timestamps": [
+                    _parse_ts(t) for t in payload.get("change_timestamps") or ()
+                ],
             }
         )
         resp = _wire_trigger_response(resp, service)

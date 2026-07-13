@@ -160,6 +160,7 @@ class ModelService:
             ts=payload.get("ts", 0.0),
             seq=payload.get("seq"),
             video_paths=payload.get("video_paths") or {},
+            change_timestamps=tuple(payload.get("change_timestamps") or ()),
         )
         with self._lock:
             # session_id 읽기 + note_seq(배리어 갱신) + submit(enqueue)을 하나의
