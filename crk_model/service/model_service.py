@@ -28,9 +28,11 @@ from crk_model.gateway.state_machine import (
 )
 from crk_model.ingest.idempotency import IdempotencyRegistry
 from crk_model.ledger.archive import SessionArchive
+from crk_model.ledger.cross_zone import CrossZonePenaltyConfig
 from crk_model.ledger.events import EventLog
 from crk_model.ledger.journal import EventJournal
 from crk_model.ledger.settler import CloseSettler
+from crk_model.ledger.shadow import ShadowSettlerRunner
 from crk_model.perception.detector import Detector
 from crk_model.perception.filters import DetectionFilterChain
 from crk_model.service.pipeline import TriggerPipeline, TriggerRequest
@@ -86,12 +88,49 @@ class ModelService:
         )
         self.snapshots = ActiveProductStore()
         self.event_log = EventLog()
+        # 교차존 비전 오염 페널티 (docs/0711_idea.md) — 재판정(④~⑥)에 필요한
+        # allowlist는 세션 스냅샷 provider로 주입한다 (CLOSE 시점 = OPEN이 갱신한
+        # 해당 세션의 상품 목록).
+        cross_zone = CrossZonePenaltyConfig(
+            enabled=self.settings.cross_zone_penalty_enabled,
+            replay_s=self.settings.cross_zone_replay_s,
+            trigger_s=self.settings.cross_zone_trigger_s,
+            epsilon_s=self.settings.cross_zone_epsilon_s,
+            alpha=self.settings.cross_zone_alpha,
+            source_conf_min=self.settings.cross_zone_source_conf_min,
+        )
+        products_provider = lambda: self.snapshots.snapshot().products  # noqa: E731
         # 판정(pipeline)·정산(settler)·잠정 집계(gateway interim)의 tolerance
         # 단일 소스 원칙: 존 미지정 시 폴백 프로파일을 세 경로 모두 같은 값으로
         # 주입한다 (cabinet_type=freezer인데 정산만 냉장 ±3g로 계산되는 불일치 방지).
         self.settler = CloseSettler(
-            self.settings.error_policy, default_profile=self._default_profile
+            self.settings.error_policy,
+            default_profile=self._default_profile,
+            cross_zone=cross_zone,
+            active_products_provider=products_provider,
         )
+        # Phase 2 (L6 ②): 페널티 OFF primary + 페널티 ON shadow 병행 — diff만
+        # 기록해 개선 방향을 검증한 뒤 Phase 3에서 PENALTY_ENABLED로 승격한다.
+        # 페널티가 이미 primary에 켜져 있으면 shadow는 무의미하므로 배선 생략.
+        gateway_settler = self.settler
+        if self.settings.cross_zone_shadow and not cross_zone.enabled:
+            shadow = CloseSettler(
+                self.settings.error_policy,
+                default_profile=self._default_profile,
+                cross_zone=CrossZonePenaltyConfig(
+                    enabled=True,
+                    replay_s=cross_zone.replay_s,
+                    trigger_s=cross_zone.trigger_s,
+                    epsilon_s=cross_zone.epsilon_s,
+                    alpha=cross_zone.alpha,
+                    source_conf_min=cross_zone.source_conf_min,
+                ),
+                active_products_provider=products_provider,
+            )
+            gateway_settler = ShadowSettlerRunner(self.settler, shadow)
+            logger.info("[CONFIG] cross-zone penalty shadow settler enabled")
+        # prune 경로: runner면 양쪽 캐시를 함께 정리한다 (_prune_ledger 참고)
+        self._gateway_settler = gateway_settler
         # journal과 동일한 하위호환 원칙: archive를 명시적으로 주지 않으면
         # 비활성(SessionArchive("")) — 기본 생성자로 settings.session_archive_dir
         # 를 자동 활성화하면 테스트/임시 ModelService가 실제 저장소(data/sessions)
@@ -100,7 +139,7 @@ class ModelService:
         self.archive = archive if archive is not None else SessionArchive("")
         self._clock = clock
         self.gateway = MultiZoneGateway(
-            self.settler,
+            gateway_settler,
             self.event_log,
             self._profiles,
             clock=clock,
@@ -312,7 +351,7 @@ class ModelService:
         self._recent_session_ids.append(new_session_id)
         keep = set(self._recent_session_ids)
         self.event_log.prune(keep)
-        self.settler.prune(keep)
+        self._gateway_settler.prune(keep)  # shadow 배선 시 양쪽 캐시 함께 정리
 
     def process_pending(self) -> int:
         """워커 drain — 장치에서는 전용 스레드/태스크가 주기 호출.

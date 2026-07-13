@@ -20,6 +20,13 @@ def _env_int(key: str, default: int) -> int:
     return int(raw) if raw else default
 
 
+def _env_bool(key: str, default: bool) -> bool:
+    raw = os.environ.get(key)
+    if not raw:
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
 def _env_zones(key: str) -> tuple[int, ...]:
     raw = os.environ.get(key, "")
     return tuple(int(z) for z in raw.split(",") if z.strip())
@@ -95,6 +102,21 @@ class Settings:
     # Side ROI: 존 바깥(오른쪽) 검출 제거 경계 — 실기에서 side 검출 194/195가
     # 필터 제거된 사례가 있어 카메라 장착에 맞게 조정 가능해야 한다.
     side_roi_max_center_x: float = 240.0
+    # ---- 교차존 비전 오염 페널티 (docs/0711_idea.md) ----
+    # 단계별 배포: 기본 OFF (Phase 1 — change_timestamps 계측만).
+    # Phase 2는 SHADOW=1로 diff만 수집, Phase 3에서 PENALTY_ENABLED=1로 승격.
+    cross_zone_penalty_enabled: bool = False
+    # shadow 병행 (L6 ②): primary는 페널티 OFF 유지, 페널티 ON 정산기를
+    # shadow로 돌려 diff만 기록. PENALTY_ENABLED=1이면 무의미하므로 무시된다.
+    cross_zone_shadow: bool = False
+    # 카메라 계약 상수 — CRK-CAMERA replay_duration/trigger duration과 단일 소스
+    cross_zone_replay_s: float = 4.0
+    cross_zone_trigger_s: float = 3.0
+    # IO-BOARD 감지 지연 마진 (ε)
+    cross_zone_epsilon_s: float = 0.3
+    # soft 페널티 계수 (α) / 페널티 소스 최소 신뢰도 (θ) — Phase 1 계측으로 보정
+    cross_zone_alpha: float = 0.5
+    cross_zone_source_conf_min: float = 0.35
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -125,4 +147,15 @@ class Settings:
             min_vote_count=_env_int("MODEL__VISION__MIN_VOTE_COUNT", 3),
             vote_conf_floor=_env_float("MODEL__VISION__CONF_FLOOR", 0.0),
             side_roi_max_center_x=_env_float("MODEL__VISION__SIDE_ROI_MAX_CENTER_X", 240.0),
+            cross_zone_penalty_enabled=_env_bool(
+                "MODEL__CROSS_ZONE__PENALTY_ENABLED", False
+            ),
+            cross_zone_shadow=_env_bool("MODEL__CROSS_ZONE__SHADOW", False),
+            cross_zone_replay_s=_env_float("MODEL__CROSS_ZONE__REPLAY_S", 4.0),
+            cross_zone_trigger_s=_env_float("MODEL__CROSS_ZONE__TRIGGER_S", 3.0),
+            cross_zone_epsilon_s=_env_float("MODEL__CROSS_ZONE__EPSILON_S", 0.3),
+            cross_zone_alpha=_env_float("MODEL__CROSS_ZONE__ALPHA", 0.5),
+            cross_zone_source_conf_min=_env_float(
+                "MODEL__CROSS_ZONE__SOURCE_CONF_MIN", 0.35
+            ),
         )

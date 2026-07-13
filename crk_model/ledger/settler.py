@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import re
 from collections import defaultdict
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 
 from crk_model.core.policy import ErrorSessionPolicy
 from crk_model.core.profiles import REFRIGERATOR, SensorProfile
@@ -25,6 +25,10 @@ from crk_model.core.types import (
     JudgmentStatus,
     ProductCount,
     ZoneBasket,
+)
+from crk_model.ledger.cross_zone import (
+    CrossZonePenaltyConfig,
+    apply_cross_zone_penalty,
 )
 from crk_model.ledger.events import EventLog, TriggerEvent
 
@@ -143,12 +147,20 @@ class CloseSettler:
         self,
         error_policy: ErrorSessionPolicy = ErrorSessionPolicy.BLOCK_PAYMENT,
         default_profile: SensorProfile = REFRIGERATOR,
+        *,
+        cross_zone: CrossZonePenaltyConfig | None = None,
+        # 교차존 재판정(④~⑥)은 allowlist가 필요하다 — ModelService가 세션
+        # 스냅샷 provider(ActiveProductStore)를 주입한다. None이면 페널티
+        # 패스 비활성 (기존 테스트/직접 생성 하위호환).
+        active_products_provider: Callable[[], Sequence[ActiveProduct]] | None = None,
     ):
         self.error_policy = error_policy
         # zone이 profiles dict에 없을 때의 폴백 프로파일 (cabinet_type 이식) —
         # ModelService가 기기 단위 기본 프로파일을 주입한다. 기본값은 기존
         # 동작(REFRIGERATOR)과 동일한 하위호환.
         self.default_profile = default_profile
+        self.cross_zone = cross_zone or CrossZonePenaltyConfig()
+        self._products_provider = active_products_provider
         self._finalized: dict[str, FinalizedSettlement] = {}
 
     def settle(
@@ -163,6 +175,18 @@ class CloseSettler:
 
         notes: list[str] = []
         ok = _ok_events(events)
+        # 0711 교차존 비전 오염 페널티 (CLOSE 2차 패스) — 워터마크(F8) 덕분에
+        # 이 시점에는 늦게 도착한 연장 병합 이벤트까지 전부 EventLog에 있다.
+        # 잠정 판정은 그대로 두고 확정 입력(ok 이벤트의 judgment)만 보정한다.
+        if self.cross_zone.enabled and self._products_provider is not None:
+            ok = apply_cross_zone_penalty(
+                ok,
+                profiles,
+                tuple(self._products_provider()),
+                self.cross_zone,
+                notes,
+                self.default_profile,
+            )
         error_zones = sorted(
             {
                 e.zone

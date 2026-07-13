@@ -1,12 +1,15 @@
 """구/신 정산기 shadow 병행 (L6 승인 조건 ②) — diff 로깅 후 전환."""
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping, Sequence
 
 from crk_model.core.profiles import SensorProfile
 from crk_model.core.types import FinalizedSettlement
 from crk_model.ledger.events import EventLog, TriggerEvent
 from crk_model.ledger.settler import CloseSettler
+
+ops_logger = logging.getLogger("crk_model.ops")
 
 
 class ShadowSettlerRunner:
@@ -29,15 +32,25 @@ class ShadowSettlerRunner:
         self._diff(session_id, result, shadow)
         return result
 
+    def prune(self, keep_session_ids: set[str]) -> None:
+        """무한 성장 방지 — 양쪽 정산기의 멱등 캐시를 함께 정리한다
+        (게이트웨이 settler 자리에 CloseSettler 대신 꽂혀도 계약 동형)."""
+        self._primary.prune(keep_session_ids)
+        self._shadow.prune(keep_session_ids)
+
     def _diff(self, sid: str, a: FinalizedSettlement, b: FinalizedSettlement) -> None:
+        found: list[str] = []
         if a.total_price != b.total_price:
-            self.diffs.append(
+            found.append(
                 f"{sid}:total_price primary={a.total_price} shadow={b.total_price}"
             )
         counts_a = {(z.zone, pc.product.product_id): pc.count for z in a.zones for pc in z.products}
         counts_b = {(z.zone, pc.product.product_id): pc.count for z in b.zones for pc in z.products}
         for key in sorted(set(counts_a) | set(counts_b)):
             if counts_a.get(key, 0) != counts_b.get(key, 0):
-                self.diffs.append(
+                found.append(
                     f"{sid}:count{key} primary={counts_a.get(key, 0)} shadow={counts_b.get(key, 0)}"
                 )
+        self.diffs.extend(found)
+        for d in found:  # Phase 2 계측: 실기 로그에서 diff를 바로 수집
+            ops_logger.info("[OPS][SHADOW_DIFF] %s", d)
