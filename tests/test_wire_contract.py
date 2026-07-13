@@ -66,6 +66,23 @@ class TestTriggerWireContract:
         # 하위호환 필드 유지
         assert "trigger_id" in body
 
+    def test_change_timestamps_reach_event(self, client_and_service):
+        # 0711 교차존 오염: 카메라 optional 필드가 워커 처리 후 이벤트에 보존된다
+        client, svc = client_and_service
+        r = client.post(
+            "/trigger",
+            json={
+                "zone": 1,
+                "videos": {"top": "/data/t.avi", "side": "/data/s.avi"},
+                "loadcells": _wire_loadcells(samples(500, 400)),
+                "change_timestamps": [100.0, 102.5],
+            },
+        )
+        assert r.status_code == 200
+        svc.process_pending()
+        event = svc.worker.outcomes[-1].event
+        assert event.change_timestamps == (100.0, 102.5)
+
     def test_duplicate_response_success_true(self, client_and_service):
         client, _svc = client_and_service
         payload = {
