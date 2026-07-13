@@ -41,6 +41,29 @@ class TestVoting:
         assert c.vote_count == 10  # 노이즈 투표는 카운트에도 미포함
         assert v.entry_dropped == {"top": 10, "side": 0}  # 진단 카운터
 
+    def test_min_vote_share_drops_relative_noise(self):
+        # 이슈 #10: 절대 count 게이트(3)는 긴 영상에서 8표짜리 노이즈도
+        # 통과시킨다 — 1위 득표 대비 상대 하한이 제거한다.
+        v = VotingEnsemble(
+            min_vote_count=3, min_vote_ratio=0.05, min_vote_share=0.1, conf_floor=0.0
+        )
+        for i in range(100):
+            dets = [Detection(13, 0.7)]
+            if i < 30:
+                dets.append(Detection(3, 0.9))
+            if i < 8:
+                dets.append(Detection(44, 0.67))
+            v.add_frame("top", dets)
+        assert {c.class_id for c in v.combine()} == {13, 3}  # 44(1위의 8%) 제거
+        assert v.debug_summary()[44]["rejected_by"] == "share"
+
+    def test_min_vote_share_zero_is_backward_compatible(self):
+        v = VotingEnsemble(min_vote_count=3, conf_floor=0.0)  # 기본 share=0.0
+        for i in range(100):
+            dets = [Detection(13, 0.7)] + ([Detection(44, 0.67)] if i < 8 else [])
+            v.add_frame("top", dets)
+        assert {c.class_id for c in v.combine()} == {13, 44}
+
     def test_entry_cut_reproduces_original_semantics_end_to_end(self):
         # 원본 재현 프리셋(진입 컷 0.5 + conf_floor 0.0): 실기 사고 패턴
         # (다수 중간 conf 투표)이 후보로 생존하는지 — 구버전(진입 0 + floor 0.4)

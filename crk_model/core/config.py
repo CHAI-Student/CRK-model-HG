@@ -95,6 +95,10 @@ class Settings:
     # 후보 채택 임계 — 원본 min_vote_ratio/min_vote_count 대응.
     min_vote_ratio: float = 0.05
     min_vote_count: int = 3
+    # 1위 후보 득표 대비 상대 하한 (이슈 #10): 절대 count(3)는 400프레임+
+    # 영상에서 노이즈도 통과시켜 저득표 후보가 "무게 filler"로 채택되는
+    # 사고(메로나 79g×3)의 원인이 됐다. votes < top×share 후보 제거.
+    min_vote_share: float = 0.1
     # 결합 후 weighted_conf 하한 — 원본에는 없는 파라미터 (원본 동형 = 0.0).
     # 진입 컷이 노이즈를 이미 거르므로 기본 0.0. 진입 컷을 0으로 낮춰 저신뢰
     # 투표를 보존하고 싶을 때만 안전판으로 올려 쓴다.
@@ -145,6 +149,7 @@ class Settings:
             ),
             min_vote_ratio=_env_float("MODEL__VISION__MIN_VOTE_RATIO", 0.05),
             min_vote_count=_env_int("MODEL__VISION__MIN_VOTE_COUNT", 3),
+            min_vote_share=_env_float("MODEL__VISION__MIN_VOTE_SHARE", 0.1),
             vote_conf_floor=_env_float("MODEL__VISION__CONF_FLOOR", 0.0),
             side_roi_max_center_x=_env_float("MODEL__VISION__SIDE_ROI_MAX_CENTER_X", 240.0),
             cross_zone_penalty_enabled=_env_bool(

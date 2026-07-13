@@ -57,6 +57,12 @@ class VotingEnsemble:
         # 카메라별 투표 진입 임계 (원본 _threshold_for_camera 대응,
         # MODEL__VISION__TOP/SIDE_CONFIDENCE_THRESHOLD). 생성자 기본값 0.0은
         # 라이브러리 하위호환용 — 운영값은 Settings가 주입한다.
+        min_vote_share: float = 0.0,
+        # 1위 후보 득표 대비 상대 하한 (이슈 #10): 절대 min_vote_count(3)는
+        # 400프레임+ 영상에서 노이즈도 통과시킨다 — 8표(1위의 4%)짜리 후보가
+        # 판정에 진입해 "무게 filler"(예: 메로나 79g×n)로 채택되는 사고의
+        # 원인. votes < top_votes×share 후보를 제거한다. 0.0 = 비활성
+        # (하위호환) — 운영값은 Settings(MODEL__VISION__MIN_VOTE_SHARE) 주입.
     ):
         self._conf_floor = conf_floor
         self._min_ratio = min_vote_ratio
@@ -66,6 +72,7 @@ class VotingEnsemble:
         self._common_class_bonus = common_class_bonus
         self._top_only_weight = top_only_weight
         self._side_only_weight = side_only_weight
+        self._min_share = min_vote_share
         self._entry_conf = {"top": entry_conf_top, "side": entry_conf_side}
         self._votes: dict[str, dict[int, list[float]]] = {
             "top": defaultdict(list),
@@ -104,9 +111,22 @@ class VotingEnsemble:
             weighted = s * self._side_only_weight
         return min(weighted, 1.0)
 
+    def _top_votes(self) -> int:
+        """상대 하한(min_vote_share)의 기준값 — 전 class 중 최다 득표.
+        1위 자신은 share=1.0이라 절대 잘리지 않는다."""
+        classes = set(self._votes["top"]) | set(self._votes["side"])
+        return max(
+            (
+                len(self._votes["top"].get(cid, [])) + len(self._votes["side"].get(cid, []))
+                for cid in classes
+            ),
+            default=0,
+        )
+
     def combine(self) -> tuple[VisionCandidate, ...]:
         classes = set(self._votes["top"]) | set(self._votes["side"])
         denominator = max(1, self.gate_passed_frames)
+        vote_floor = self._top_votes() * self._min_share
         out: list[VisionCandidate] = []
         for cid in classes:
             top = self._votes["top"].get(cid, [])
@@ -116,6 +136,8 @@ class VotingEnsemble:
             ratio = votes / denominator
             if not (ratio >= self._min_ratio or votes >= self._min_count):
                 continue
+            if votes < vote_floor:
+                continue  # 이슈 #10: 1위 대비 미미한 득표 = 노이즈/오염 잔재
             if weighted < self._conf_floor:
                 continue
             out.append(VisionCandidate(cid, weighted, votes, ratio))
@@ -129,6 +151,7 @@ class VotingEnsemble:
         없다(공유 mutable state 없음, 호출하지 않으면 오버헤드 0)."""
         classes = set(self._votes["top"]) | set(self._votes["side"])
         denominator = max(1, self.gate_passed_frames)
+        vote_floor = self._top_votes() * self._min_share
         summary: dict[int, dict] = {}
         for cid in classes:
             top = self._votes["top"].get(cid, [])
@@ -139,6 +162,8 @@ class VotingEnsemble:
             passes_ratio_gate = ratio >= self._min_ratio or votes >= self._min_count
             if not passes_ratio_gate:
                 rejected_by = "ratio"
+            elif votes < vote_floor:
+                rejected_by = "share"
             elif weighted < self._conf_floor:
                 rejected_by = "conf_floor"
             else:

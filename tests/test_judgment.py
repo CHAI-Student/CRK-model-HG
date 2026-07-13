@@ -403,3 +403,43 @@ class TestVisionFirstIdentityPartial:
         )
         assert result.products[0].count == 1
         assert result.status is JudgmentStatus.COMPLETE
+
+
+class TestIssue10MelonaFiller:
+    """이슈 #10 세션 3(ses-1-1783926841) 트리거 1 재현 — 무게 filler 채택.
+
+    press로 부풀려진 delta(−241.77, 실제 비비고 224g)에 비비고가 count_gate
+    (±15)를 2.8g 차이로 놓치고, 8표(1위의 4%)짜리 메로나가 79×3=237로
+    채택되던 사고. 방어는 voting의 min_vote_share가 담당하고(combine에서
+    메로나 제거), 여기서는 제거 전/후 후보 셋에 대한 판정 경로를 고정한다.
+    """
+
+    BIBIGO = ActiveProduct("P175", "비비고만두", class_id=3, unit_weight=224.0,
+                           unit_price=3700, stock_qty=35)
+    COOZ = ActiveProduct("P173", "쿠즈락만두", class_id=13, unit_weight=189.0,
+                         unit_price=2100, stock_qty=40)
+    MELONA = ActiveProduct("P17M", "메로나", class_id=44, unit_weight=79.0,
+                           unit_price=800, stock_qty=38)
+
+    def test_low_share_filler_adopted_without_floor(self):
+        # 사고 경로 문서화: share 하한 없이 메로나가 판정에 들어오면
+        # freezer_vision_first가 79×3=237(오차 4.77)로 COMPLETE 채택
+        result = JudgmentRouter().judge(ctx(
+            -241.77, [self.BIBIGO, self.COOZ, self.MELONA],
+            [cand(13, 0.72, 188, 0.61), cand(3, 0.93, 70, 0.23),
+             cand(44, 0.67, 8, 0.026)],
+            profile=FREEZER,
+        ))
+        assert [(pc.product.class_id, pc.count) for pc in result.products] == [(44, 3)]
+
+    def test_share_floor_recovers_true_product(self):
+        # min_vote_share=0.1이 combine에서 메로나(8표 < 188×0.1)를 제거한
+        # 후보 셋이면: freezer 단일/strict 전부 게이트 실패 → relaxed(tol×2)가
+        # 비비고를 잡고 I6이 PARTIAL 강등 — 품목·수량이 정답으로 복원된다
+        result = JudgmentRouter().judge(ctx(
+            -241.77, [self.BIBIGO, self.COOZ, self.MELONA],
+            [cand(13, 0.72, 188, 0.61), cand(3, 0.93, 70, 0.23)],
+            profile=FREEZER,
+        ))
+        assert result.status is JudgmentStatus.PARTIAL
+        assert [(pc.product.class_id, pc.count) for pc in result.products] == [(3, 1)]
