@@ -164,6 +164,7 @@ class ModelService:
                 "min_vote_share": self.settings.min_vote_share,
                 "conf_floor": self.settings.vote_conf_floor,
             },
+            segment_retry_gap_grams=self.settings.segment_retry_gap_grams,
         )
         # 동시성: FastAPI sync 엔드포인트(threadpool)와 워커 스레드가 게이트웨이·
         # 이벤트로그·스냅샷을 동시에 건드릴 수 있어 단일 RLock으로 코스 그레인

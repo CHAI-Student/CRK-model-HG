@@ -6,7 +6,7 @@ import pytest
 
 from crk_model.core.config import Settings
 from crk_model.core.profiles import REFRIGERATOR
-from crk_model.core.types import JudgmentStatus
+from crk_model.core.types import ActiveProduct, JudgmentStatus
 from crk_model.ingest.loadcell import LoadcellAnalyzer, LoadcellSample
 from crk_model.ledger.journal import EventJournal
 from crk_model.ledger.settler import CloseSettler
@@ -322,3 +322,81 @@ class TestFilterChain:
         f.apply("side", [Detection(0, 0.9, is_hand=True, bbox=(0, 0, 20, 20))])
         no_bbox = Detection(1, 0.8)  # 공간 정보 없음
         assert no_bbox in f.apply("side", [no_bbox])
+
+
+class TestSegmentTargetRetry:
+    """이슈 #10 세션 3 트리거 1 재현 — 오염 delta 이중 타깃 재시도.
+
+    접촉 하중이 delta(−241.77)를 부풀려 진짜 상품(비비고 224g)이 count_gate
+    (±15)를 놓치는 케이스: 세그먼트 합(−233.77)을 타깃으로 재판정하면
+    오차 9.8로 통과한다. 깨끗한 트리거(delta == seg합)는 발동하지 않는다.
+    """
+
+    BIBIGO = ActiveProduct(
+        "P175", "비비고만두", class_id=3, unit_weight=224.0, unit_price=3700, stock_qty=35
+    )
+    COOZ = ActiveProduct(
+        "P173", "쿠즈락만두", class_id=13, unit_weight=189.0, unit_price=2100, stock_qty=40
+    )
+
+    @staticmethod
+    def contaminated_samples():
+        """plateau 0 → −8(접촉, sub-threshold) → −241.77: delta=−241.77,
+        세그먼트는 −233.77 하나만 방출 (freezer segment_step 20g 미만인
+        −8 스텝은 delta에만 반영 — 실기 오염 서명과 동형)."""
+        out, ts = [], 0.0
+        for v in [0.0] * 10 + [-8.0] * 8 + [-241.77] * 12:
+            out.append(LoadcellSample(ts, (v / 2, v / 2)))
+            ts += 0.1
+        return out
+
+    def make_pipe(self, products):
+        from crk_model.core.profiles import FREEZER
+
+        detector = FakeDetector(
+            detections=[Detection(3, 0.9), Detection(13, 0.7)]
+        )
+        store = ActiveProductStore()
+        store.update(products)
+        return TriggerPipeline(detector, {1: FREEZER}, store)
+
+    def test_retry_recovers_true_product(self):
+        pipe = self.make_pipe([self.BIBIGO, self.COOZ])
+        outcome = pipe.process(
+            "s1",
+            TriggerRequest(
+                1, {"top": moving_frames(8)}, self.contaminated_samples(), 1.0
+            ),
+        )
+        j = outcome.event.judgment
+        assert j.status is JudgmentStatus.COMPLETE
+        assert [(pc.product.class_id, pc.count) for pc in j.products] == [(3, 1)]
+        assert j.reason.endswith("+segment_target_retry")
+        assert "segment_target_retry" in outcome.trace.reason_codes
+        # 이벤트의 delta_weight는 원본(끝-끝) 유지 — 정산 net-delta 계약 불변
+        assert outcome.event.delta_weight == pytest.approx(-241.77)
+
+    def test_clean_trigger_does_not_retry(self):
+        pipe = self.make_pipe([self.BIBIGO, self.COOZ])
+        outcome = pipe.process(
+            "s1",
+            TriggerRequest(1, {"top": moving_frames(8)}, samples(500, 276), 1.0),
+        )  # delta −224 = 단일 스텝, seg합과 일치
+        j = outcome.event.judgment
+        assert j.status is JudgmentStatus.COMPLETE
+        assert "segment_target_retry" not in outcome.trace.reason_codes
+        assert "+segment_target_retry" not in j.reason
+
+    def test_retry_failure_keeps_original_judgment(self):
+        # 재시도 타깃(−233.77)도 설명 불가(쿠즈락 189뿐) → 원 판정 유지 (악화 금지)
+        pipe = self.make_pipe([self.COOZ])
+        outcome = pipe.process(
+            "s1",
+            TriggerRequest(
+                1, {"top": moving_frames(8)}, self.contaminated_samples(), 1.0
+            ),
+        )
+        j = outcome.event.judgment
+        assert "segment_target_retry" in outcome.trace.reason_codes  # 시도는 기록
+        assert "+segment_target_retry" not in j.reason  # 채택은 안 됨
+        assert j.status is not JudgmentStatus.COMPLETE

@@ -14,7 +14,7 @@ yolo_calls / early_terminated / reason_codes.
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from crk_model.core.profiles import REFRIGERATOR, SensorProfile
 from crk_model.core.types import JudgmentResult, JudgmentStatus, VisionCandidate
@@ -87,6 +87,11 @@ class TriggerPipeline:
         voting_params: Mapping | None = None,
         # VotingEnsemble 생성 인자 (MODEL__VISION__* env → Settings 경유 주입).
         # None이면 라이브러리 기본값 — 기존 테스트/직접 생성 하위호환.
+        segment_retry_gap_grams: float = 5.0,
+        # 이슈 #10: |delta − sum(segments)|가 이 값을 넘으면 접촉 하중 오염
+        # 서명으로 보고, delta 타깃 판정 실패 시 세그먼트 합 타깃으로 1회
+        # 재판정한다 (아래 _segment_target_retry). 실측: 오염 트리거는 8~18g,
+        # 깨끗한 트리거는 0.
     ):
         self._detector = detector
         self._profiles = dict(profiles)
@@ -97,6 +102,7 @@ class TriggerPipeline:
         self._analyzer_factory = analyzer_factory or LoadcellAnalyzer
         self._default_profile = default_profile
         self._voting_params = dict(voting_params) if voting_params else {}
+        self._segment_retry_gap = segment_retry_gap_grams
 
     def process(self, session_id: str, req: TriggerRequest) -> TriggerOutcome:
         try:
@@ -166,9 +172,38 @@ class TriggerPipeline:
             vision_only=vision_only,
         )
         judgment = self._router.judge(ctx)
+        judgment = self._segment_target_retry(ctx, judgment, analysis, trace)
         return self._outcome(
             session_id, req, delta, analysis.segments, judgment, trace, candidates
         )
+
+    def _segment_target_retry(
+        self, ctx: JudgmentContext, judgment: JudgmentResult, analysis, trace: TriggerTrace
+    ) -> JudgmentResult:
+        """오염 delta 이중 타깃 재시도 (이슈 #10).
+
+        취출 시 손이 선반을 누르는 접촉 하중(press transient)이 delta 또는
+        세그먼트 한쪽을 왜곡한다 — 어느 쪽이 진실에 가까운지는 케이스마다
+        다르므로(실측: delta가 맞는 세션과 세그먼트가 맞는 세션이 공존)
+        delta 타깃을 우선하되, **실패했고 오염 서명(|delta − sum(segments)|
+        > gap)이 있을 때만** 세그먼트 합을 타깃으로 라우터를 1회 재실행한다.
+
+        비용: YOLO 재실행 없음 — 이미 집계된 vision_candidates로 순수 CPU
+        재판정(수 ms). 깨끗한 트리거(delta == seg합)는 발동 자체가 없다.
+        재시도도 COMPLETE에 못 미치면 원 판정 유지 (악화 금지, I3 태도).
+        """
+        if judgment.status is JudgmentStatus.COMPLETE or ctx.vision_only:
+            return judgment
+        if ctx.delta_weight >= 0 or not analysis.segments:
+            return judgment
+        seg_sum = sum(s.delta_grams for s in analysis.segments)
+        if seg_sum >= 0 or abs(ctx.delta_weight - seg_sum) <= self._segment_retry_gap:
+            return judgment
+        trace.reason_codes.append("segment_target_retry")  # I8: 시도 자체를 기록
+        retry = self._router.judge(replace(ctx, delta_weight=seg_sum))
+        if retry.status is not JudgmentStatus.COMPLETE or not retry.products:
+            return judgment
+        return replace(retry, reason=retry.reason + "+segment_target_retry")
 
     def _run_vision(
         self,
