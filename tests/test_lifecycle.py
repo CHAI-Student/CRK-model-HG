@@ -510,4 +510,4 @@ class TestVisionTuningWiring:
         svc.process_pending()
         summary = svc.worker.outcomes[-1].trace.vote_summary
         assert "filter_drops_by_stage" in summary
-        assert set(summary["filter_drops_by_stage"]) == {"side_roi", "hand_path"}
+        assert set(summary["filter_drops_by_stage"]) == {"side_roi", "static_track", "hand_path"}

@@ -154,7 +154,9 @@ class ModelService:
             # 비전 튜닝 (MODEL__VISION__*, issue #6 2차): 진입 컷·투표 임계는
             # 현장 카메라/조명에 따라 env로 조정한다 (.env.example 참조).
             filters=DetectionFilterChain(
-                side_roi_max_center_x=self.settings.side_roi_max_center_x
+                side_roi_max_center_x=self.settings.side_roi_max_center_x,
+                static_track_min_frames=self.settings.static_track_min_frames,
+                static_track_iou=self.settings.static_track_iou,
             ),
             voting_params={
                 "entry_conf_top": self.settings.top_confidence_threshold,

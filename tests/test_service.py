@@ -323,6 +323,54 @@ class TestFilterChain:
         no_bbox = Detection(1, 0.8)  # 공간 정보 없음
         assert no_bbox in f.apply("side", [no_bbox])
 
+    def test_static_track_suppresses_protruding_display_item(self):
+        # 이슈 #10: 전시 영역 밖 돌출 상품 — 같은 자리에 정지한 검출은
+        # min_frames 이후 투표에서 제거, 그 전까지의 표는 보존(fail-open 방향)
+        f = DetectionFilterChain(static_track_min_frames=10, static_track_iou=0.85)
+        static = Detection(27, 0.9, bbox=(100, 100, 160, 200))
+        passed = 0
+        for _ in range(30):
+            passed += static in f.apply("top", [static])
+        assert passed == 9  # 10번째 관측부터 억제 (count >= min_frames)
+        assert f.drop_stats["static_track"]["top"] == 21
+
+    def test_static_track_releases_when_item_moves(self):
+        # 손님이 바로 그 돌출 상품을 집으면(bbox 이동) 억제가 즉시 풀린다
+        f = DetectionFilterChain(static_track_min_frames=10, static_track_iou=0.85)
+        for _ in range(15):
+            f.apply("top", [Detection(27, 0.9, bbox=(100, 100, 160, 200))])
+        moved = Detection(27, 0.9, bbox=(180, 150, 240, 250))  # 집어서 이동
+        assert moved in f.apply("top", [moved])
+
+    def test_moving_item_never_suppressed(self):
+        # 손에 든/이동 중 상품은 bbox가 계속 변해 정지 트랙이 성립하지 않음
+        f = DetectionFilterChain(static_track_min_frames=10, static_track_iou=0.85)
+        for i in range(30):
+            d = Detection(13, 0.8, bbox=(100 + i * 15, 100, 160 + i * 15, 200))
+            assert d in f.apply("top", [d])
+
+    def test_static_track_disabled_with_zero_min_frames(self):
+        f = DetectionFilterChain(static_track_min_frames=0)
+        static = Detection(27, 0.9, bbox=(100, 100, 160, 200))
+        for _ in range(50):
+            assert static in f.apply("top", [static])
+
+    def test_trigger_state_reset_clears_hand_history_and_tracks(self):
+        # 결함 수정: 손 궤적·정지 트랙은 영상(트리거) 단위 상태 — 이전 영상
+        # 좌표가 다음 트리거의 필터 기준으로 새면 안 된다
+        f = DetectionFilterChain(static_track_min_frames=10, hand_margin_px=40.0)
+        hand = Detection(0, 0.9, is_hand=True, bbox=(0, 0, 20, 20))
+        static = Detection(27, 0.9, bbox=(100, 100, 160, 200))
+        for _ in range(15):
+            f.apply("top", [hand, static])
+        far = Detection(2, 0.8, bbox=(300, 300, 340, 340))
+        assert far not in f.apply("top", [far])  # 이전 영상 손 궤적에 걸러짐
+        assert static not in f.apply("top", [static])  # 정지 억제 중
+
+        f.reset_trigger_state()  # 새 트리거(다른 영상) 시작
+        assert far in f.apply("top", [far])  # 손 이력 없음 → fail-open
+        assert static in f.apply("top", [static])  # 정지 카운트 리셋
+
 
 class TestSegmentTargetRetry:
     """이슈 #10 세션 3 트리거 1 재현 — 오염 delta 이중 타깃 재시도.

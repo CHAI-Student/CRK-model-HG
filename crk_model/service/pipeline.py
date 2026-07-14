@@ -217,7 +217,9 @@ class TriggerPipeline:
         terminator = EarlyTerminator(profile, enabled=self._et_enabled)
         stopped = False
         filtered_out: dict[str, int] = {}  # 진단(work item 3): 카메라별 필터 제거 개수
-        self._filters.reset_drop_stats()  # 트리거 단위 단계별 제거 카운터 (issue #6 2차)
+        # 트리거 단위 상태 초기화: 단계별 제거 카운터(issue #6 2차) + 손 궤적·
+        # 정지 트랙(이슈 #10 — 이전 영상의 좌표가 다음 영상 필터 기준이 되던 결함)
+        self._filters.reset_trigger_state()
         for camera in CAMERAS:
             frames = req.frames.get(camera)
             if frames is None:

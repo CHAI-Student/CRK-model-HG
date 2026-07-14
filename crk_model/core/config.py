@@ -106,6 +106,11 @@ class Settings:
     # Side ROI: 존 바깥(오른쪽) 검출 제거 경계 — 실기에서 side 검출 194/195가
     # 필터 제거된 사례가 있어 카메라 장착에 맞게 조정 가능해야 한다.
     side_roi_max_center_x: float = 240.0
+    # 정지 트랙 억제 (이슈 #10 돌출 진열 상품): 같은 class가 IoU ≥ iou로
+    # min_frames(추론 프레임 기준, ≈1초) 이상 같은 자리에 머물면 투표에서
+    # 제거. min_frames=0이면 비활성.
+    static_track_min_frames: int = 30
+    static_track_iou: float = 0.85
     # 오염 delta 이중 타깃 재시도 (이슈 #10): |delta − sum(segments)|가 이
     # 값을 넘으면(접촉 하중 오염 서명) delta 타깃 판정 실패 시 세그먼트 합
     # 타깃으로 1회 재판정. 실측 오염 트리거 8~18g / 깨끗한 트리거 0.
@@ -156,6 +161,10 @@ class Settings:
             min_vote_share=_env_float("MODEL__VISION__MIN_VOTE_SHARE", 0.1),
             vote_conf_floor=_env_float("MODEL__VISION__CONF_FLOOR", 0.0),
             side_roi_max_center_x=_env_float("MODEL__VISION__SIDE_ROI_MAX_CENTER_X", 240.0),
+            static_track_min_frames=_env_int(
+                "MODEL__VISION__STATIC_TRACK_MIN_FRAMES", 30
+            ),
+            static_track_iou=_env_float("MODEL__VISION__STATIC_TRACK_IOU", 0.85),
             segment_retry_gap_grams=_env_float(
                 "MODEL__WEIGHT__SEGMENT_RETRY_GAP_GRAMS", 5.0
             ),
