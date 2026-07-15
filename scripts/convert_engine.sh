@@ -87,22 +87,30 @@ export YOLO_AUTOINSTALL=false
 
 # Export via Python API (not the yolo CLI) so we can shim checkpoint
 # unpickling first: a .pt saved on a NumPy 2.x machine (training PC)
-# pickles the RNG BitGenerator as a class object, while NumPy 1.x's
-# __bit_generator_ctor only accepts string names -> "PCG64 is not a known
-# BitGenerator module". The shim maps the class back to its name.
+# pickles RNG objects (Generator/BitGenerator/RandomState) in a format
+# NumPy 1.x cannot reconstruct — ctor args are class objects instead of
+# names, and __setstate__ receives a tuple instead of a dict ("state must
+# be a dict"). The RNG state is training metadata irrelevant to export,
+# so those pickle slots are reconstructed as inert stubs that swallow any
+# state instead of real RNG objects. Weights are untouched.
 "${PYTHON_BIN}" - "${INPUT_PATH}" "${IMGSZ}" <<'PY'
 import sys
 
 import numpy.random._pickle as _np_pickle
 
-_orig_ctor = getattr(_np_pickle, "__bit_generator_ctor")
 
-def _compat_bit_generator_ctor(bit_generator="MT19937"):
-    if not isinstance(bit_generator, str):
-        bit_generator = getattr(bit_generator, "__name__", str(bit_generator))
-    return _orig_ctor(bit_generator)
+class _RNGStub:
+    def __setstate__(self, state):
+        pass
 
-setattr(_np_pickle, "__bit_generator_ctor", _compat_bit_generator_ctor)
+
+def _stub_ctor(*args, **kwargs):
+    return _RNGStub()
+
+
+for _name in ("__bit_generator_ctor", "__generator_ctor", "__randomstate_ctor"):
+    if hasattr(_np_pickle, _name):
+        setattr(_np_pickle, _name, _stub_ctor)
 
 from ultralytics import YOLO
 
