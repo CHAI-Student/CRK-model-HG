@@ -45,6 +45,19 @@ MODEL__VISION__YOLO_MODEL_PATH=models/set9_doorfas_0323_imbal.engine model-servi
 복사하거나 절대경로로 지정한다. 기동 시 startup probe가 엔진을 1회 실행하므로
 **로드 실패·CUDA 불가면 서비스가 즉시 죽는다** (무증상 기동 금지, 이관 리뷰 #1).
 
+`.engine`이 없고 `.pt`만 있으면(Jetson 리셋/JetPack 재플래시 후 등) **그 Jetson
+위에서** 직접 빌드한다 — engine은 TensorRT 버전·GPU에 종속이라 다른 기기에서
+빌드한 파일은 못 쓴다:
+
+```bash
+# .pt를 models/에 두고 실행 (어댑터 계약 FP16·imgsz=480은 스크립트가 맞춰준다)
+PT_FILE=0204_morning.pt scripts/convert_engine.sh
+```
+
+스크립트가 NumPy 2.x(Jetson torch 비호환)를 사전 검사하고, 실행 중 의존성
+auto-install이 NumPy를 올리는 것도 차단한다(`YOLO_AUTOINSTALL=false`). export
+의존성(onnx/onnxslim)은 setup_jetson.sh가 NumPy 핀과 함께 미리 설치한다.
+
 코드 업데이트 후. 
 ```bash
 deactivate 2>/dev/null

@@ -59,10 +59,31 @@ if cuda_version is None or not cuda_available:
         file=sys.stderr,
     )
     sys.exit(2)
+
+# Jetson torch wheels are built against NumPy 1.x - export fails mid-run
+# with "Downgrade to 'numpy<2'" if pip pulled NumPy 2 into this venv
+# (typically via ultralytics auto-install of onnx during a previous export).
+import numpy
+
+print(f"NumPy version : {numpy.__version__}")
+if numpy.__version__.startswith("2."):
+    print(
+        "ERROR: NumPy 2.x detected in this venv. Fix with:\n"
+        '  uv pip install onnx onnxslim "numpy>=1.24.0,<2.0.0"\n'
+        "(installing export deps together with the pin keeps the resolver "
+        "from re-upgrading NumPy).",
+        file=sys.stderr,
+    )
+    sys.exit(3)
 PY
 then
     exit 1
 fi
+
+# Block ultralytics runtime auto-install: it pip-installs missing export
+# deps (onnx/onnxslim) on the fly and can silently upgrade NumPy to 2.x,
+# breaking Jetson torch. setup_jetson.sh preinstalls these with the pin.
+export YOLO_AUTOINSTALL=false
 
 yolo export \
     model="${INPUT_PATH}" \
@@ -75,6 +96,20 @@ if [[ ! -f "${OUTPUT_PATH}" ]]; then
     echo "ERROR: export did not produce ${OUTPUT_PATH}" >&2
     exit 1
 fi
+
+# Post-check: fail loudly if anything bumped NumPy during export
+"${PYTHON_BIN}" - <<'PY'
+import sys
+import numpy
+
+if numpy.__version__.startswith("2."):
+    print(
+        f"WARNING: NumPy was upgraded to {numpy.__version__} during export. "
+        'Restore with: uv pip install "numpy>=1.24.0,<2.0.0" --force-reinstall',
+        file=sys.stderr,
+    )
+    sys.exit(4)
+PY
 
 echo "=========================================="
 echo "Export complete"

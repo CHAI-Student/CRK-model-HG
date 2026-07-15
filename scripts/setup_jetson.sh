@@ -81,6 +81,12 @@ install_project_packages() {
         "ultralytics-thop>=2.0.18"
 
     uv pip install --no-deps "ultralytics>=8.0.0,<9.0.0"
+
+    # TensorRT engine export deps (scripts/convert_engine.sh). NumPy 핀과 한
+    # 명령으로 설치해야 resolver가 NumPy를 2.x로 올리지 않는다 — 미리 안 깔면
+    # 첫 `yolo export` 때 ultralytics auto-install이 onnx를 설치하며 NumPy 2를
+    # 끌어와 Jetson torch("Downgrade to 'numpy<2'")를 깨뜨린다.
+    uv pip install onnx onnxslim "numpy>=1.24.0,<2.0.0"
     uv pip install \
         "pytest>=7.0.0" \
         "pytest-asyncio>=0.21.0" \
