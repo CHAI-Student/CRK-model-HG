@@ -27,8 +27,8 @@ if [[ ! -f "${INPUT_PATH}" ]]; then
     exit 1
 fi
 
-if ! command -v yolo >/dev/null 2>&1; then
-    echo "ERROR: yolo CLI not found in PATH" >&2
+if ! "${PYTHON_BIN}" -c "import ultralytics" >/dev/null 2>&1; then
+    echo "ERROR: ultralytics not importable in this venv" >&2
     exit 1
 fi
 
@@ -85,12 +85,30 @@ fi
 # breaking Jetson torch. setup_jetson.sh preinstalls these with the pin.
 export YOLO_AUTOINSTALL=false
 
-yolo export \
-    model="${INPUT_PATH}" \
-    format=engine \
-    device=0 \
-    half=True \
-    imgsz="${IMGSZ}"
+# Export via Python API (not the yolo CLI) so we can shim checkpoint
+# unpickling first: a .pt saved on a NumPy 2.x machine (training PC)
+# pickles the RNG BitGenerator as a class object, while NumPy 1.x's
+# __bit_generator_ctor only accepts string names -> "PCG64 is not a known
+# BitGenerator module". The shim maps the class back to its name.
+"${PYTHON_BIN}" - "${INPUT_PATH}" "${IMGSZ}" <<'PY'
+import sys
+
+import numpy.random._pickle as _np_pickle
+
+_orig_ctor = getattr(_np_pickle, "__bit_generator_ctor")
+
+def _compat_bit_generator_ctor(bit_generator="MT19937"):
+    if not isinstance(bit_generator, str):
+        bit_generator = getattr(bit_generator, "__name__", str(bit_generator))
+    return _orig_ctor(bit_generator)
+
+setattr(_np_pickle, "__bit_generator_ctor", _compat_bit_generator_ctor)
+
+from ultralytics import YOLO
+
+model_path, imgsz = sys.argv[1], int(sys.argv[2])
+YOLO(model_path).export(format="engine", device=0, half=True, imgsz=imgsz)
+PY
 
 if [[ ! -f "${OUTPUT_PATH}" ]]; then
     echo "ERROR: export did not produce ${OUTPUT_PATH}" >&2
