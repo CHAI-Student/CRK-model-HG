@@ -58,7 +58,7 @@ def samples(start, end, n=10, dt=0.1):
 
     out, ts = [], 0.0
     for value in [start] * n + [end] * n:
-        out.append(LoadcellSample(ts, (value / 2, value / 2)))
+        out.append(LoadcellSample(ts, (value, 0.0)))  # 트레이 분리: 하중은 단일 채널에
         ts += dt
     return out
 

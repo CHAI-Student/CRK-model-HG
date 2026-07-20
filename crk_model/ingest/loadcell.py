@@ -66,6 +66,86 @@ class LoadcellAnalyzer:
         self._stab_wait = stabilization_wait_s
 
     def analyze(self, samples: Sequence[LoadcellSample]) -> LoadcellAnalysis:
+        """존 분석 진입점 — 다채널 샘플은 채널(트레이)별로 분석해 결합한다.
+
+        하드웨어 실측(2026-07): 존의 두 로드셀은 각자 트레이로 하중이
+        분리되어 있고 채널 간 크로스토크 < 5g(1 양자화 스텝). 따라서
+        상품 이벤트는 항상 단일 채널에 온전히 실리며, 합산 분석은
+        조용한 트레이의 노이즈를 delta에 섞고 동시 이벤트를 뭉갠다.
+        채널별로 plateau 분석을 돌리고 |delta| >= min_weight_change인
+        채널만 존 delta에 기여시킨다. 반환 계약(reason 문자열 포함)은
+        기존 합산 분석과 동일하다.
+        """
+        if not samples:
+            return LoadcellAnalysis(0.0, (), False, 0.0, "insufficient_samples")
+        n_ch = len(samples[0].values)
+        if n_ch <= 1:
+            return self._analyze_series(samples)
+
+        # 1패스: 채널별 분석 + 분류
+        settled: list[LoadcellAnalysis] = []      # plateau >=2, 안정 완료
+        pending: list[LoadcellAnalysis] = []      # 반품 stabilization 대기
+        flat_baseline = 0.0                       # 무이벤트(평탄) 트레이 baseline
+        for ch in range(n_ch):
+            series = [LoadcellSample(s.ts, (s.values[ch],)) for s in samples]
+            a = self._analyze_series(series)
+            if a.reason == "insufficient_samples":
+                return a
+            if a.stabilized:
+                settled.append(a)
+                continue
+            if a.reason == "needs_return_stabilization":
+                pending.append(a)
+                continue
+            totals = [s.total for s in series]
+            mean = sum(totals) / len(totals)
+            std = (sum((x - mean) ** 2 for x in totals) / len(totals)) ** 0.5
+            if std <= self._std_threshold:
+                # 전 구간 평탄(plateau 1개) = 무이벤트 트레이 — 존 확정을
+                # 막지 않고 baseline에만 기여한다.
+                flat_baseline += mean
+                continue
+            # 움직였는데 안정에 실패한 트레이 → 존 delta 확정 불가
+            return LoadcellAnalysis(0.0, (), False, 0.0, a.reason)
+
+        baseline = flat_baseline + sum(a.baseline for a in settled + pending)
+
+        # 반품 대기 채널이 있으면 존 전체가 대기: 구 계약대로 delta는 실어
+        # 보내되(판정은 delta를 쓴다) 구간화는 보류(segments=()).
+        if pending:
+            delta = sum(a.delta_weight for a in pending) + sum(
+                a.delta_weight
+                for a in settled
+                if abs(a.delta_weight) >= self._profile.min_weight_change_grams
+            )
+            return LoadcellAnalysis(
+                delta, (), False, baseline, "needs_return_stabilization"
+            )
+
+        gated = [
+            a for a in settled
+            if abs(a.delta_weight) >= self._profile.min_weight_change_grams
+        ]
+        if gated:
+            delta = sum(a.delta_weight for a in gated)
+            segments = sorted(
+                (seg for a in gated for seg in a.segments),
+                key=lambda seg: seg.start_ts,
+            )
+            return LoadcellAnalysis(delta, tuple(segments), True, baseline)
+        if settled:
+            # 변화는 관측됐지만 전부 게이트 미달 — 합산 delta를 그대로 내보내
+            # pipeline의 below_min_weight_change 스킵이 판단하게 한다 (구
+            # 합산 분석과 동일 계약).
+            return LoadcellAnalysis(
+                sum(a.delta_weight for a in settled), (), True, baseline
+            )
+        # 전 채널 평탄: 변화 자체가 없음 (구 합산 분석의 flat 동작과 동일)
+        return LoadcellAnalysis(
+            0.0, (), False, baseline, "insufficient_stable_regions"
+        )
+
+    def _analyze_series(self, samples: Sequence[LoadcellSample]) -> LoadcellAnalysis:
         if len(samples) < self._window * 2:
             return LoadcellAnalysis(0.0, (), False, 0.0, "insufficient_samples")
 

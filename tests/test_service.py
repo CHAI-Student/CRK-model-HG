@@ -56,7 +56,7 @@ def moving_frames(n):
 def samples(start, end, n=10, dt=0.1):
     out, ts = [], 0.0
     for value in [start] * n + [end] * n:
-        out.append(LoadcellSample(ts, (value / 2, value / 2)))
+        out.append(LoadcellSample(ts, (value, 0.0)))  # 트레이 분리: 하중은 단일 채널에
         ts += dt
     return out
 
@@ -394,7 +394,7 @@ class TestSegmentTargetRetry:
         −8 스텝은 delta에만 반영 — 실기 오염 서명과 동형)."""
         out, ts = [], 0.0
         for v in [0.0] * 10 + [-8.0] * 8 + [-241.77] * 12:
-            out.append(LoadcellSample(ts, (v / 2, v / 2)))
+            out.append(LoadcellSample(ts, (v, 0.0)))  # 트레이 분리: 하중은 단일 채널에
             ts += 0.1
         return out
 
