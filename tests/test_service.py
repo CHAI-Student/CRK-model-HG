@@ -87,6 +87,69 @@ def trigger_payload(zone=1, n_frames=8):
     }
 
 
+def dual_tray_samples(ch0_step, ch1_step, n=10, dt=0.1):
+    """두 트레이 동시 이벤트: 채널별 계단형 시계열 (2단계 검증용)."""
+    out, ts = [], 0.0
+    (a0, a1), (b0, b1) = ch0_step, ch1_step
+    for k in range(2 * n):
+        v0 = a0 if k < n else a1
+        v1 = b0 if k < n else b1
+        out.append(LoadcellSample(ts, (v0, v1)))
+        ts += dt
+    return out
+
+
+class TestMultiTrayEvents:
+    """2단계: 트레이별 동시 이벤트를 이벤트당 개별 판정 후 병합."""
+
+    def _service(self, cola, second):
+        detector = FakeDetector(detections=[
+            Detection(1, 0.85, bbox=(50.0, 50.0, 100.0, 100.0)),
+            Detection(second.class_id, 0.80, bbox=(150.0, 50.0, 200.0, 100.0)),
+        ])
+        svc = make_service(detector)
+        svc.handle_multi_zone({
+            "session_id": "s1", "state": "OPEN",
+            "active_products": [asdict(cola), asdict(second)],
+        })
+        return svc
+
+    def test_simultaneous_two_tray_pickup_charges_both(self, cola, bar170):
+        # 트레이0에서 콜라(-100), 트레이1에서 아이스바(-170) 동시 취출:
+        # 합산 -270의 조합 탐색 없이 이벤트별 단품 매칭으로 분해된다
+        svc = self._service(cola, bar170)
+        payload = trigger_payload()
+        payload["loadcells"] = dual_tray_samples((500, 400), (400, 230))
+        svc.handle_trigger(payload)
+        svc.process_pending()
+        close = svc.handle_multi_zone({"session_id": "s1", "state": "CLOSE"})
+        assert close["status"] == "success"
+        assert close["totalPrice"] == 1500 + 2000
+        assert close["productCount"] == 2
+
+    def test_same_product_from_both_trays_merges_count(self, cola, bar170):
+        # 두 트레이에서 같은 상품(콜라 100g)을 하나씩 → count 2로 병합
+        svc = self._service(cola, bar170)
+        payload = trigger_payload()
+        payload["loadcells"] = dual_tray_samples((500, 400), (300, 200))
+        svc.handle_trigger(payload)
+        svc.process_pending()
+        close = svc.handle_multi_zone({"session_id": "s1", "state": "CLOSE"})
+        assert close["status"] == "success"
+        assert close["totalPrice"] == 1500 * 2
+
+    def test_single_tray_event_keeps_legacy_path(self, cola, bar170):
+        # 이벤트 1개면 기존 단일 판정 경로 그대로 (multi_tray 미발동)
+        svc = self._service(cola, bar170)
+        payload = trigger_payload()
+        payload["loadcells"] = dual_tray_samples((500, 400), (300, 300))
+        svc.handle_trigger(payload)
+        svc.process_pending()
+        outcome = svc.worker.outcomes[0]
+        assert not outcome.event.judgment.strategy.startswith("multi_tray")
+        assert abs(outcome.event.delta_weight - (-100)) < 1.0
+
+
 class TestEndToEnd:
     def test_open_trigger_close_complete(self, cola):
         svc = make_service()

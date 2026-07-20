@@ -44,8 +44,8 @@ class CrossZonePenaltyConfig:
     enabled: bool = False
     # 카메라 프리롤 (CRK-CAMERA replay_duration=4.0, 120프레임)
     replay_s: float = 4.0
-    # change 후 저장 지속 (CRK-CAMERA trigger duration=3.0)
-    trigger_s: float = 3.0
+    # change 후 저장 지속 (CRK-CAMERA trigger duration=4.0, 7c8395f)
+    trigger_s: float = 4.0
     # IO-BOARD 감지 지연 마진 (폴링 0.099s + 필터 지연, §3.1)
     epsilon_s: float = 0.3
     # soft 페널티 계수 — 오염 후보의 vote_ratio/vote_count/confidence에 곱한다

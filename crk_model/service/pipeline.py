@@ -17,9 +17,18 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 
 from crk_model.core.profiles import REFRIGERATOR, SensorProfile
-from crk_model.core.types import JudgmentResult, JudgmentStatus, VisionCandidate
+from crk_model.core.types import (
+    JudgmentResult,
+    JudgmentStatus,
+    ProductCount,
+    VisionCandidate,
+)
 from crk_model.frames.motion_gate import Frame, HandLatch, MotionGate
-from crk_model.ingest.loadcell import LoadcellAnalyzer, LoadcellSample
+from crk_model.ingest.loadcell import (
+    ChannelWeightEvent,
+    LoadcellAnalyzer,
+    LoadcellSample,
+)
 from crk_model.judgment.interfaces import JudgmentContext
 from crk_model.judgment.router import JudgmentRouter
 from crk_model.ledger.events import TriggerEvent
@@ -171,10 +180,68 @@ class TriggerPipeline:
             active_products=snapshot.products,
             vision_only=vision_only,
         )
-        judgment = self._router.judge(ctx)
-        judgment = self._segment_target_retry(ctx, judgment, analysis, trace)
+        if len(analysis.events) >= 2:
+            judgment = self._judge_tray_events(ctx, analysis, trace)
+        else:
+            judgment = self._router.judge(ctx)
+            judgment = self._segment_target_retry(ctx, judgment, analysis, trace)
         return self._outcome(
             session_id, req, delta, analysis.segments, judgment, trace, candidates
+        )
+
+    def _judge_tray_events(
+        self, ctx: JudgmentContext, analysis, trace: TriggerTrace
+    ) -> JudgmentResult:
+        """2단계: 트레이별 동시 이벤트를 이벤트당 1회씩 개별 판정 후 병합.
+
+        트레이 분리 구조에서 각 ChannelWeightEvent.delta는 단품(또는 동일
+        상품 n개) 무게 그 자체이므로, 존 합산 delta(-324 같은 덩어리)를
+        조합 탐색하는 대신 이벤트별 단품 매칭으로 분해한다 — issue #6이
+        금지한 자유 조합 탐색과 달리 분해 근거가 물리(트레이)라 안전하다.
+        비전 후보 풀은 공유(영상 1개, YOLO 재실행 없음) — 각 이벤트가 자기
+        무게로 풀에서 자기 상품을 고른다 (_segment_target_retry와 같은
+        zero-GPU 재판정 패턴).
+        """
+        trace.reason_codes.append(f"multi_tray_events:{len(analysis.events)}")
+        results: list[tuple[ChannelWeightEvent, JudgmentResult]] = []
+        for ev in analysis.events:
+            ectx = replace(ctx, delta_weight=ev.delta_grams, segments=ev.segments)
+            j = self._router.judge(ectx)
+            j = self._segment_target_retry(ectx, j, ev, trace)
+            results.append((ev, j))
+
+        complete = [
+            (ev, j) for ev, j in results
+            if j.status is JudgmentStatus.COMPLETE and j.products
+        ]
+        merged: dict[str, ProductCount] = {}
+        for _, j in complete:
+            for pc in j.products:
+                prev = merged.get(pc.product.product_id)
+                merged[pc.product.product_id] = ProductCount(
+                    pc.product, (prev.count if prev else 0) + pc.count
+                )
+        reasons = "+".join(
+            f"ch{ev.channel}:{j.reason or j.status.value}" for ev, j in results
+        )
+        strategies = ",".join(j.strategy or "-" for _, j in results)
+        if len(complete) == len(results):
+            status = JudgmentStatus.COMPLETE
+            confidence = min(j.confidence for _, j in results)
+        elif complete:
+            # 일부 트레이만 확정 — 확정분만 청구(악화 금지, I3 태도),
+            # 미확정 트레이는 reason에 남긴다
+            status = JudgmentStatus.PARTIAL
+            confidence = min(j.confidence for _, j in complete)
+        else:
+            status = JudgmentStatus.NO_DETECTION
+            confidence = 0.0
+        return JudgmentResult(
+            status,
+            tuple(merged.values()),
+            confidence,
+            reason=f"multi_tray[{reasons}]",
+            strategy=f"multi_tray[{strategies}]",
         )
 
     def _segment_target_retry(

@@ -37,12 +37,27 @@ class _Plateau:
 
 
 @dataclass(frozen=True)
+class ChannelWeightEvent:
+    """트레이(물리 채널) 단위 무게 이벤트 — 2단계: 각 이벤트는 독립 판정 대상.
+
+    트레이 분리 구조에서 상품 이벤트는 항상 단일 채널에 온전히 실리므로
+    delta_grams는 단품(또는 동일 상품 n개) 무게 그 자체다."""
+
+    channel: int
+    delta_grams: float
+    segments: tuple[WeightSegment, ...]
+
+
+@dataclass(frozen=True)
 class LoadcellAnalysis:
     delta_weight: float
     segments: tuple[WeightSegment, ...]
     stabilized: bool
     baseline: float
     reason: str = ""
+    # 게이트(|delta| >= min_weight_change)를 넘은 채널별 이벤트. 2개 이상이면
+    # pipeline이 이벤트별로 라우터를 돌려 단품 매칭으로 분해한다 (2단계).
+    events: tuple[ChannelWeightEvent, ...] = ()
 
 
 class LoadcellAnalyzer:
@@ -83,7 +98,7 @@ class LoadcellAnalyzer:
             return self._analyze_series(samples)
 
         # 1패스: 채널별 분석 + 분류
-        settled: list[LoadcellAnalysis] = []      # plateau >=2, 안정 완료
+        settled: list[tuple[int, LoadcellAnalysis]] = []  # plateau >=2, 안정 완료
         pending: list[LoadcellAnalysis] = []      # 반품 stabilization 대기
         flat_baseline = 0.0                       # 무이벤트(평탄) 트레이 baseline
         for ch in range(n_ch):
@@ -92,7 +107,7 @@ class LoadcellAnalyzer:
             if a.reason == "insufficient_samples":
                 return a
             if a.stabilized:
-                settled.append(a)
+                settled.append((ch, a))
                 continue
             if a.reason == "needs_return_stabilization":
                 pending.append(a)
@@ -108,14 +123,16 @@ class LoadcellAnalyzer:
             # 움직였는데 안정에 실패한 트레이 → 존 delta 확정 불가
             return LoadcellAnalysis(0.0, (), False, 0.0, a.reason)
 
-        baseline = flat_baseline + sum(a.baseline for a in settled + pending)
+        baseline = flat_baseline + sum(a.baseline for _, a in settled) + sum(
+            a.baseline for a in pending
+        )
 
         # 반품 대기 채널이 있으면 존 전체가 대기: 구 계약대로 delta는 실어
         # 보내되(판정은 delta를 쓴다) 구간화는 보류(segments=()).
         if pending:
             delta = sum(a.delta_weight for a in pending) + sum(
                 a.delta_weight
-                for a in settled
+                for _, a in settled
                 if abs(a.delta_weight) >= self._profile.min_weight_change_grams
             )
             return LoadcellAnalysis(
@@ -123,22 +140,28 @@ class LoadcellAnalyzer:
             )
 
         gated = [
-            a for a in settled
+            (ch, a) for ch, a in settled
             if abs(a.delta_weight) >= self._profile.min_weight_change_grams
         ]
         if gated:
-            delta = sum(a.delta_weight for a in gated)
+            delta = sum(a.delta_weight for _, a in gated)
             segments = sorted(
-                (seg for a in gated for seg in a.segments),
+                (seg for _, a in gated for seg in a.segments),
                 key=lambda seg: seg.start_ts,
             )
-            return LoadcellAnalysis(delta, tuple(segments), True, baseline)
+            events = tuple(
+                ChannelWeightEvent(ch, a.delta_weight, a.segments)
+                for ch, a in gated
+            )
+            return LoadcellAnalysis(
+                delta, tuple(segments), True, baseline, events=events
+            )
         if settled:
             # 변화는 관측됐지만 전부 게이트 미달 — 합산 delta를 그대로 내보내
             # pipeline의 below_min_weight_change 스킵이 판단하게 한다 (구
             # 합산 분석과 동일 계약).
             return LoadcellAnalysis(
-                sum(a.delta_weight for a in settled), (), True, baseline
+                sum(a.delta_weight for _, a in settled), (), True, baseline
             )
         # 전 채널 평탄: 변화 자체가 없음 (구 합산 분석의 flat 동작과 동일)
         return LoadcellAnalysis(

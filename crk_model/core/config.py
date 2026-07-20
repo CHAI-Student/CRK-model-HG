@@ -123,8 +123,9 @@ class Settings:
     # shadow로 돌려 diff만 기록. PENALTY_ENABLED=1이면 무의미하므로 무시된다.
     cross_zone_shadow: bool = False
     # 카메라 계약 상수 — CRK-CAMERA replay_duration/trigger duration과 단일 소스
+    # (trigger duration은 0.8s 로드셀 캐던스 대응으로 3.0 -> 4.0, CRK-CAMERA 7c8395f)
     cross_zone_replay_s: float = 4.0
-    cross_zone_trigger_s: float = 3.0
+    cross_zone_trigger_s: float = 4.0
     # IO-BOARD 감지 지연 마진 (ε)
     cross_zone_epsilon_s: float = 0.3
     # soft 페널티 계수 (α) / 페널티 소스 최소 신뢰도 (θ) — Phase 1 계측으로 보정
@@ -173,7 +174,7 @@ class Settings:
             ),
             cross_zone_shadow=_env_bool("MODEL__CROSS_ZONE__SHADOW", False),
             cross_zone_replay_s=_env_float("MODEL__CROSS_ZONE__REPLAY_S", 4.0),
-            cross_zone_trigger_s=_env_float("MODEL__CROSS_ZONE__TRIGGER_S", 3.0),
+            cross_zone_trigger_s=_env_float("MODEL__CROSS_ZONE__TRIGGER_S", 4.0),
             cross_zone_epsilon_s=_env_float("MODEL__CROSS_ZONE__EPSILON_S", 0.3),
             cross_zone_alpha=_env_float("MODEL__CROSS_ZONE__ALPHA", 0.5),
             cross_zone_source_conf_min=_env_float(
