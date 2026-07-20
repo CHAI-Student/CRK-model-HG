@@ -59,11 +59,12 @@ class TestAnchors:
         assert sub_event_anchors(e) == (5.0,)
 
     def test_window_is_conservative(self, cola):
-        # W(E) = [min−4−0.3, max+3+0.3] (§4.2 ②)
+        # W(E) = [min−4−0.3, max+4+0.3] (§4.2 ②, trigger_s는 CAMERA 포스트롤
+        # 4.0s와 단일 소스 — CRK-CAMERA 7c8395f)
         e = event("s", 1, 0.0, judged(cola), -100.0, change_ts=(100.0, 102.5))
         lo, hi = contamination_window(e, CFG)
         assert lo == pytest.approx(95.7)
-        assert hi == pytest.approx(105.8)
+        assert hi == pytest.approx(106.8)
 
 
 class TestCrossZonePenalty:
