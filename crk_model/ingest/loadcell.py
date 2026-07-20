@@ -50,10 +50,16 @@ class LoadcellAnalyzer:
         self,
         profile: SensorProfile,
         *,
-        stable_window: int = 5,
-        stability_threshold_grams: float = 2.0,
+        stable_window: int = 3,
+        stability_threshold_grams: float = 2.5,
         stabilization_wait_s: float = 1.0,
     ):
+        # 기본값의 시간 의미 (IO-BOARD 2.0.3 이후 샘플링 0.8s 기준):
+        # - stable_window=3 → plateau 성립에 연속 2.4s 안정 필요.
+        #   (구 기본 5는 0.1s 샘플링 시절 값 — 0.8s에서는 4s가 되어 과도)
+        # - stability_threshold_grams=2.5 → 5g 양자화 와이어에서 bin 경계
+        #   토글 1회가 섞인 창(std≈2.36)까지 안정으로 허용. 2.0이면 경계에
+        #   걸린 참값이 영영 plateau를 못 만든다.
         self._profile = profile
         self._window = stable_window
         self._std_threshold = stability_threshold_grams

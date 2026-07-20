@@ -1,6 +1,8 @@
 """SensorProfile — freezer/냉장 코드 포크를 파라미터 포크로 (D3, QA Q1).
 
-제약 C3(센서 물리): 냉장고 로드셀 ±3g / 냉동고 5~15g.
+제약 C3(센서 물리): 로드셀(LABD-B3/K3)의 보증 분해능은 5g (division 1g)이고,
+IO-BOARD 엣지 단이 5g 양자화를 적용한다(CRK-IO-BOARD 2.0.2). 따라서 냉장
+임계도 5g 미만은 물리적으로 무의미하다. 냉동고 노이즈는 5~15g.
 냉동고에서 무게는 "무엇인지"를 가리지 못하고(weight_is_discriminative=False)
 "몇 개인지"만 거친 게이트(±15g, I3)로 검증한다.
 
@@ -43,11 +45,11 @@ class SensorProfile:
 
 REFRIGERATOR = SensorProfile(
     name="refrigerator",
-    tolerance_grams=3.0,
+    tolerance_grams=5.0,  # 센서 보증 분해능 5g 미만 임계는 무의미 (C3)
     weight_is_discriminative=True,
     count_gate_tolerance_grams=None,
     min_weight_change_grams=5.0,
-    segment_step_grams=4.0,
+    segment_step_grams=5.0,  # 5g 양자화 와이어에서 스텝은 5g 배수로만 옴
     motion_gate_threshold=0.02,
     motion_gate_keepalive=8,
     early_termination_allowed=True,

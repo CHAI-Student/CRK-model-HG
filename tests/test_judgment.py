@@ -343,10 +343,11 @@ class TestStageCountCombination:
 
 class TestDetectedSingleItemFallback:
     def test_rescues_when_strict_and_relaxed_miss(self, cola):
-        # strict(tol=3)·relaxed(tol*2=6) 둘 다 놓치는 잔차(8g)를 detected_single
-        # (tol*3=9)이 구제 — 단, I6이 원래 tolerance로 재검증해 PARTIAL 강등
+        # strict(tol=5)·relaxed(tol*2=10) 둘 다 놓치는 잔차(12g)를 detected_single
+        # (tol*3=15)이 구제 — 단, I6이 원래 tolerance로 재검증해 PARTIAL 강등
+        # (tolerance 3→5 상향: 센서 보증 분해능 5g, profiles.py C3 참조)
         router = JudgmentRouter()
-        result = router.judge(ctx(-108.0, [cola], [cand(1, votes=10, conf=0.9)]))
+        result = router.judge(ctx(-112.0, [cola], [cand(1, votes=10, conf=0.9)]))
         assert result.strategy == "detected_single_item_fallback"
         assert result.products[0].count == 1
         assert result.products[0].product.product_id == "P001"
