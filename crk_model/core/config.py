@@ -34,6 +34,20 @@ def _env_zones(key: str) -> tuple[int, ...]:
 
 _VALID_CABINET_TYPES = ("refrigerated", "freezer")
 
+_VALID_BASELINE_MODES = ("off", "shadow", "active")
+
+
+def _env_baseline_mode(key: str, default: str) -> str:
+    raw = os.environ.get(key)
+    if not raw:
+        return default
+    normalized = raw.strip().lower()
+    if normalized not in _VALID_BASELINE_MODES:
+        # cabinet_type과 동일한 fail-closed: 오타가 조용히 기본 모드로
+        # 폴백되면 shadow 검증 없이 active로 갔다고 오인할 수 있다.
+        raise ValueError(f"Invalid baseline suppress mode: {raw}")
+    return normalized
+
 
 def _env_cabinet_type(key: str, default: str) -> str:
     raw = os.environ.get(key)
@@ -111,6 +125,13 @@ class Settings:
     # 제거. min_frames=0이면 비활성.
     static_track_min_frames: int = 24
     static_track_iou: float = 0.85
+    # Baseline 억제 (이슈 #14 후속): 손 등장 전(프리롤)에 이미 있던 class를
+    # 배경으로 등록하고 같은 자리 재검출을 억제 — static_track의 연속 IoU
+    # 0.85 조건을 못 채우는 "깜빡이는 고정 물체" 대응. 모드: off / shadow
+    # (드랍 없이 drop_stats["baseline"] 계수만) / active(실제 드랍).
+    # shadow 실측으로 진짜 상품 표가 안 깎이는 걸 확인한 뒤 active로 승격.
+    baseline_suppress_mode: str = "shadow"
+    baseline_suppress_iou: float = 0.5
     # 오염 delta 이중 타깃 재시도 (이슈 #10): |delta − sum(segments)|가 이
     # 값을 넘으면(접촉 하중 오염 서명) delta 타깃 판정 실패 시 세그먼트 합
     # 타깃으로 1회 재판정. 실측 오염 트리거 8~18g / 깨끗한 트리거 0.
@@ -168,6 +189,12 @@ class Settings:
                 "MODEL__VISION__STATIC_TRACK_MIN_FRAMES", 24
             ),
             static_track_iou=_env_float("MODEL__VISION__STATIC_TRACK_IOU", 0.85),
+            baseline_suppress_mode=_env_baseline_mode(
+                "MODEL__VISION__BASELINE_SUPPRESS_MODE", "shadow"
+            ),
+            baseline_suppress_iou=_env_float(
+                "MODEL__VISION__BASELINE_SUPPRESS_IOU", 0.5
+            ),
             segment_retry_gap_grams=_env_float(
                 "MODEL__WEIGHT__SEGMENT_RETRY_GAP_GRAMS", 5.0
             ),

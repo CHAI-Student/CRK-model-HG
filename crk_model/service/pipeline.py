@@ -155,6 +155,11 @@ class TriggerPipeline:
             "insufficient_samples",
             "insufficient_stable_regions",
         )  # 로드셀 신뢰 불가 → vision 강제
+        if vision_only:
+            # 관측성 (이슈 #14): vision_only의 원인(insufficient_samples vs
+            # insufficient_stable_regions)이 아카이브에 남지 않으면 로드셀
+            # 실패 유형을 사후 구분할 수 없다.
+            trace.reason_codes.append(f"loadcell_{analysis.reason}")
         if analysis.reason == "needs_return_stabilization":
             # 재수집은 장치측 훅 (QA Q3 ① 순서 계약) — 구간화 보류 사실만 기록
             trace.reason_codes.append("return_stabilization_pending")

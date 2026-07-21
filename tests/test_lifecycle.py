@@ -12,6 +12,8 @@ import threading
 import time
 from dataclasses import asdict
 
+import pytest
+
 from crk_model.core.config import Settings
 from crk_model.core.profiles import REFRIGERATOR
 from crk_model.ingest.loadcell import LoadcellSample
@@ -470,6 +472,8 @@ class TestVisionTuningWiring:
         monkeypatch.setenv("MODEL__VISION__MIN_VOTE_COUNT", "1")
         monkeypatch.setenv("MODEL__VISION__CONF_FLOOR", "0.1")
         monkeypatch.setenv("MODEL__VISION__SIDE_ROI_MAX_CENTER_X", "480")
+        monkeypatch.setenv("MODEL__VISION__BASELINE_SUPPRESS_MODE", "active")
+        monkeypatch.setenv("MODEL__VISION__BASELINE_SUPPRESS_IOU", "0.6")
         s = Settings.from_env()
         assert s.top_confidence_threshold == 0.35
         assert s.side_confidence_threshold == 0.30
@@ -477,6 +481,13 @@ class TestVisionTuningWiring:
         assert s.min_vote_count == 1
         assert s.vote_conf_floor == 0.1
         assert s.side_roi_max_center_x == 480
+        assert s.baseline_suppress_mode == "active"
+        assert s.baseline_suppress_iou == 0.6
+
+    def test_from_env_rejects_invalid_baseline_mode(self, monkeypatch):
+        monkeypatch.setenv("MODEL__VISION__BASELINE_SUPPRESS_MODE", "on")
+        with pytest.raises(ValueError):
+            Settings.from_env()
 
     def test_settings_flow_into_voting_ensemble(self, cola):
         # 진입 컷 0.9로 올리면 FakeDetector(conf 0.8) 검출이 투표에 못 들어가
@@ -510,4 +521,6 @@ class TestVisionTuningWiring:
         svc.process_pending()
         summary = svc.worker.outcomes[-1].trace.vote_summary
         assert "filter_drops_by_stage" in summary
-        assert set(summary["filter_drops_by_stage"]) == {"side_roi", "static_track", "hand_path"}
+        assert set(summary["filter_drops_by_stage"]) == {
+            "side_roi", "baseline", "static_track", "hand_path"
+        }

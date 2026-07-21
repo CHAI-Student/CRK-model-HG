@@ -8,6 +8,14 @@
   vision candidate로 오르는 문제. 진열 상품은 움직이지 않고, 진짜 취출/
   손에 든 상품은 움직인다는 물리로 구분 — 위치 단위 억제라서 손님이 바로
   그 돌출 상품을 집으면 bbox가 움직여 억제가 즉시 풀린다)
+- Baseline: 손 등장 전(프리롤)에 이미 그 자리에 있던 class를 장면 배경으로
+  등록하고, 이후 같은 자리 재검출을 억제 (이슈 #14 후속 — hand_path가
+  트리거 단위 리셋으로 프리롤에서 fail-open이 되자, static_track의 연속
+  IoU 0.85 조건을 못 채우는 "깜빡이는 고정 물체"가 투표에 들어오는 문제.
+  static_track이 "연속·고정밀 정지"라면 baseline은 "손 등장 전 존재"라는
+  시간 경계로 배경을 정의한다. 손에 들린 상품은 baseline 위치를 벗어나므로
+  통과 — 돌출 상품을 바로 집는 경우도 동일). shadow 모드에서는 드랍 없이
+  drop_stats["baseline"]만 계수해 실측 검증 후 active로 승격한다.
 - conf 필터: 여기서 하지 않는다 — I4 (저신뢰 투표 보존, 최종 0.4는 voting.combine)
 
 공간 정보가 없는 검출(bbox=0)은 공간 필터를 통과시킨다 (fail-open — 필터의
@@ -71,7 +79,13 @@ class DetectionFilterChain:
         hand_margin_px: float = 40.0,
         static_track_min_frames: int = 24,
         static_track_iou: float = 0.85,
+        baseline_suppress_mode: str = "shadow",
+        baseline_suppress_iou: float = 0.5,
     ):
+        if baseline_suppress_mode not in ("off", "shadow", "active"):
+            raise ValueError(
+                f"Invalid baseline_suppress_mode: {baseline_suppress_mode}"
+            )
         self._side_max_cx = side_roi_max_center_x
         self._hand_margin = hand_margin_px
         self._hand_history_frames = hand_history_frames
@@ -90,6 +104,17 @@ class DetectionFilterChain:
             lambda: defaultdict(list)
         )
         self._frame_idx: dict[str, int] = defaultdict(int)
+        # Baseline 억제 (모듈 docstring 참조): 카메라별 "손 등장 전" 관측
+        # class → bbox anchor 목록. 손이 한 번이라도 잡히면 등록을 멈춘다
+        # (손이 내려놓은 물건이 배경으로 오등록되는 것을 방지). 손이 끝까지
+        # 안 잡히는 트리거는 등록이 계속되지만, 그 경우에도 억제 대상은
+        # "같은 자리 재검출"뿐이라 fail 방향은 증거 보존에 가깝다.
+        self._baseline_mode = baseline_suppress_mode
+        self._baseline_iou = baseline_suppress_iou
+        self._baseline_anchors: dict[str, dict[int, list]] = defaultdict(
+            lambda: defaultdict(list)
+        )
+        self._hand_seen: dict[str, bool] = defaultdict(bool)
         # 진단 (issue #6 2차: side 검출이 195프레임 중 194개 제거 — 어느 단계가
         # 지웠는지 구분 불가했음): 카메라×단계별 제거 카운터. 트리거 시작 시
         # pipeline이 reset_trigger_state()로 초기화하고 종료 시 vote_summary에 싣는다.
@@ -99,6 +124,7 @@ class DetectionFilterChain:
     def reset_drop_stats(self) -> None:
         self.drop_stats = {
             "side_roi": {"top": 0, "side": 0},
+            "baseline": {"top": 0, "side": 0},  # shadow 모드에서는 "드랍했을" 수
             "static_track": {"top": 0, "side": 0},
             "hand_path": {"top": 0, "side": 0},
         }
@@ -112,6 +138,8 @@ class DetectionFilterChain:
         self._hand_history.clear()
         self._static_tracks.clear()
         self._frame_idx.clear()
+        self._baseline_anchors.clear()
+        self._hand_seen.clear()
 
     def _is_static(self, camera: str, d: Detection) -> bool:
         """정지 트랙 갱신 + 억제 여부 판정. 검출이 억제되더라도 카운트는
@@ -137,9 +165,29 @@ class DetectionFilterChain:
         anchors[:] = [a for a in anchors if idx - a.last_seen <= stale]
         return False
 
+    def _is_baseline(self, camera: str, d: Detection) -> bool:
+        """배경(baseline) 여부 판정 + 손 등장 전이면 anchor 등록.
+
+        첫 관측은 등록만 하고 통과시킨다(증거 보존) — 억제는 같은 자리
+        재검출부터. 매칭 시 anchor bbox를 최신 관측으로 갱신해 느린
+        드리프트를 추종한다 (빠르게 움직이는 손에 든 상품은 IoU가
+        급락해 추종되지 않음 — static_track과 같은 물리 구분)."""
+        if self._baseline_mode == "off":
+            return False
+        anchors = self._baseline_anchors[camera][d.class_id]
+        for i, bbox in enumerate(anchors):
+            if _iou(d.bbox, bbox) >= self._baseline_iou:
+                anchors[i] = d.bbox
+                return True
+        if not self._hand_seen[camera]:
+            anchors.append(d.bbox)
+        return False
+
     def apply(self, camera: str, detections: Sequence[Detection]) -> list[Detection]:
         self._frame_idx[camera] += 1
         hands = [d for d in detections if d.is_hand]
+        if hands:
+            self._hand_seen[camera] = True  # 이후 프레임부터 baseline 등록 중지
         for h in hands:
             if h.bbox != _ZERO_BBOX:
                 self._hand_history[camera].append(h.bbox)
@@ -154,6 +202,12 @@ class DetectionFilterChain:
                 if camera == "side" and _center_x(d.bbox) >= self._side_max_cx:
                     self.drop_stats["side_roi"][camera] += 1
                     continue
+                # Baseline: 손 등장 전부터 있던 배경 억제 — shadow 모드는
+                # 계수만 하고 통과시켜 실측 검증 후 active 승격 (이슈 #14)
+                if self._is_baseline(camera, d):
+                    self.drop_stats["baseline"][camera] += 1
+                    if self._baseline_mode == "active":
+                        continue
                 # Static Track: 정지 진열 상품 억제 — hand_path보다 먼저
                 # 평가해 손 근접 여부와 무관하게 정지 카운트를 누적한다
                 # (돌출 상품은 손이 지나가는 길목이라 hand_path를 통과함)

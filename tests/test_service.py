@@ -405,6 +405,67 @@ class TestFilterChain:
         moved = Detection(27, 0.9, bbox=(180, 150, 240, 250))  # 집어서 이동
         assert moved in f.apply("top", [moved])
 
+    def test_baseline_active_suppresses_prehand_fixture(self):
+        # 이슈 #14 후속: 손 등장 전부터 있던 고정 물체 — 첫 관측은 등록만
+        # 하고 통과(증거 보존), 같은 자리 재검출부터 억제. bbox가 출렁여
+        # 정지 트랙(IoU 0.85 연속)이 성립하지 않아도 잡아야 한다.
+        f = DetectionFilterChain(
+            baseline_suppress_mode="active", baseline_suppress_iou=0.5
+        )
+        first = Detection(27, 0.9, bbox=(100, 100, 160, 200))
+        assert first in f.apply("top", [first])  # 첫 관측 = 등록 + 통과
+        jittered = Detection(27, 0.9, bbox=(108, 104, 170, 210))  # IoU ~0.75
+        assert jittered not in f.apply("top", [jittered])
+        assert f.drop_stats["baseline"]["top"] == 1
+
+    def test_baseline_shadow_counts_without_dropping(self):
+        f = DetectionFilterChain(
+            baseline_suppress_mode="shadow", baseline_suppress_iou=0.5
+        )
+        d = Detection(27, 0.9, bbox=(100, 100, 160, 200))
+        f.apply("top", [d])
+        assert d in f.apply("top", [d])  # shadow: 드랍 없음
+        assert f.drop_stats["baseline"]["top"] == 1  # 계수만
+
+    def test_baseline_registration_stops_after_hand(self):
+        # 손 등장 이후 새 위치에 나타난 물체(손이 옮긴 상품 등)는 배경으로
+        # 등록되지 않는다 → 이후에도 억제되지 않음
+        f = DetectionFilterChain(
+            baseline_suppress_mode="active", baseline_suppress_iou=0.5
+        )
+        f.apply("top", [Detection(0, 0.9, is_hand=True, bbox=(0, 0, 20, 20))])
+        late = Detection(13, 0.8, bbox=(300, 300, 360, 400))
+        for _ in range(3):
+            out = f.apply(
+                "top",
+                [Detection(0, 0.9, is_hand=True, bbox=(290, 290, 320, 320)), late],
+            )
+            assert late in out
+        assert f.drop_stats["baseline"]["top"] == 0
+
+    def test_baseline_released_when_item_moves(self):
+        # 등록된 돌출 상품이라도 손에 들려 위치를 벗어나면 통과
+        f = DetectionFilterChain(
+            baseline_suppress_mode="active", baseline_suppress_iou=0.5
+        )
+        f.apply("top", [Detection(27, 0.9, bbox=(100, 100, 160, 200))])
+        moved = Detection(27, 0.9, bbox=(220, 180, 280, 280))
+        assert moved in f.apply("top", [moved])
+
+    def test_baseline_state_resets_per_trigger(self):
+        f = DetectionFilterChain(
+            baseline_suppress_mode="active", baseline_suppress_iou=0.5
+        )
+        d = Detection(27, 0.9, bbox=(100, 100, 160, 200))
+        f.apply("top", [d])
+        assert d not in f.apply("top", [d])
+        f.reset_trigger_state()
+        assert d in f.apply("top", [d])  # 이전 영상의 anchor가 새어오면 안 됨
+
+    def test_baseline_invalid_mode_rejected(self):
+        with pytest.raises(ValueError):
+            DetectionFilterChain(baseline_suppress_mode="on")
+
     def test_moving_item_never_suppressed(self):
         # 손에 든/이동 중 상품은 bbox가 계속 변해 정지 트랙이 성립하지 않음
         f = DetectionFilterChain(static_track_min_frames=10, static_track_iou=0.85)

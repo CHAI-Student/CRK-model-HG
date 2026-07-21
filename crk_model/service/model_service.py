@@ -157,6 +157,8 @@ class ModelService:
                 side_roi_max_center_x=self.settings.side_roi_max_center_x,
                 static_track_min_frames=self.settings.static_track_min_frames,
                 static_track_iou=self.settings.static_track_iou,
+                baseline_suppress_mode=self.settings.baseline_suppress_mode,
+                baseline_suppress_iou=self.settings.baseline_suppress_iou,
             ),
             voting_params={
                 "entry_conf_top": self.settings.top_confidence_threshold,
