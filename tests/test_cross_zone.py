@@ -1,18 +1,14 @@
-"""교차존 비전 오염 페널티 (docs/0711_idea.md) — CLOSE 2차 패스.
+"""교차존 비전 오염 페널티 (docs/cross_zone_penalty.md) — CLOSE 2차 패스.
 
 시나리오 (§1): zone1에서 A 취출 → 세션 유지 중 zone2에서 B 취출 → zone1
 연장창 내 A 재취출. zone2 AVI 프리롤/라이브에 A 장면이 섞여 A가 vision
 후보로 진입, B가 A로 오판 → CLOSE에서 soft 페널티로 보정.
 """
 import pytest
+from conftest import cand
 
 from crk_model.core.profiles import FREEZER, REFRIGERATOR
-from crk_model.core.types import (
-    JudgmentResult,
-    JudgmentStatus,
-    ProductCount,
-    VisionCandidate,
-)
+from crk_model.core.types import JudgmentResult, JudgmentStatus, ProductCount
 from crk_model.ledger import CloseSettler, CrossZonePenaltyConfig, TriggerEvent
 from crk_model.ledger.cross_zone import (
     apply_cross_zone_penalty,
@@ -20,8 +16,6 @@ from crk_model.ledger.cross_zone import (
     sub_event_anchors,
 )
 from crk_model.ledger.journal import event_from_dict, event_to_dict
-
-from conftest import cand
 
 PROFILES = {1: FREEZER, 2: FREEZER}
 CFG = CrossZonePenaltyConfig(enabled=True)
@@ -59,12 +53,13 @@ class TestAnchors:
         assert sub_event_anchors(e) == (5.0,)
 
     def test_window_is_conservative(self, cola):
-        # W(E) = [min−4−0.3, max+4+0.3] (§4.2 ②, trigger_s는 CAMERA 포스트롤
-        # 4.0s와 단일 소스 — CRK-CAMERA 7c8395f)
+        # W(E) = [min−4−1.0, max+4+1.0] (§4.2 ②, trigger_s는 CAMERA 포스트롤
+        # 4.0s와 단일 소스 — CRK-CAMERA 7c8395f. ε=1.0은 0.8s 폴링 전환에
+        # 따른 재산정값)
         e = event("s", 1, 0.0, judged(cola), -100.0, change_ts=(100.0, 102.5))
         lo, hi = contamination_window(e, CFG)
-        assert lo == pytest.approx(95.7)
-        assert hi == pytest.approx(106.8)
+        assert lo == pytest.approx(95.0)
+        assert hi == pytest.approx(107.5)
 
 
 class TestCrossZonePenalty:

@@ -88,7 +88,7 @@ class ModelService:
         )
         self.snapshots = ActiveProductStore()
         self.event_log = EventLog()
-        # 교차존 비전 오염 페널티 (docs/0711_idea.md) — 재판정(④~⑥)에 필요한
+        # 교차존 비전 오염 페널티 (docs/cross_zone_penalty.md) — 재판정(④~⑥)에 필요한
         # allowlist는 세션 스냅샷 provider로 주입한다 (CLOSE 시점 = OPEN이 갱신한
         # 해당 세션의 상품 목록).
         cross_zone = CrossZonePenaltyConfig(

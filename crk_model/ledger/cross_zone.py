@@ -1,4 +1,4 @@
-"""교차존 비전 오염 페널티 — CLOSE 2차 패스 (docs/0711_idea.md).
+"""교차존 비전 오염 페널티 — CLOSE 2차 패스 (docs/cross_zone_penalty.md).
 
 문제: zone1 세션 유지 중 zone2 취출이 일어나면 zone2 판별용 AVI의 프리롤
 (4s)·라이브 구간에 zone1 취출 장면이 물리적으로 섞인다 (F3). zone2의
@@ -39,15 +39,15 @@ logger = logging.getLogger(__name__)
 class CrossZonePenaltyConfig:
     """카메라 계약 상수(replay/trigger)는 CRK-CAMERA 설정과 단일 소스 유지 —
     env(MODEL__CROSS_ZONE__*)로 조정한다. α·ε·θ 초기값은 Phase 1 계측으로
-    보정 예정 (docs/0711_idea.md §7)."""
+    보정 예정 (docs/cross_zone_penalty.md §7)."""
 
     enabled: bool = False
     # 카메라 프리롤 (CRK-CAMERA replay_duration=4.0, 120프레임)
     replay_s: float = 4.0
     # change 후 저장 지속 (CRK-CAMERA trigger duration=4.0, 7c8395f)
     trigger_s: float = 4.0
-    # IO-BOARD 감지 지연 마진 (폴링 0.099s + 필터 지연, §3.1)
-    epsilon_s: float = 0.3
+    # IO-BOARD 감지 지연 마진 (§3.1): 폴링 0.8s + serial/SSE 지연 + 여유
+    epsilon_s: float = 1.0
     # soft 페널티 계수 — 오염 후보의 vote_ratio/vote_count/confidence에 곱한다
     alpha: float = 0.5
     # θ: 페널티 소스로 인정할 최소 판정 신뢰도 (미만이면 오판 전파 차단, §4.2 ③)
@@ -260,5 +260,9 @@ def _repass_event(
 
 
 def _same_products(a, b) -> bool:
-    key = lambda j: sorted((pc.product.product_id, pc.count) for pc in j.products)
+    """두 판정의 (product_id, count) 집합이 동일한지 비교 (⑤ 재판정 무변화 판별)."""
+
+    def key(j):
+        return sorted((pc.product.product_id, pc.count) for pc in j.products)
+
     return key(a) == key(b)

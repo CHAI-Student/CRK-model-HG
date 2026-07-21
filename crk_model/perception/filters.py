@@ -69,7 +69,7 @@ class DetectionFilterChain:
         side_roi_max_center_x: float = 240.0,
         hand_history_frames: int = 30,
         hand_margin_px: float = 40.0,
-        static_track_min_frames: int = 30,
+        static_track_min_frames: int = 24,
         static_track_iou: float = 0.85,
     ):
         self._side_max_cx = side_roi_max_center_x

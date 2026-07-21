@@ -1,6 +1,9 @@
-# 0711 아이디어 — 교차존 비전 오염과 cross-zone minus-weight 판정
+# 교차존 비전 오염 페널티 (cross-zone vision penalty)
 
-> 2026-07-11. 기준 구조는 **master** (redesign/v2-cell-model 아님).
+> 정식 문서 승격 (2026-07-21): Phase 3(PENALTY_ENABLED 기본 ON) 승격에 따라
+> 구 `docs/0711_idea.md`를 무날짜 정식 문서로 이관. 내용은 원문 유지.
+>
+> 2026-07-11 작성. 기준 구조는 **master** (redesign/v2-cell-model 아님).
 > 관련 레포: CRK-IO-BOARD, CRK-CAMERA, CRK-model(master), Edge_Environment(freeze).
 > 결론 요약: **통신적·기기적으로 가능. 카메라에 연장 타임스탬프 flag 1건 +
 > 모델에 CLOSE 2차 패스 1건이면 되고, IO-BOARD·Edge는 무변경.**

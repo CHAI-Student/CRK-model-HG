@@ -107,18 +107,18 @@ class Settings:
     # 필터 제거된 사례가 있어 카메라 장착에 맞게 조정 가능해야 한다.
     side_roi_max_center_x: float = 240.0
     # 정지 트랙 억제 (이슈 #10 돌출 진열 상품): 같은 class가 IoU ≥ iou로
-    # min_frames(추론 프레임 기준, ≈1초) 이상 같은 자리에 머물면 투표에서
+    # min_frames(추론 프레임 기준) 이상 같은 자리에 머물면 투표에서
     # 제거. min_frames=0이면 비활성.
-    static_track_min_frames: int = 30
+    static_track_min_frames: int = 24
     static_track_iou: float = 0.85
     # 오염 delta 이중 타깃 재시도 (이슈 #10): |delta − sum(segments)|가 이
     # 값을 넘으면(접촉 하중 오염 서명) delta 타깃 판정 실패 시 세그먼트 합
     # 타깃으로 1회 재판정. 실측 오염 트리거 8~18g / 깨끗한 트리거 0.
     segment_retry_gap_grams: float = 5.0
-    # ---- 교차존 비전 오염 페널티 (docs/0711_idea.md) ----
-    # 단계별 배포: 기본 OFF (Phase 1 — change_timestamps 계측만).
-    # Phase 2는 SHADOW=1로 diff만 수집, Phase 3에서 PENALTY_ENABLED=1로 승격.
-    cross_zone_penalty_enabled: bool = False
+    # ---- 교차존 비전 오염 페널티 (docs/cross_zone_penalty.md) ----
+    # Phase 3 승격 완료 (2026-07-21): 운영 검증(PENALTY_ENABLED=1)을 거쳐
+    # 기본 ON. 비활성화하려면 MODEL__CROSS_ZONE__PENALTY_ENABLED=0.
+    cross_zone_penalty_enabled: bool = True
     # shadow 병행 (L6 ②): primary는 페널티 OFF 유지, 페널티 ON 정산기를
     # shadow로 돌려 diff만 기록. PENALTY_ENABLED=1이면 무의미하므로 무시된다.
     cross_zone_shadow: bool = False
@@ -126,8 +126,10 @@ class Settings:
     # (trigger duration은 0.8s 로드셀 캐던스 대응으로 3.0 -> 4.0, CRK-CAMERA 7c8395f)
     cross_zone_replay_s: float = 4.0
     cross_zone_trigger_s: float = 4.0
-    # IO-BOARD 감지 지연 마진 (ε)
-    cross_zone_epsilon_s: float = 0.3
+    # IO-BOARD 감지 지연 마진 (ε): 폴링 0.8s(지배 항) + serial/SSE ~0.1s + 여유.
+    # 구값 0.3은 0.099s 폴링 + EMA 꼬리 시절 산정. sign-flip relatch(최대 2.4s,
+    # 존 무게 0 교차 시)는 의도적으로 미포함 — 과도한 창 확장 방지.
+    cross_zone_epsilon_s: float = 1.0
     # soft 페널티 계수 (α) / 페널티 소스 최소 신뢰도 (θ) — Phase 1 계측으로 보정
     cross_zone_alpha: float = 0.5
     cross_zone_source_conf_min: float = 0.35
@@ -163,19 +165,19 @@ class Settings:
             vote_conf_floor=_env_float("MODEL__VISION__CONF_FLOOR", 0.0),
             side_roi_max_center_x=_env_float("MODEL__VISION__SIDE_ROI_MAX_CENTER_X", 240.0),
             static_track_min_frames=_env_int(
-                "MODEL__VISION__STATIC_TRACK_MIN_FRAMES", 30
+                "MODEL__VISION__STATIC_TRACK_MIN_FRAMES", 24
             ),
             static_track_iou=_env_float("MODEL__VISION__STATIC_TRACK_IOU", 0.85),
             segment_retry_gap_grams=_env_float(
                 "MODEL__WEIGHT__SEGMENT_RETRY_GAP_GRAMS", 5.0
             ),
             cross_zone_penalty_enabled=_env_bool(
-                "MODEL__CROSS_ZONE__PENALTY_ENABLED", False
+                "MODEL__CROSS_ZONE__PENALTY_ENABLED", True
             ),
             cross_zone_shadow=_env_bool("MODEL__CROSS_ZONE__SHADOW", False),
             cross_zone_replay_s=_env_float("MODEL__CROSS_ZONE__REPLAY_S", 4.0),
             cross_zone_trigger_s=_env_float("MODEL__CROSS_ZONE__TRIGGER_S", 4.0),
-            cross_zone_epsilon_s=_env_float("MODEL__CROSS_ZONE__EPSILON_S", 0.3),
+            cross_zone_epsilon_s=_env_float("MODEL__CROSS_ZONE__EPSILON_S", 1.0),
             cross_zone_alpha=_env_float("MODEL__CROSS_ZONE__ALPHA", 0.5),
             cross_zone_source_conf_min=_env_float(
                 "MODEL__CROSS_ZONE__SOURCE_CONF_MIN", 0.35
