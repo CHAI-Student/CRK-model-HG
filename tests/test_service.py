@@ -426,6 +426,10 @@ class TestFilterChain:
         f.apply("top", [d])
         assert d in f.apply("top", [d])  # shadow: 드랍 없음
         assert f.drop_stats["baseline"]["top"] == 1  # 계수만
+        # 클래스별 세부 계수 — shadow 검증에서 "어떤 클래스가" 억제 대상인지
+        assert f.baseline_drops_by_class["top"] == {27: 1}
+        f.reset_trigger_state()
+        assert f.baseline_drops_by_class["top"] == {}
 
     def test_baseline_registration_stops_after_hand(self):
         # 손 등장 이후 새 위치에 나타난 물체(손이 옮긴 상품 등)는 배경으로

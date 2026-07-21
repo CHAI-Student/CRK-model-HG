@@ -341,6 +341,12 @@ class TriggerPipeline:
             # 투표 진입 컷(entry_conf) 탈락 수 — "후보 0"이 어디서 죽었는지
             # (모델 미검출/필터/진입 컷/결합 임계) 세션 아카이브에서 즉시 구분.
             "filter_drops_by_stage": self._filters.drop_stats,
+            # baseline shadow 검증 (이슈 #14 후속): 억제(예정) 대상의 클래스
+            # 구성 — 진짜 상품 class가 여기 나타나면 active 승격 보류 신호.
+            "baseline_drops_by_class": {
+                cam: dict(by_cls)
+                for cam, by_cls in self._filters.baseline_drops_by_class.items()
+            },
             "entry_dropped_by_camera": dict(voting.entry_dropped),
         }
         return voting.combine()

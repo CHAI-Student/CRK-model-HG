@@ -524,3 +524,5 @@ class TestVisionTuningWiring:
         assert set(summary["filter_drops_by_stage"]) == {
             "side_roi", "baseline", "static_track", "hand_path"
         }
+        # baseline shadow 검증용 클래스별 세부 (이슈 #14 후속)
+        assert set(summary["baseline_drops_by_class"]) == {"top", "side"}

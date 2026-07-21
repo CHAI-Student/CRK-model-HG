@@ -119,6 +119,10 @@ class DetectionFilterChain:
         # 지웠는지 구분 불가했음): 카메라×단계별 제거 카운터. 트리거 시작 시
         # pipeline이 reset_trigger_state()로 초기화하고 종료 시 vote_summary에 싣는다.
         self.drop_stats: dict[str, dict[str, int]] = {}
+        # baseline만 클래스별 세부 계수를 따로 둔다 (shadow 검증용: 억제
+        # 대상이 "어떤 클래스"인지 모르면 진짜 상품 오억제 여부를 판단할 수
+        # 없다). {camera: {class_id: count}} — vote_summary에 그대로 실린다.
+        self.baseline_drops_by_class: dict[str, dict[int, int]] = {}
         self.reset_drop_stats()
 
     def reset_drop_stats(self) -> None:
@@ -128,6 +132,7 @@ class DetectionFilterChain:
             "static_track": {"top": 0, "side": 0},
             "hand_path": {"top": 0, "side": 0},
         }
+        self.baseline_drops_by_class = {"top": {}, "side": {}}
 
     def reset_trigger_state(self) -> None:
         """트리거(영상) 단위 상태 초기화 — pipeline이 트리거 시작마다 호출.
@@ -206,6 +211,8 @@ class DetectionFilterChain:
                 # 계수만 하고 통과시켜 실측 검증 후 active 승격 (이슈 #14)
                 if self._is_baseline(camera, d):
                     self.drop_stats["baseline"][camera] += 1
+                    by_class = self.baseline_drops_by_class.setdefault(camera, {})
+                    by_class[d.class_id] = by_class.get(d.class_id, 0) + 1
                     if self._baseline_mode == "active":
                         continue
                 # Static Track: 정지 진열 상품 억제 — hand_path보다 먼저
