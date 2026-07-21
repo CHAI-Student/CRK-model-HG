@@ -4,4 +4,20 @@ __pycache__/
 *.egg-info/
 .venv/
 reference/
+<<<<<<< HEAD
 .ruff_cache/
+
+
+.env
+.env.*
+!.env.example
+*.local
+
+*.log
+*.log.*
+data/
+logs/
+models
+
+uv.lock
+

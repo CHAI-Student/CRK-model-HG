@@ -115,7 +115,7 @@ for _name in ("__bit_generator_ctor", "__generator_ctor", "__randomstate_ctor"):
 from ultralytics import YOLO
 
 model_path, imgsz = sys.argv[1], int(sys.argv[2])
-YOLO(model_path).export(format="engine", device=0, half=True, imgsz=imgsz)
+YOLO(model_path).export(format="engine", device=0, half=False, imgsz=imgsz)
 PY
 
 if [[ ! -f "${OUTPUT_PATH}" ]]; then
