@@ -23,11 +23,15 @@ def make_samples(plateaus, dt=0.1):
 
 def make_dual(plateaus_ch0, plateaus_ch1, dt=0.1):
     """두 트레이(채널)의 계단형 시계열을 나란히 생성. 총 샘플 수는 동일해야 함."""
-    expand = lambda ps: [v for v, n in ps for _ in range(n)]
+
+    def expand(ps):
+        return [v for v, n in ps for _ in range(n)]
+
     ch0, ch1 = expand(plateaus_ch0), expand(plateaus_ch1)
     assert len(ch0) == len(ch1)
     return [
-        LoadcellSample(k * dt, (a, b)) for k, (a, b) in enumerate(zip(ch0, ch1))
+        LoadcellSample(k * dt, (a, b))
+        for k, (a, b) in enumerate(zip(ch0, ch1, strict=True))
     ]
 
 

@@ -171,8 +171,7 @@ def _read_exact(stream, n: int) -> bytes | None:
     while remaining > 0:
         chunk = stream.read(remaining)
         if not chunk:
-            if chunks:
-                return None  # 잘린 마지막 프레임 — 폐기
+            # EOF: 0바이트든 잘린 마지막 프레임이든 폐기 — "다음 프레임 없음"
             return None
         chunks.append(chunk)
         remaining -= len(chunk)

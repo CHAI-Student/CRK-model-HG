@@ -1,3 +1,4 @@
+"""judgment — 순수 판정 계층: Stage/Strategy 라우터(D3)·무게 조합 매칭."""
 from crk_model.judgment.interfaces import JudgmentContext, Stage, Strategy
 from crk_model.judgment.router import JudgmentRouter, default_pipeline
 from crk_model.judgment.strategies import (
