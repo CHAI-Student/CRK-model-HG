@@ -22,14 +22,19 @@ video/voting_ensemble.py 327-458행 대조):
   conf 0.01 노이즈 투표까지 평균에 섞여 클래스별 weighted가 0.10~0.16에
   머물고, 94~96표를 받은 실제 상품까지 conf_floor(0.4)에서 전멸했다.
   → 원본의 노이즈 방어 지점(카메라별 진입 임계)을 entry_conf_top/side로
-  이식한다. 진입 컷을 쓰면 평균이 진입자 기준으로 계산되어(원본 동형)
-  결합 후 conf_floor는 불필요해진다 — 운영 기본(Settings)은 진입 컷
-  0.70(원본 코드 기본) + conf_floor 0.0(원본 동형)이며, 전부
-  MODEL__VISION__* env로 조정 가능하다 (.env.example 참조).
+  이식한다. 운영 기본(Settings)은 진입 컷 0.70(원본 코드 기본) +
+  conf_floor 0.0(원본 동형)이며, 전부 MODEL__VISION__* env로 조정
+  가능하다 (.env.example 참조).
+- 결합 입력은 카메라별 **최대 conf** (perf-gap 보고서 P1-4, 원본
+  voting_ensemble.py combine()의 top_max_confidence/side_max_confidence
+  동형). 구버전은 진입 통과 표들의 평균을 썼는데, 같은 장면에서 최종
+  confidence가 원본보다 항상 낮게 나와(0.72 한 번 + 0.45 스무 번 → 원본
+  0.72 vs 평균 0.46) 후단 판정의 신뢰도 비교 전반이 열세였다.
 
 weighted_conf:
-  양쪽 검출 — top*top_weight + side*side_weight + min(top,side)*common_class_bonus
-  단일 검출 — conf * (top_only_weight | side_only_weight)
+  양쪽 검출 — max_top*top_weight + max_side*side_weight
+              + min(max_top, max_side)*common_class_bonus
+  단일 검출 — max_conf * (top_only_weight | side_only_weight)
 """
 from __future__ import annotations
 
@@ -96,12 +101,13 @@ class VotingEnsemble:
     def _weighted_confidence(self, top: list[float], side: list[float]) -> float:
         """원본 voting_ensemble.py combine() 427-458행과 동형 산식.
 
-        양쪽 카메라 검출 시 가중 평균 + 동적 보너스, 단일 카메라 검출 시
+        입력은 카메라별 최대 conf (원본 top/side_max_confidence 동형 — P1-4).
+        양쪽 카메라 검출 시 가중 결합 + 동적 보너스, 단일 카메라 검출 시
         전용 top_only/side_only 가중치를 곱한다(원본 top_weight/side_weight를
         그대로 재사용해 한쪽 conf가 반토막나는 것을 막는다).
         """
-        t = sum(top) / len(top) if top else 0.0
-        s = sum(side) / len(side) if side else 0.0
+        t = max(top) if top else 0.0
+        s = max(side) if side else 0.0
         if top and side:
             dynamic_bonus = min(t, s) * self._common_class_bonus
             weighted = t * self._top_weight + s * self._side_weight + dynamic_bonus

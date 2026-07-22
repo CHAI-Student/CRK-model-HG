@@ -20,6 +20,16 @@ def _env_int(key: str, default: int) -> int:
     return int(raw) if raw else default
 
 
+def _env_opt_float(key: str) -> float | None:
+    raw = os.environ.get(key)
+    return float(raw) if raw not in (None, "") else None
+
+
+def _env_opt_int(key: str) -> int | None:
+    raw = os.environ.get(key)
+    return int(raw) if raw not in (None, "") else None
+
+
 def _env_bool(key: str, default: bool) -> bool:
     raw = os.environ.get(key)
     if not raw:
@@ -117,9 +127,11 @@ class Settings:
     # 진입 컷이 노이즈를 이미 거르므로 기본 0.0. 진입 컷을 0으로 낮춰 저신뢰
     # 투표를 보존하고 싶을 때만 안전판으로 올려 쓴다.
     vote_conf_floor: float = 0.0
-    # Side ROI: 존 바깥(오른쪽) 검출 제거 경계 — 실기에서 side 검출 194/195가
-    # 필터 제거된 사례가 있어 카메라 장착에 맞게 조정 가능해야 한다.
-    side_roi_max_center_x: float = 240.0
+    # Side ROI: 존 바깥(오른쪽) 검출 제거 경계 — 카메라 장착에 맞게 조정
+    # 가능해야 한다. 기본 400은 left-crop 480×480 좌표계(P0-1)에서의 원본
+    # 정합값(side_roi_x_max=400). 구값 240은 squash resize 좌표계 산물로,
+    # 실기에서 side 검출 194/195가 제거되던 원인이었다.
+    side_roi_max_center_x: float = 400.0
     # 정지 트랙 억제 (이슈 #10 돌출 진열 상품): 같은 class가 IoU ≥ iou로
     # min_frames(추론 프레임 기준) 이상 같은 자리에 머물면 투표에서
     # 제거. min_frames=0이면 비활성.
@@ -132,6 +144,23 @@ class Settings:
     # shadow 실측으로 진짜 상품 표가 안 깎이는 걸 확인한 뒤 active로 승격.
     baseline_suppress_mode: str = "shadow"
     baseline_suppress_iou: float = 0.5
+    # ---- 판정 I-V 노브 (이슈 #15, FreezerVisionFirst 단계별 임계) ----
+    # single_share: top 득표 대비 이 비율 이상만 단일 정체성 교체 시도 허용
+    # combo_share: 조합 멤버 자격 하한 / refit_share: 유일-적합 구제 자격 하한
+    # near_factor: count_gate × 이 배수까지를 "접촉 오염 마진"으로 간주
+    judgment_single_share: float = 0.5
+    judgment_combo_share: float = 0.3
+    judgment_near_factor: float = 2.0
+    judgment_refit_share: float = 0.1
+    # ---- 조기 종료 (D7) — removal & 비freezer에서만 유효 ----
+    early_termination_enabled: bool = True
+    # ---- 모션 게이트 오버라이드 (None = SensorProfile 기본값 유지) ----
+    # 프로파일 상수(냉장 0.02/8, 냉동 0.005/4)를 기기 전 존에 대해 덮어쓴다.
+    motion_gate_threshold: float | None = None
+    motion_gate_keepalive: int | None = None
+    # ---- 로드셀 안정 판정 (0.8s 캐던스 기준값, 이슈 #14) ----
+    loadcell_stable_window: int = 3
+    loadcell_stability_threshold_grams: float = 2.5
     # 오염 delta 이중 타깃 재시도 (이슈 #10): |delta − sum(segments)|가 이
     # 값을 넘으면(접촉 하중 오염 서명) delta 타깃 판정 실패 시 세그먼트 합
     # 타깃으로 1회 재판정. 실측 오염 트리거 8~18g / 깨끗한 트리거 0.
@@ -184,7 +213,7 @@ class Settings:
             min_vote_count=_env_int("MODEL__VISION__MIN_VOTE_COUNT", 3),
             min_vote_share=_env_float("MODEL__VISION__MIN_VOTE_SHARE", 0.1),
             vote_conf_floor=_env_float("MODEL__VISION__CONF_FLOOR", 0.0),
-            side_roi_max_center_x=_env_float("MODEL__VISION__SIDE_ROI_MAX_CENTER_X", 240.0),
+            side_roi_max_center_x=_env_float("MODEL__VISION__SIDE_ROI_MAX_CENTER_X", 400.0),
             static_track_min_frames=_env_int(
                 "MODEL__VISION__STATIC_TRACK_MIN_FRAMES", 24
             ),
@@ -197,6 +226,19 @@ class Settings:
             ),
             segment_retry_gap_grams=_env_float(
                 "MODEL__WEIGHT__SEGMENT_RETRY_GAP_GRAMS", 5.0
+            ),
+            judgment_single_share=_env_float("MODEL__JUDGMENT__SINGLE_SHARE", 0.5),
+            judgment_combo_share=_env_float("MODEL__JUDGMENT__COMBO_SHARE", 0.3),
+            judgment_near_factor=_env_float("MODEL__JUDGMENT__NEAR_FACTOR", 2.0),
+            judgment_refit_share=_env_float("MODEL__JUDGMENT__REFIT_SHARE", 0.1),
+            early_termination_enabled=_env_bool(
+                "MODEL__VISION__EARLY_TERMINATION", True
+            ),
+            motion_gate_threshold=_env_opt_float("MODEL__VISION__MOTION_GATE_THRESHOLD"),
+            motion_gate_keepalive=_env_opt_int("MODEL__VISION__MOTION_GATE_KEEPALIVE"),
+            loadcell_stable_window=_env_int("MODEL__WEIGHT__STABLE_WINDOW", 3),
+            loadcell_stability_threshold_grams=_env_float(
+                "MODEL__WEIGHT__STABILITY_THRESHOLD_GRAMS", 2.5
             ),
             cross_zone_penalty_enabled=_env_bool(
                 "MODEL__CROSS_ZONE__PENALTY_ENABLED", True

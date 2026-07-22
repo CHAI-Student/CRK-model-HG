@@ -36,7 +36,7 @@ class TestVoting:
         for _ in range(10):
             v.add_frame("top", [Detection(1, 0.7), Detection(1, 0.05)])  # 노이즈 혼입
         (c,) = v.combine()
-        # 진입자(0.7)만 평균에 반영 → weighted = 0.7 * top_only(0.6) = 0.42
+        # 진입자(0.7)만 결합에 반영 → weighted = 0.7 * top_only(0.6) = 0.42
         assert c.confidence == pytest.approx(0.7 * 0.6)
         assert c.vote_count == 10  # 노이즈 투표는 카운트에도 미포함
         assert v.entry_dropped == {"top": 10, "side": 0}  # 진단 카운터
@@ -76,10 +76,10 @@ class TestVoting:
             frame = [Detection(3, 0.55), Detection(3, 0.05)]
             old.add_frame("top", frame)
             new.add_frame("top", frame)
-        assert old.combine() == ()  # 구버전: avg(0.55,0.05)=0.30 ×0.6 < 0.4 → 전멸
+        assert old.combine() == ()  # 구 운영: max 0.55 ×0.6 = 0.33 < floor 0.4 → 전멸
         survivors = new.combine()
         assert [c.class_id for c in survivors] == [3]  # 원본 의미론: 상품 생존
-        assert survivors[0].confidence == pytest.approx(0.55 * 0.6)  # 진입자만 평균
+        assert survivors[0].confidence == pytest.approx(0.55 * 0.6)  # max 결합 (P1-4)
 
     def test_weighted_conf_formula(self):
         # 원본 voting_ensemble.py combine() 427-458행: 양쪽 검출 시
@@ -89,6 +89,19 @@ class TestVoting:
         v.add_frame("side", [Detection(1, 0.6)])
         (c,) = v.combine()
         assert abs(c.confidence - (0.8 * 0.6 + 0.6 * 0.4 + 0.6 * 0.2)) < 1e-9
+
+    def test_weighted_conf_uses_camera_max_not_mean(self):
+        # P1-4 (perf-gap 보고서): 원본 combine()은 카메라별 최대 conf
+        # (top/side_max_confidence)로 결합한다. 구버전의 평균 결합은
+        # 0.72 한 번 + 0.45 스무 번 → 0.46×0.6으로 원본(0.72×0.6)보다
+        # 항상 낮게 나와 후단 신뢰도 비교가 열세였다.
+        v = VotingEnsemble(min_vote_count=1, conf_floor=0.0)
+        v.add_frame("top", [Detection(1, 0.72)])
+        for _ in range(20):
+            v.add_frame("top", [Detection(1, 0.45)])
+        (c,) = v.combine()
+        assert c.confidence == pytest.approx(0.72 * 0.60)
+        assert c.vote_count == 21
 
     def test_hand_detections_not_voted(self):
         v = VotingEnsemble(min_vote_count=1, conf_floor=0.0)

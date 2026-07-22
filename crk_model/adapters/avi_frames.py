@@ -1,5 +1,12 @@
 """AVI → FrameBundle 디코드 어댑터 (원본 frame_extractor 대응).
 
+- 기하 계약 (perf-gap 보고서 P0-1): 640×480 소스에서 **left-crop 480×480**.
+  원본은 yolo_wrapper._preprocess_image의 crop_policy="left"로 오른쪽 160px
+  (존 바깥 영역)를 버리고 비율을 보존한다 — 엔진(.engine)이 이 기하에서
+  학습·운영돼 왔으므로 squash resize(비등방 축소)는 conf 하락과 bbox 좌표계
+  왜곡(ROI/hand_margin 상수 어긋남)을 낳는다. 크롭 후 크기가 부족한 소형
+  소스(테스트 픽스처 등)만 리사이즈로 보정한다 (운영 640×480에서는 무손실
+  크롭만 발생).
 - 디코드는 워커 스레드에서 lazy로 일어난다 (LazyAviFrames): /trigger 응답은
   202 의미론대로 즉시 반환되고, 무거운 작업은 단일 워커(I7)가 순차 수행.
 - 스트리밍: 480×480×3 bytes 프레임 ~400장을 리스트로 상주시키면 카메라당
@@ -101,7 +108,14 @@ def _decode_avi_opencv(
             ok, img = cap.read()
             if not ok:
                 break
-            full = cv2.resize(img, (size, size))
+            # left-crop 우선 (모듈 docstring 기하 계약): 640×480 → 480×480.
+            # 크롭 후에도 목표에 못 미치는 소형 소스만 리사이즈 보정.
+            h, w = img.shape[:2]
+            if w > size or h > size:
+                img = img[:size, :size]
+            if img.shape[0] != size or img.shape[1] != size:
+                img = cv2.resize(img, (size, size))
+            full = img
             gray = cv2.cvtColor(full, cv2.COLOR_BGR2GRAY)
             yield FrameBundle(full=full, gate_view=cv2.resize(gray, (gate_size, gate_size)))
     finally:
@@ -117,16 +131,23 @@ def _decode_avi_ffmpeg(
     cmd = ["ffmpeg"]
     if _ffmpeg_hwaccel_available():  # cuda 미지원 호스트에서 강제 지정 시 open 실패 방지
         cmd.extend(["-hwaccel", "cuda"])
+    # left-crop 우선 (모듈 docstring 기하 계약): min(iw,size) 크롭 후 scale은
+    # 640×480 운영 소스에서 1:1 통과(no-op), 소형 소스에서만 확대 보정.
+    # ffmpeg 필터 표현식 내 콤마는 인자 구분자와 겹치므로 \, 로 이스케이프.
+    vf = (
+        f"crop=min(iw\\,{size}):min(ih\\,{size}):0:0,"
+        f"scale={size}:{size}"
+    )
     cmd.extend(
         [
             "-i",
             path,
+            "-vf",
+            vf,
             "-f",
             "rawvideo",
             "-pix_fmt",
             "bgr24",
-            "-s",
-            f"{size}x{size}",
             "-v",
             "error",
             "-",

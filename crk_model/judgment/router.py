@@ -34,8 +34,13 @@ from crk_model.judgment.strategies import (
 PipelineEntry = Stage | Strategy
 
 
-def default_pipeline() -> list[PipelineEntry]:
+def default_pipeline(
+    freezer_strategy: FreezerVisionFirstStrategy | None = None,
+) -> list[PipelineEntry]:
     """다이어그램 5 순서 보존 — "누적 + 특이도 우선" (QA Q2).
+
+    freezer_strategy: I-V 노브(single/combo/refit_share, near_factor)를
+    env(MODEL__JUDGMENT__*)로 튜닝한 인스턴스 주입점 — None이면 기본값.
 
     | 순위   | 전략 (name)                     | 다이어그램 5 대응                          |
     | ------ | -------------------------------- | ------------------------------------------ |
@@ -78,7 +83,7 @@ def default_pipeline() -> list[PipelineEntry]:
     """
     return [
         VisionOnlyStrategy(),                                  # 0
-        FreezerVisionFirstStrategy(),                          # 1 — 센서 물리 (필연적 순서)
+        freezer_strategy or FreezerVisionFirstStrategy(),      # 1 — 센서 물리 (필연적 순서)
         AugmentStageWeightGateStage(),                         # 2 — Stage (입력 변환기)
         SegmentWeightMatchingStrategy(),                       # 3 — 시계열 정보 보존 (필연적 순서)
         StageCountCombinationStrategy(require_no_vision=True), # 3.5 — 후보없음 체인 SC1

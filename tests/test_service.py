@@ -38,8 +38,9 @@ class FakeDetector:
             Detection(1, 0.8, bbox=(50.0, 50.0, 100.0, 100.0))
         ]
 
-    def detect(self, frame):
+    def detect(self, frame, allowed_class_ids=None):
         self.calls += 1
+        self.last_allowed = allowed_class_ids
         if self.error:
             raise self.error
         return list(self._detections)
@@ -260,6 +261,56 @@ class TestEndToEnd:
         done = svc.handle_multi_zone({"state": "CLOSE"})
         assert done["status"] == "success"
         assert done["totalPrice"] == 1500
+
+
+class TestAllowedClassIds:
+    """P0-2 (perf-gap 보고서): 판매중 상품 class 허용목록의 카메라별 전달."""
+
+    class RecordingDetector(FakeDetector):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.allowed_seen = []
+
+        def detect(self, frame, allowed_class_ids=None):
+            self.allowed_seen.append(tuple(allowed_class_ids or ()))
+            return super().detect(frame, allowed_class_ids)
+
+    def test_top_gets_products_plus_hand_side_products_only(self, cola):
+        # 원본 _inference_allowed_class_ids 동형: top = 상품 + hand(0),
+        # side = 상품만 (side는 hand를 추론하지 않는다).
+        detector = self.RecordingDetector()
+        store = ActiveProductStore()
+        store.update([cola])
+        pipe = TriggerPipeline(detector, {1: REFRIGERATOR}, store)
+        pipe.process(
+            "s1",
+            TriggerRequest(
+                1,
+                {"top": moving_frames(4), "side": moving_frames(4)},
+                samples(500, 400),
+                1.0,
+            ),
+        )
+        assert (1, 0) in detector.allowed_seen  # top: 콜라 + hand
+        assert (1,) in detector.allowed_seen  # side: 상품만
+        assert all(s in ((1, 0), (1,)) for s in detector.allowed_seen)
+
+    def test_unmapped_sentinel_excluded_from_allowlist(self, cola):
+        # 미매핑 상품(class_id=-1 센티널, issue #6)은 허용목록에서 제외 —
+        # -1이 predict classes로 흘러가면 안 된다.
+        unmapped = ActiveProduct(
+            "P099", "미매핑", class_id=-1, unit_weight=333.0, unit_price=2000, stock_qty=3
+        )
+        detector = self.RecordingDetector()
+        store = ActiveProductStore()
+        store.update([cola, unmapped])
+        pipe = TriggerPipeline(detector, {1: REFRIGERATOR}, store)
+        pipe.process(
+            "s1",
+            TriggerRequest(1, {"top": moving_frames(4)}, samples(500, 400), 1.0),
+        )
+        assert detector.allowed_seen  # 추론은 일어났고
+        assert all(-1 not in s for s in detector.allowed_seen)
 
 
 class TestGuards:

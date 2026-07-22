@@ -46,8 +46,9 @@ class FakeDetector:
             Detection(1, 0.8, bbox=(50.0, 50.0, 100.0, 100.0))
         ]
 
-    def detect(self, frame):
+    def detect(self, frame, allowed_class_ids=None):
         self.calls += 1
+        self.last_allowed = allowed_class_ids
         if self.error:
             raise self.error
         return list(self._detections)
@@ -483,6 +484,43 @@ class TestVisionTuningWiring:
         assert s.side_roi_max_center_x == 480
         assert s.baseline_suppress_mode == "active"
         assert s.baseline_suppress_iou == 0.6
+
+    def test_from_env_reads_judgment_and_gate_tuning(self, monkeypatch):
+        monkeypatch.setenv("MODEL__JUDGMENT__SINGLE_SHARE", "0.4")
+        monkeypatch.setenv("MODEL__JUDGMENT__NEAR_FACTOR", "1.5")
+        monkeypatch.setenv("MODEL__JUDGMENT__REFIT_SHARE", "0.2")
+        monkeypatch.setenv("MODEL__VISION__EARLY_TERMINATION", "0")
+        monkeypatch.setenv("MODEL__VISION__MOTION_GATE_THRESHOLD", "0.03")
+        monkeypatch.setenv("MODEL__VISION__MOTION_GATE_KEEPALIVE", "12")
+        monkeypatch.setenv("MODEL__WEIGHT__STABLE_WINDOW", "4")
+        s = Settings.from_env()
+        assert s.judgment_single_share == 0.4
+        assert s.judgment_near_factor == 1.5
+        assert s.judgment_refit_share == 0.2
+        assert s.early_termination_enabled is False
+        assert s.motion_gate_threshold == 0.03
+        assert s.motion_gate_keepalive == 12
+        assert s.loadcell_stable_window == 4
+        # 미설정 시 None → 프로파일 기본 유지
+        monkeypatch.delenv("MODEL__VISION__MOTION_GATE_THRESHOLD")
+        assert Settings.from_env().motion_gate_threshold is None
+
+    def test_motion_gate_override_reaches_profiles(self):
+        from crk_model.service.model_service import (
+            _default_profile_from_settings,
+            _profiles_from_settings,
+        )
+
+        s = Settings(cabinet_type="freezer", freezer_zones=(2,),
+                     motion_gate_threshold=0.01, motion_gate_keepalive=6)
+        default = _default_profile_from_settings(s)
+        assert default.motion_gate_threshold == 0.01
+        assert default.motion_gate_keepalive == 6
+        assert default.early_termination_allowed is False  # 나머지 필드 보존
+        assert _profiles_from_settings(s)[2].motion_gate_threshold == 0.01
+        # 오버라이드 없으면 프로파일 상수 그대로
+        plain = _default_profile_from_settings(Settings(cabinet_type="freezer"))
+        assert plain.motion_gate_threshold == 0.005
 
     def test_from_env_rejects_invalid_baseline_mode(self, monkeypatch):
         monkeypatch.setenv("MODEL__VISION__BASELINE_SUPPRESS_MODE", "on")

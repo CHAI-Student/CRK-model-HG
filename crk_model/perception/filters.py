@@ -1,7 +1,9 @@
 """검출 필터 체인 — 파이프라인 stage ④ (다이어그램 3).
 
 원본 대응: Motion(BboxTracker) / Hand Path / Side ROI / conf 필터 중
-- Side ROI: side 카메라는 center_x < 240만 유효 (현행 상수 보존)
+- Side ROI: side 카메라는 center_x < 400만 유효 — left-crop 480×480
+  좌표계(P0-1)에서의 원본 정합값(side_roi_x_max=400). 구값 240은 squash
+  resize 좌표계 산물로 side 검출을 과잉 제거했다.
 - Hand Path: 최근 손 bbox 궤적과 교차하지 않는 제품 검출 제거 (근사 구현)
 - Static Track: 같은 자리에 정지 상태로 계속 잡히는 검출 제거 (이슈 #10 —
   전시 영역 밖으로 돌출된 진열 상품이 프리롤부터 전 프레임에 잡혀 최상위
@@ -74,7 +76,7 @@ class DetectionFilterChain:
     def __init__(
         self,
         *,
-        side_roi_max_center_x: float = 240.0,
+        side_roi_max_center_x: float = 400.0,
         hand_history_frames: int = 30,
         hand_margin_px: float = 40.0,
         static_track_min_frames: int = 24,

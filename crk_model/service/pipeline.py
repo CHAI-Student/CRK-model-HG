@@ -32,7 +32,7 @@ from crk_model.ingest.loadcell import (
 from crk_model.judgment.interfaces import JudgmentContext
 from crk_model.judgment.router import JudgmentRouter
 from crk_model.ledger.events import TriggerEvent
-from crk_model.perception.detector import Detector
+from crk_model.perception.detector import HAND_CLASS_ID, Detector
 from crk_model.perception.early_termination import EarlyTerminator
 from crk_model.perception.filters import DetectionFilterChain
 from crk_model.perception.voting import VotingEnsemble
@@ -306,6 +306,17 @@ class TriggerPipeline:
         terminator = EarlyTerminator(profile, enabled=self._et_enabled)
         stopped = False
         filtered_out: dict[str, int] = {}  # 진단(work item 3): 카메라별 필터 제거 개수
+        # P0-2 (원본 _inference_allowed_class_ids 동형): 판매중 상품의 매핑된
+        # class만 추론 허용 — 미매핑 센티널(-1)은 제외. hand는 top에만 포함
+        # (원본은 side에서 hand를 추론하지 않는다 — hand-path 추적은 top 소관).
+        # 매핑된 상품이 0개면 빈 목록 = fail-closed (검출 0, 어댑터 계약).
+        product_ids = sorted({p.class_id for p in snapshot.products if p.class_id >= 0})
+        if not product_ids:
+            trace.reason_codes.append("no_mapped_class_ids")
+        allowed_by_camera: dict[str, tuple[int, ...]] = {
+            "top": tuple(dict.fromkeys((*product_ids, HAND_CLASS_ID))),
+            "side": tuple(product_ids),
+        }
         # 트리거 단위 상태 초기화: 단계별 제거 카운터(issue #6 2차) + 손 궤적·
         # 정지 트랙(이슈 #10 — 이전 영상의 좌표가 다음 영상 필터 기준이 되던 결함)
         self._filters.reset_trigger_state()
@@ -325,7 +336,14 @@ class TriggerPipeline:
                     decision = gate.evaluate(getattr(frame, "gate_view", frame))
                     if not decision.infer:
                         continue
-                    raw = list(self._detector.detect(getattr(frame, "full", frame)))
+                    raw = list(
+                        self._detector.detect(
+                            getattr(frame, "full", frame),
+                            allowed_class_ids=allowed_by_camera.get(
+                                camera, tuple(product_ids)
+                            ),
+                        )
+                    )
                     detections = self._filters.apply(camera, raw)
                     camera_filtered_out += len(raw) - len(detections)
                     trace.yolo_calls += 1

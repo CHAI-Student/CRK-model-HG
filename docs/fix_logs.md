@@ -532,3 +532,62 @@
 - 테스트: `python -m pytest -q` → 188 passed. E2E 스모크: 워터마크 CLOSE →
   awaiting_triggers 보류 → 0.66s 후 트리거 도착 → 유예 없이 즉시 3,700원 확정.
   Node 측 구현은 Edge_Environment 팀 몫 (README 가이드 참조).
+
+## 2026-07-22 원본 정합 웨이브 1 — left-crop·classes·max-conf (perf-gap 보고서 P0-1·P0-2·P1-4)
+
+**배경**: 원본 CRK-model(d104bca)과의 전수 비교(ref/present/model-perf-gap-report.md)에서
+같은 .engine을 쓰는데도 HG 성능이 낮은 구조적 원인 7건이 확정됐다. 이 중
+env 튜닝으로 복구 불가능한 상위 3건을 이식했다.
+
+**P0-1 — 입력 기하: squash resize → left-crop** (`adapters/avi_frames.py`)
+- 구현: opencv 경로는 `img[:size, :size]` 슬라이스 후 부족분만 리사이즈,
+  ffmpeg 경로는 `-s 480x480` 대신 `-vf crop=min(iw\,480):min(ih\,480):0:0,scale=480:480`.
+  운영 640×480 소스에서는 무손실 좌크롭만 발생(스케일은 1:1 통과), 소형
+  테스트 픽스처만 리사이즈 보정.
+- 근거: 원본은 yolo_wrapper `_preprocess_image`의 crop_policy="left"로 오른쪽
+  160px(존 바깥)를 버리고 비율을 보존한다 — 실운영 트레이스
+  `preprocess.crop_box {x1:0, x2:480}` 확인. 엔진이 이 기하에서 운영돼 왔으므로
+  squash(가로 25% 압축)는 conf 하락 + bbox 좌표계 왜곡의 원천이었다.
+- 파생 정렬: `SIDE_ROI_MAX_CENTER_X` 기본 240 → **400** (config·filters·
+  .env.example·README). 240은 squash 좌표계 산물로 side 검출 194/195 제거
+  사건의 원인, 400이 crop 좌표계의 원본 정합값(side_roi_x_max=400).
+  ※ **배포 Jetson의 실제 .env에 SIDE_ROI=480(구 임시 해제값)이 남아 있으면
+  400으로 갱신할 것.**
+
+**P0-2 — predict classes 허용목록** (`perception/detector.py`, `adapters/yolo_detector.py`,
+`service/pipeline.py`)
+- Detector 프로토콜에 `allowed_class_ids` 추가 (None=무제한, 빈 목록=fail-closed
+  즉시 [] — predict 호출 없음). 어댑터는 `predict(classes=...)`로 전달.
+- 파이프라인이 카메라별 목록 구성 (원본 `_inference_allowed_class_ids` 동형):
+  top = 매핑된 판매중 상품 + hand(0), side = 상품만 (원본은 side에서 hand를
+  추론하지 않는다 — side 래치는 absdiff 모션+keepalive로 동작). 미매핑
+  센티널(-1)은 제외, 매핑 0개면 `no_mapped_class_ids` reason code.
+- 근거: conf=0.01 + max_det=20에서 전 클래스 추론 시 노이즈 클래스가 20슬롯을
+  잠식해 저신뢰 실상품(냉동 김서림 0.2~0.4대)을 밀어냈다. 원본은 실운영에서
+  allowed_class_ids 11종으로 제한(트레이스 확인). 부수 효과: 비판매 클래스가
+  min_vote_share의 1위 기준을 오염시키는 경로도 차단.
+- `HAND_CLASS_ID = 0` 상수를 detector.py로 단일화 (시스템 계약 — 상품 매핑이
+  -1 센티널을 쓰는 이유).
+
+**P1-4 — conf 결합: 진입컷 통과 표 평균 → 카메라별 max** (`perception/voting.py`)
+- `_weighted_confidence` 입력을 `mean` → `max`로 변경. 산식(0.6/0.4+bonus 0.2,
+  top_only/side_only)은 기존과 동일 — 입력만 원본
+  (top/side_max_confidence)과 동형이 됐다.
+- 근거: 평균 결합은 같은 장면에서 최종 conf가 원본보다 항상 낮게 나온다
+  (0.72 1회+0.45 20회 → 원본 0.72 vs 평균 0.46). conf_floor=0.0 기본에서
+  후보 생존에는 영향 없지만, 후단 판정의 모든 신뢰도 비교(vision_only ×0.7,
+  동일 무게대 최고 conf 채택, freezer 전략 tie-break, 아카이브 기록)가
+  원본 대비 열세였다. issue #6의 "평균 희석 전멸"과 같은 뿌리의 잔재.
+
+**검증**: `.venv/bin/python -m pytest tests/ -q` → **239 passed, 3 failed**
+(실패 3건은 기존과 동일한 macOS ffmpeg 바이너리 파손 — dyld x265 dylib 누락,
+코드 무관). `ruff check .` clean. 신규 테스트: 카메라별 allowlist 전달 2건
+(test_service.TestAllowedClassIds), max 결합 1건
+(test_perception.test_weighted_conf_uses_camera_max_not_mean).
+실기 검증 항목: ① left-crop 후 side ROI 400 실측 재확인(vote_summary
+filter_drops_by_stage.side_roi), ② classes 제한 후 후보 분포 변화
+(entry_dropped/debug_summary), ③ Jetson 배포 .env의 SIDE_ROI 구값(480/240) 정리.
+
+**미이식 잔여 (보고서 P0-3, P1-5~7)**: 감마/콘트라스트 전처리, top ROI·냉동
+수직 ROI, rescue 경로(threshold/roi/no-motion), freezer 전용 vote 하한,
+hand conf floor — perf-gap 보고서 §10 참조.

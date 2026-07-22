@@ -17,6 +17,7 @@ import threading
 import time
 from collections import deque
 from collections.abc import Callable, Mapping
+from dataclasses import replace
 
 from crk_model.core.config import Settings
 from crk_model.core.profiles import FREEZER, REFRIGERATOR, SensorProfile
@@ -27,6 +28,9 @@ from crk_model.gateway.state_machine import (
     build_payment_payload,
 )
 from crk_model.ingest.idempotency import IdempotencyRegistry
+from crk_model.ingest.loadcell import LoadcellAnalyzer
+from crk_model.judgment.router import JudgmentRouter, default_pipeline
+from crk_model.judgment.strategies import FreezerVisionFirstStrategy
 from crk_model.ledger.archive import SessionArchive
 from crk_model.ledger.cross_zone import CrossZonePenaltyConfig
 from crk_model.ledger.events import EventLog
@@ -43,13 +47,29 @@ logger = logging.getLogger(__name__)
 ops_logger = logging.getLogger("crk_model.ops")
 
 
+def _apply_gate_overrides(profile: SensorProfile, settings: Settings) -> SensorProfile:
+    """모션 게이트 env 오버라이드 (MODEL__VISION__MOTION_GATE_*).
+
+    프로파일 상수(냉장 0.02/8, 냉동 0.005/4)는 코드 기본값으로 유지하되,
+    현장에서 게이트 스킵률을 코드 수정 없이 조정할 수 있게 env가 있으면
+    기기 전 존의 프로파일에 덮어쓴다 — 이전에는 env 경로가 없어 "조정해도
+    안 먹히는" 유령 노브였다."""
+    kw = {}
+    if settings.motion_gate_threshold is not None:
+        kw["motion_gate_threshold"] = settings.motion_gate_threshold
+    if settings.motion_gate_keepalive is not None:
+        kw["motion_gate_keepalive"] = settings.motion_gate_keepalive
+    return replace(profile, **kw) if kw else profile
+
+
 def _default_profile_from_settings(settings: Settings) -> SensorProfile:
     """MODEL__MACHINE__CABINET_TYPE 이식 — 기기 단위 기본 프로파일.
 
     존 미지정(zone이 freezer_zones/profiles dict에 없음) 시에도 냉동 기기는
     기본으로 FREEZER가 적용돼야 한다 (이슈 #6 공동 원인: cabinet_type 미이식으로
     미설정 시 전 존이 REFRIGERATOR ±3g로 판정됨)."""
-    return FREEZER if settings.cabinet_type == "freezer" else REFRIGERATOR
+    base = FREEZER if settings.cabinet_type == "freezer" else REFRIGERATOR
+    return _apply_gate_overrides(base, settings)
 
 
 def _profiles_from_settings(settings: Settings) -> dict[int, SensorProfile]:
@@ -57,7 +77,7 @@ def _profiles_from_settings(settings: Settings) -> dict[int, SensorProfile]:
     # 동작한다 — 예: refrigerated 기기에서 특정 존만 FREEZER로 지정.
     profiles: dict[int, SensorProfile] = {}
     for zone in settings.freezer_zones:
-        profiles[zone] = FREEZER
+        profiles[zone] = _apply_gate_overrides(FREEZER, settings)
     return profiles
 
 
@@ -151,6 +171,24 @@ class ModelService:
         )
         self.pipeline = TriggerPipeline(
             detector, self._profiles, self.snapshots, default_profile=self._default_profile,
+            # I-V 판정 노브 (MODEL__JUDGMENT__*, 이슈 #15) — env로 주입된
+            # FreezerVisionFirst 임계를 라우터에 배선.
+            router=JudgmentRouter(default_pipeline(
+                freezer_strategy=FreezerVisionFirstStrategy(
+                    single_share=self.settings.judgment_single_share,
+                    combo_share=self.settings.judgment_combo_share,
+                    near_factor=self.settings.judgment_near_factor,
+                    refit_share=self.settings.judgment_refit_share,
+                ),
+            )),
+            early_termination_enabled=self.settings.early_termination_enabled,
+            # 로드셀 안정 판정 (MODEL__WEIGHT__STABLE_WINDOW 등, 이슈 #14):
+            # post-roll 샘플 수와 함께 최종 plateau 성립 조건을 결정한다.
+            analyzer_factory=lambda profile: LoadcellAnalyzer(
+                profile,
+                stable_window=self.settings.loadcell_stable_window,
+                stability_threshold_grams=self.settings.loadcell_stability_threshold_grams,
+            ),
             # 비전 튜닝 (MODEL__VISION__*, issue #6 2차): 진입 컷·투표 임계는
             # 현장 카메라/조명에 따라 env로 조정한다 (.env.example 참조).
             filters=DetectionFilterChain(

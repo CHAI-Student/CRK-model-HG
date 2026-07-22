@@ -56,8 +56,9 @@ class FakeDetector:
             ]
         )
 
-    def detect(self, frame):
+    def detect(self, frame, allowed_class_ids=None):
         self.calls += 1
+        self.last_allowed = allowed_class_ids
         if self.error:
             raise self.error
         return list(self._detections)
