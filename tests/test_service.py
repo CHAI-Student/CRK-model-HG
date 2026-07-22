@@ -5,7 +5,7 @@ from dataclasses import asdict
 import pytest
 
 from crk_model.core.config import Settings
-from crk_model.core.profiles import REFRIGERATOR
+from crk_model.core.profiles import FREEZER, REFRIGERATOR
 from crk_model.core.types import ActiveProduct, JudgmentStatus
 from crk_model.ingest.loadcell import LoadcellAnalyzer, LoadcellSample
 from crk_model.ledger.journal import EventJournal
@@ -138,6 +138,51 @@ class TestMultiTrayEvents:
         close = svc.handle_multi_zone({"session_id": "s1", "state": "CLOSE"})
         assert close["status"] == "success"
         assert close["totalPrice"] == 1500 * 2
+
+    def test_issue16_vote_dominated_second_tray_recovered(self):
+        # 이슈 #16 재현: 냉동, 동시 2트레이 취출 — ch0 베이글(155g, 다득표)
+        # ch1 135g 상품(소득표, share 게이트 미달). 1차 판정에서 ch1이
+        # 베이글 near-gate PARTIAL로 오염되지만, 2-pass 소진 재판정이
+        # 베이글을 풀에서 빼고 진짜 상품을 COMPLETE로 복구해야 한다.
+        bagel = ActiveProduct(
+            "P27", "베이글", class_id=27, unit_weight=155.0, unit_price=2800, stock_qty=5
+        )
+        hotdog = ActiveProduct(
+            "P40", "핫도그", class_id=40, unit_weight=135.0, unit_price=3000, stock_qty=5
+        )
+
+        class ImbalancedDetector(FakeDetector):
+            """베이글은 매 프레임, 핫도그는 5프레임에 1번만 (12/62 사고 재현)."""
+
+            def detect(self, frame, allowed_class_ids=None):
+                self.calls += 1
+                dets = [Detection(27, 0.7, bbox=(50.0, 50.0, 100.0, 100.0))]
+                if self.calls % 5 == 0:
+                    dets.append(Detection(40, 0.95, bbox=(150.0, 50.0, 200.0, 100.0)))
+                return dets
+
+        detector = ImbalancedDetector()
+        store = ActiveProductStore()
+        store.update([bagel, hotdog])
+        pipe = TriggerPipeline(detector, {2: FREEZER}, store)
+        outcome = pipe.process(
+            "s1",
+            TriggerRequest(
+                2,
+                {"top": moving_frames(20)},
+                dual_tray_samples((500, 345), (420, 285)),  # ch0 −155 / ch1 −135
+                1.0,
+            ),
+        )
+        j = outcome.event.judgment
+        assert j.status is JudgmentStatus.COMPLETE
+        billed = {pc.product.class_id: pc.count for pc in j.products}
+        assert billed == {27: 1, 40: 1}  # 한쪽만 잡히던 사고의 반대 증명
+        assert "+pool_exhaustion" in j.reason
+        assert any(
+            rc.startswith("multi_tray_pool_exhaustion_retry")
+            for rc in outcome.trace.reason_codes
+        )
 
     def test_single_tray_event_keeps_legacy_path(self, cola, bar170):
         # 이벤트 1개면 기존 단일 판정 경로 그대로 (multi_tray 미발동)

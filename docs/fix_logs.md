@@ -591,3 +591,40 @@ filter_drops_by_stage.side_roi), ② classes 제한 후 후보 분포 변화
 **미이식 잔여 (보고서 P0-3, P1-5~7)**: 감마/콘트라스트 전처리, top ROI·냉동
 수직 ROI, rescue 경로(threshold/roi/no-motion), freezer 전용 vote 하한,
 hand conf floor — perf-gap 보고서 §10 참조.
+
+## 2026-07-22 동시 다중 트레이 취출에서 한쪽 트레이 상품 미과금 (GitHub issue #16)
+
+- **증상**: 냉동 zone 2에서 loadcell[2](155g 베이글)·loadcell[3](135g 상품)
+  동시 각 1개 취출 → 베이글 1개만 과금(2,800원), 135g 상품 무성 소멸.
+  세션은 `freezer_close_gate_failed:keep_incremental`로 확정.
+- **원인 체인** (P0 배포본 트레이스로 확정 — 로드셀 분해는 정상,
+  `multi_tray_events:2`, 세그먼트 −155/−135):
+  ① 동시 취출은 영상(투표 풀)이 하나 — 베이글 62표 vs 135g 상품 12표
+  (conf 1.0)로 표가 나뉨. ② ch1(−135) 판정에서 `FreezerVisionFirstStrategy`
+  ①단계의 single_share(0.5) 게이트가 12표(19%) 후보를 배제, 득표 1위
+  베이글(잔차 20g)은 게이트(15g) 실패. ③ ②단계 near-gate(잔차≤30g)가
+  "오염 가정, top 정체성 보존 PARTIAL"로 **조기 반환** — ④ unique-refit
+  (12표 ≥ refit 하한 6.2표, 잔차 0으로 적합)에 도달 불가. ④ `_judge_tray_events`
+  병합은 COMPLETE만 합산 → PARTIAL인 ch1 상품 탈락. ⑤ CLOSE 냉동 재solve는
+  다품종 net 재solve 금지(178g 원칙)라 복구 불가.
+  근본: single_share/near-gate는 단일 상품 트리거 기준 보정값인데, 동시
+  다중 트레이에서는 표 분할로 전제가 깨진다.
+- **수정**: `pipeline._pool_exhaustion_retry` 신설 (2-pass 소진 재판정).
+  1차 판정 후 형제 이벤트가 COMPLETE로 소진한 정체성을 PARTIAL/NO_DETECTION
+  이벤트의 후보 풀에서 제거하고 라우터를 1회 재실행 — ch1은 top이 진짜
+  상품이 되어 ①단계 COMPLETE로 복구된다. 채택은 COMPLETE로 개선될 때만
+  (악화 금지), ERROR 이벤트 제외(I1), YOLO 재실행 없음(zero-GPU).
+  I-V 유지: 무게로 정체성을 고르는 게 아니라 이미 설명된 정체성을 제거하고
+  남은 득표 순위에 다시 맡긴다. 관측성: reason 접미사 `+pool_exhaustion` +
+  trace `multi_tray_pool_exhaustion_retry:ch{N}`.
+- **한계 (기록)**: 같은 상품이 두 트레이에 있고 한쪽 delta가 오염된 경우
+  제거 후 무게 우연 적합이 오과금할 수 있음 — 기존 동작은 그 경우에도
+  미과금(매출 누락)이었고, 재판정 흔적이 아카이브에 남아 사후 식별 가능.
+- **부수 경고**: 이 트레이스의 `baseline_drops_by_class`(shadow)는 side
+  class 40의 표 12/12 전부를 "드랍했을" 대상으로 계수 — baseline을 active로
+  승격하면 이 이슈가 악화된다. 승격 보류 신호.
+- **검증**: 회귀 테스트
+  `test_service.py::TestMultiTrayEvents::test_issue16_vote_dominated_second_tray_recovered`
+  (득표 20:4 불균형 + −155/−135 동시 이벤트 → 두 상품 모두 ×1 COMPLETE).
+  전체 `pytest -q` → 240 passed, 3 failed(기존 macOS ffmpeg 환경 문제).
+  `ruff check .` clean.

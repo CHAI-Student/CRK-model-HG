@@ -222,7 +222,8 @@ class TriggerPipeline:
         금지한 자유 조합 탐색과 달리 분해 근거가 물리(트레이)라 안전하다.
         비전 후보 풀은 공유(영상 1개, YOLO 재실행 없음) — 각 이벤트가 자기
         무게로 풀에서 자기 상품을 고른다 (_segment_target_retry와 같은
-        zero-GPU 재판정 패턴).
+        zero-GPU 재판정 패턴). 1차 판정 후 형제 이벤트가 소진한 정체성을
+        빼고 미확정 이벤트를 1회 재판정한다 (_pool_exhaustion_retry, 이슈 #16).
         """
         trace.reason_codes.append(f"multi_tray_events:{len(analysis.events)}")
         results: list[tuple[ChannelWeightEvent, JudgmentResult]] = []
@@ -231,6 +232,7 @@ class TriggerPipeline:
             j = self._router.judge(ectx)
             j = self._segment_target_retry(ectx, j, ev, trace)
             results.append((ev, j))
+        results = self._pool_exhaustion_retry(ctx, results, trace)
 
         complete = [
             (ev, j) for ev, j in results
@@ -265,6 +267,68 @@ class TriggerPipeline:
             reason=f"multi_tray[{reasons}]",
             strategy=f"multi_tray[{strategies}]",
         )
+
+    def _pool_exhaustion_retry(
+        self,
+        ctx: JudgmentContext,
+        results: list[tuple[ChannelWeightEvent, JudgmentResult]],
+        trace: TriggerTrace,
+    ) -> list[tuple[ChannelWeightEvent, JudgmentResult]]:
+        """2-pass 소진 재판정 (이슈 #16): 형제 트레이가 COMPLETE로 소진한
+        정체성을 미확정 이벤트의 후보 풀에서 빼고 1회 재판정한다.
+
+        동시 다중 트레이 취출은 영상(투표 풀)이 하나라 트레이별 상품이 표를
+        나눠 갖는다 — ch0 상품이 득표 1위면 ch1 판정에서 single_share 게이트가
+        진짜 상품(2위권)을 배제하고, near-gate가 1위 정체성을 PARTIAL로 보존한
+        채 조기 반환해 ch1 상품이 무성 소멸한다 (실사고 #16: 155g 베이글
+        62표가 −135g 이벤트를 near-gate로 가로채 135g 상품 12표/conf 1.0이
+        미과금 — CLOSE 냉동 재solve도 다품종 금지라 복구 불가).
+
+        무게로 정체성을 고르는 게 아니다(I-V 유지) — 이미 설명된 정체성을
+        제거하고 남은 득표 순위에 다시 맡길 뿐. 채택은 COMPLETE로 개선될
+        때만 (악화 금지, I3 태도). ERROR 이벤트는 재판정하지 않는다 (I1).
+
+        한계 (기록): 같은 상품이 두 트레이에 있고 한쪽 delta가 오염된 경우,
+        제거 후 남은 후보의 무게 우연 적합이 오과금할 수 있다. 그 경우 기존
+        동작(near-gate PARTIAL 미과금)은 매출 누락이었고, 재판정 흔적이
+        reason 접미사(+pool_exhaustion)와 trace로 아카이브에 남아 사후 식별
+        가능하다 — 미과금 확정보다 관측 가능한 과금 시도를 택한다."""
+        consumed = {
+            pc.product.class_id
+            for _, j in results
+            if j.status is JudgmentStatus.COMPLETE
+            for pc in j.products
+        }
+        if not consumed:
+            return results
+        out: list[tuple[ChannelWeightEvent, JudgmentResult]] = []
+        for ev, j in results:
+            if j.status not in (JudgmentStatus.PARTIAL, JudgmentStatus.NO_DETECTION):
+                out.append((ev, j))
+                continue
+            remaining = tuple(
+                c for c in ctx.vision_candidates if c.class_id not in consumed
+            )
+            if not remaining or len(remaining) == len(ctx.vision_candidates):
+                out.append((ev, j))  # 풀 변화 없음(소진 정체성 미포함) 또는 전멸
+                continue
+            trace.reason_codes.append(f"multi_tray_pool_exhaustion_retry:ch{ev.channel}")
+            rectx = replace(
+                ctx,
+                delta_weight=ev.delta_grams,
+                segments=ev.segments,
+                vision_candidates=remaining,
+            )
+            rj = self._router.judge(rectx)
+            rj = self._segment_target_retry(rectx, rj, ev, trace)
+            if rj.status is JudgmentStatus.COMPLETE and rj.products:
+                rj = replace(
+                    rj, reason=(rj.reason or rj.status.value) + "+pool_exhaustion"
+                )
+                out.append((ev, rj))
+            else:
+                out.append((ev, j))  # 악화 금지 — 원 판정 유지
+        return out
 
     def _segment_target_retry(
         self, ctx: JudgmentContext, judgment: JudgmentResult, analysis, trace: TriggerTrace
