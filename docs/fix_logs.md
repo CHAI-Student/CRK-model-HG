@@ -651,3 +651,40 @@ hand conf floor — perf-gap 보고서 §10 참조.
   reason `freezer_vision_first_unique_refit+pool_exhaustion`.
   전체 241 passed / 3 env-failed, ruff clean. 기존 refit 테스트 2건
   (`test_unique_refit_rescues...`, `test_ambiguous_refit_refused...`) 무변경 통과.
+
+## 2026-07-22 (issue #16 3차) 무게 중재 재설계 + 멀티트레이 PARTIAL 과금 — 설계 3·4 구현
+
+설계 문서: `docs/0722_issue16_arbitration_design.md` (사고 4건 분석·원칙·시뮬레이션).
+원칙: **무게는 거부권만, 복수 적합의 선택은 vision(득표+conf)이 한다** — DB
+unit_weight는 정책상 고정이고 실측과 10~30g 편차가 있으므로(라벨 168g/DB 185g 등)
+무게 산술에 확정권을 주면 우연 적합 오과금이 구조적으로 반복된다.
+
+- **3a n-스케일 게이트** (`strategies.py`, `settler.py`): `gate_n(n) = count_gate
+  + COUNT_UNIT_SLACK×(n−1)` (기본 5g/개). ①·④·냉동 close 재solve·I6(라우터,
+  freezer 한정)에 적용. **③ 조합은 flat 유지** — 우연 적합 공간이 조합적으로
+  크고 #10 filler가 조합형 (구현 중 3종 정답 케이스의 k=2 오적합 회귀로 확정).
+- **3b 선착 폐지 + 중재** (`strategies.py` ①): 자격 후보 전원의 적합 수집 후
+  결정. 복수 적합이면 득표·conf 일치 → 그 후보, conf가 CONF_MARGIN(0.15) 이상
+  우세 → conf 승(reason `…single_arbitrated`), 전역 득표 1위 적합 → 서열 유지,
+  그 외 → 모호로 ② near 폴스루. 실사고 C(베이글 5개 → 만두 4개 오과금:
+  잔차 3g짜리 우연 적합이 잔차 32g짜리 정답을 선착으로 이김) 교정.
+- **3c conf 자격 확장** (`strategies.py` ①): single_share(50%) 미달이어도
+  `conf ≥ CONF_OVERRIDE(0.9) ∧ votes ≥ refit_share(10%)`면 적합 자격.
+  진열 오염이 득표 순위를 왜곡해도 max-conf는 독립 신호 (실사고 D: conf 1.0
+  진짜 상품 19표 vs 진열 만두 63표). conf 0.9는 양 카메라 동시 검출에서만
+  도달 가능한 수준 — 단일 카메라 상한은 0.6.
+- **4 멀티트레이 병합에 고유 정체성 PARTIAL 포함** (`pipeline.py`): 정산기는
+  원래 PARTIAL 상품도 과금하므로(#15 정답 경로) 병합만 COMPLETE 한정인 것은
+  비대칭 — 4초 안에 두 번 집으면 덜 과금됐다(실사고 B). 가드 2중: 형제
+  COMPLETE와 정체성 겹침 제외(표-그림자), PARTIAL 상호 겹침 전부 제외
+  (I13/D9). reason `partial_billed:chN` + trace 코드로 관측.
+- env 3종 신설(`MODEL__JUDGMENT__COUNT_UNIT_SLACK=5.0 / CONF_OVERRIDE=0.9 /
+  CONF_MARGIN=0.15`) — 비활성값(0/2.0/2.0)으로 구 동작 복원 가능 (롤백 스토리,
+  롤백 동형성 테스트 포함).
+- **의도된 동작 변경 1건**: 이슈 #15의 −370g 케이스(176×2, 잔차 18)가
+  near-gate PARTIAL → ① COMPLETE로 격상 (gate_n(2)=20 ≥ 18, 과금 동일).
+  같은 픽스처의 함정(만두 185×2=370 잔차 0)은 자격 양문(share 50%/conf 0.9)
+  으로 여전히 차단 — 테스트 기대값 갱신으로 문서화.
+- 검증: 신규 테스트 7건(중재 C/conf자격 D/모호 폴스루/롤백 동형성/병합 2건/
+  정산 gate_n) + 기대값 갱신 1건(−370 격상) + 전체 `pytest -q` →
+  **248 passed, 3 failed**(기존 macOS ffmpeg 환경 문제), `ruff check .` clean.

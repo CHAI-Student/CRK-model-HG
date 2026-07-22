@@ -519,8 +519,80 @@ class TestIssue15IdentityConsistency:
             [cand(23, 0.86, 65), cand(27, 0.73, 27), cand(13, 0.66, 16)],
             profile=FREEZER,
         ))
-        # 370 vs 176×2=352: 잔차 18 ∈ (gate 15, near 30] → top 정체성·개수
-        # 보존 PARTIAL. 배경 후보(13)로의 무게 갈아타기 금지.
-        assert result.reason == "freezer_vision_first_near_gate"
-        assert result.status is JudgmentStatus.PARTIAL
+        # 370 vs 176×2=352: 잔차 18 ≤ gate_n(2)=20 (설계 3a n-스케일) → 이제
+        # ①에서 COMPLETE로 격상 (구 동작: near-gate PARTIAL — 과금 동일).
+        # 핵심 불변: 만두(185×2=370, 잔차 0!)는 share 25%·conf 0.66으로 자격
+        # 양문(single_share 50% / conf_override 0.9) 모두 미달 — 무게
+        # 갈아타기는 여전히 금지된다.
+        assert result.reason == "freezer_vision_first_single"
+        assert result.status is JudgmentStatus.COMPLETE
         assert [(pc.product.class_id, pc.count) for pc in result.products] == [(23, 2)]
+
+
+class TestIssue16WeightArbitration:
+    """이슈 #16 설계 (docs/0722_issue16_arbitration_design.md): 무게=거부권,
+    선택권=vision(득표+conf). n-스케일 게이트 + ① 선착 폐지 + conf 자격."""
+
+    BAGEL = ActiveProduct("P27", "베이글", class_id=27, unit_weight=155.0,
+                          unit_price=2800, stock_qty=30)
+    DUMPLING = ActiveProduct("P13", "쿠즈락만두", class_id=13, unit_weight=185.0,
+                             unit_price=2100, stock_qty=40)
+    C175 = ActiveProduct("P23", "정답175", class_id=23, unit_weight=175.0,
+                         unit_price=3000, stock_qty=40)
+
+    def test_case_c_vote_top_survives_coincidental_runner_fit(self):
+        # 실사고 (베이글 5개 연속 → 만두 4개 오과금): −743에서 베이글
+        # 5×155=775(잔차 32)는 gate_n(5)=35로 적합, 만두 4×185=740(잔차 3)도
+        # 적합. 구 선착 규칙은 1위(베이글) 실패 후 2위 만두를 확정했다 —
+        # 중재 기준은 잔차가 아니라 vision 증거(득표·conf 모두 베이글 우세).
+        result = JudgmentRouter().judge(ctx(
+            -743.0, [self.BAGEL, self.DUMPLING],
+            [cand(27, 1.0, 34), cand(13, 0.80, 25)],
+            profile=FREEZER,
+        ))
+        assert result.status is JudgmentStatus.COMPLETE  # I6도 gate_n 정합 (35≥32)
+        assert result.reason == "freezer_vision_first_single"
+        assert [(pc.product.class_id, pc.count) for pc in result.products] == [(27, 5)]
+
+    def test_case_d_conf_override_and_margin_arbitration(self):
+        # 실사고 (진열 오염): 진열 만두 63표(conf 0.79)가 득표 1위 + 잔차 10
+        # 적합, 진짜 상품(conf 1.0)은 19표로 single_share(50%) 미달 —
+        # conf_override(0.9)로 자격을 얻고 conf_margin(0.15) 중재로 승리.
+        result = JudgmentRouter().judge(ctx(
+            -175.0, [self.DUMPLING, self.C175],
+            [cand(13, 0.79, 63), cand(23, 1.0, 19)],
+            profile=FREEZER,
+        ))
+        assert result.status is JudgmentStatus.COMPLETE
+        assert result.reason == "freezer_vision_first_single_arbitrated"
+        assert [(pc.product.class_id, pc.count) for pc in result.products] == [(23, 1)]
+
+    def test_ambiguous_fits_without_conf_dominance_fall_through(self):
+        # 전역 top 미적합 + 적합 2개(conf 격차 < margin) → ①은 결정하지 않고
+        # 폴스루, ④도 하드 게이트 2적합 모호 → 9.2가 top 정체성만 PARTIAL 보존.
+        a = ActiveProduct("PA", "A", class_id=5, unit_weight=990.0, unit_price=1000, stock_qty=5)
+        b = ActiveProduct("PB", "B", class_id=6, unit_weight=185.0, unit_price=1000, stock_qty=5)
+        c = ActiveProduct("PC", "C", class_id=7, unit_weight=120.0, unit_price=1000, stock_qty=5)
+        result = JudgmentRouter().judge(ctx(
+            -370.0, [a, b, c],
+            [cand(5, 0.9, 100), cand(6, 0.75, 60), cand(7, 0.8, 55)],
+            profile=FREEZER,
+        ))
+        assert result.strategy == "vision_first_identity_partial"
+        assert result.status is JudgmentStatus.PARTIAL
+        assert [(pc.product.class_id, pc.count) for pc in result.products] == [(5, 1)]
+
+    def test_rollback_knobs_restore_legacy_first_fit(self):
+        # env 롤백 스토리 (설계 §6): slack=0 + override/margin 비활성 →
+        # 구 동작(1위 적합 실패 → 2위 우연 적합 채택)이 재현된다.
+        from crk_model.judgment.strategies import FreezerVisionFirstStrategy
+        legacy = FreezerVisionFirstStrategy(
+            count_unit_slack=0.0, conf_override=2.0, conf_margin=2.0
+        )
+        result = legacy.solve(ctx(
+            -743.0, [self.BAGEL, self.DUMPLING],
+            [cand(27, 1.0, 34), cand(13, 0.80, 25)],
+            profile=FREEZER,
+        ))
+        assert result is not None
+        assert [(pc.product.class_id, pc.count) for pc in result.products] == [(13, 4)]

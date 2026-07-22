@@ -103,10 +103,20 @@ def default_pipeline(
 
 
 class JudgmentRouter:
-    def __init__(self, pipeline: Sequence[PipelineEntry] | None = None):
+    def __init__(
+        self,
+        pipeline: Sequence[PipelineEntry] | None = None,
+        *,
+        count_unit_slack: float = 5.0,
+        # I6 n-스케일 (설계 3a, freezer 한정): FreezerVisionFirst의 gate_n과
+        # 같은 산식을 I6 강등 검사에도 적용 — gate_n으로 적합을 인정해 놓고
+        # I6이 flat tolerance로 강등하면 두 게이트가 모순된다. 냉장
+        # (weight_is_discriminative)은 항상 flat. 0 = 구 동작.
+    ):
         self.pipeline: list[PipelineEntry] = (
             list(pipeline) if pipeline is not None else default_pipeline()
         )
+        self._count_unit_slack = count_unit_slack
         self.telemetry: Counter[str] = Counter()  # 전략별 히트율
         # I8: solve=None인 전략 기록. 24h+ soak에서 무상한 성장 방지 (deque)
         self.miss_log: deque[str] = deque(maxlen=256)
@@ -124,7 +134,14 @@ class JudgmentRouter:
                 continue
             if not ctx.vision_only:  # vision_only는 설명할 delta가 없음
                 result = enforce_full_delta_match(
-                    result, ctx.delta_weight, ctx.profile.tolerance_grams
+                    result,
+                    ctx.delta_weight,
+                    ctx.profile.tolerance_grams,
+                    count_unit_slack=(
+                        0.0
+                        if ctx.profile.weight_is_discriminative
+                        else self._count_unit_slack
+                    ),
                 )
             self.telemetry[entry.name] += 1
             return replace(result, strategy=entry.name)

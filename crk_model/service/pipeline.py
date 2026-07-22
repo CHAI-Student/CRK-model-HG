@@ -238,8 +238,39 @@ class TriggerPipeline:
             (ev, j) for ev, j in results
             if j.status is JudgmentStatus.COMPLETE and j.products
         ]
+        # 설계 4 (issue #16, docs/0722_issue16_arbitration_design.md): 정산기는
+        # 에러가 아닌 모든 판정의 products를 집계하므로(단일 트리거의 near-gate
+        # PARTIAL은 과금된다 — #15 정답 경로), 병합만 COMPLETE 한정이면 두
+        # 취출이 한 영상에 담겼다는 이유로 덜 과금된다. 고유 정체성 PARTIAL은
+        # 과금에 포함한다. 가드 2중: ① 형제 COMPLETE와 정체성이 겹치면 표-그림자
+        # 오염 산물이라 제외, ② PARTIAL끼리 겹쳐도 대칭 오염 가능성이라 전부
+        # 제외 (과청구가 미청구보다 나쁘다, I13/D9).
+        complete_ids = {
+            pc.product.class_id for _, j in complete for pc in j.products
+        }
+        partials = [
+            (ev, j) for ev, j in results
+            if j.status is JudgmentStatus.PARTIAL and j.products
+        ]
+        partial_billable = []
+        for ev, j in partials:
+            ids = {pc.product.class_id for pc in j.products}
+            if ids & complete_ids:
+                continue  # 가드 ①
+            other_ids = {
+                pc.product.class_id
+                for oev, oj in partials
+                if oj is not j
+                for pc in oj.products
+            }
+            if ids & other_ids:
+                continue  # 가드 ②
+            partial_billable.append((ev, j))
+            trace.reason_codes.append(f"partial_billed:ch{ev.channel}")
+        billable = complete + partial_billable
+
         merged: dict[str, ProductCount] = {}
-        for _, j in complete:
+        for _, j in billable:
             for pc in j.products:
                 prev = merged.get(pc.product.product_id)
                 merged[pc.product.product_id] = ProductCount(
@@ -248,15 +279,19 @@ class TriggerPipeline:
         reasons = "+".join(
             f"ch{ev.channel}:{j.reason or j.status.value}" for ev, j in results
         )
+        if partial_billable:
+            reasons += ";partial_billed:" + ",".join(
+                f"ch{ev.channel}" for ev, _ in partial_billable
+            )
         strategies = ",".join(j.strategy or "-" for _, j in results)
         if len(complete) == len(results):
             status = JudgmentStatus.COMPLETE
             confidence = min(j.confidence for _, j in results)
-        elif complete:
-            # 일부 트레이만 확정 — 확정분만 청구(악화 금지, I3 태도),
-            # 미확정 트레이는 reason에 남긴다
+        elif billable:
+            # 일부 트레이만 확정/과금 — 미확정 트레이는 reason에 남긴다
+            # (악화 금지, I3 태도)
             status = JudgmentStatus.PARTIAL
-            confidence = min(j.confidence for _, j in complete)
+            confidence = min(j.confidence for _, j in billable)
         else:
             status = JudgmentStatus.NO_DETECTION
             confidence = 0.0

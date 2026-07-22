@@ -35,12 +35,24 @@ from crk_model.judgment.strict import StrictWeightMatcher
 
 
 def enforce_full_delta_match(
-    result: JudgmentResult, delta_weight: float, tolerance: float
+    result: JudgmentResult,
+    delta_weight: float,
+    tolerance: float,
+    *,
+    count_unit_slack: float = 0.0,
 ) -> JudgmentResult:
-    """I6: delta 전량 설명 못 하면 COMPLETE 금지 → PARTIAL 강등 (부분 설명 과금 금지)."""
+    """I6: delta 전량 설명 못 하면 COMPLETE 금지 → PARTIAL 강등 (부분 설명 과금 금지).
+
+    count_unit_slack > 0이면 허용오차가 청구 총 개수에 비례해 넓어진다
+    (tolerance + slack×(n−1)) — I3 gate_n과 같은 산식 (설계 3a). DB unit_weight
+    편차는 개수에 비례 누적되므로, gate_n으로 적합을 인정해 놓고 I6이 flat
+    tolerance로 강등하면 두 게이트가 서로 모순된다. 호출부(라우터)가 freezer
+    프로파일에서만 slack을 전달한다 — 냉장은 무게가 판별자라 flat 유지."""
     if result.status is not JudgmentStatus.COMPLETE:
         return result
-    if abs(result.explained_weight - abs(delta_weight)) <= tolerance:
+    total = sum(pc.count for pc in result.products)
+    tol_n = tolerance + count_unit_slack * max(0, total - 1)
+    if abs(result.explained_weight - abs(delta_weight)) <= tol_n:
         return result
     return replace(
         result,
@@ -94,15 +106,28 @@ class FreezerVisionFirstStrategy:
     상품으로 과금). 오검출 억제는 perception 계층(static/baseline/share
     floor)의 책임이고, 판정층은 득표 순위를 신뢰한다 — 층별 단일 책임.
 
+    무게 게이트는 n-스케일이다 (이슈 #16 설계, docs/0722_issue16_arbitration_design.md):
+    `gate_n(n) = count_gate + count_unit_slack×(n−1)`. DB unit_weight 편차
+    (정책상 DB는 고정, 실측과 10~30g 편차)와 접촉 오염은 개수·픽 횟수에
+    비례해 누적되므로 flat ±15g는 n≥4에서 정답 상품의 자기 적합을 깨뜨리고
+    우연 적합(5×155≈4×185)에 확정을 넘겼다 (실사고: 베이글 5개 → 만두 4개
+    오과금). n=1 동작은 기존과 동일.
+
     단계 (해당 없으면 다음 단계로):
-    ① 밴드 내 단일: 득표순으로 시도하되 top의 single_share(기본 50%) 이상
-       득표한 정체성만 — vision 스스로 모호하다고 인정하는 범위 안에서만
-       무게가 중재한다 (178g 원칙·이슈 #8 오검출 1위 구제의 안전한 부분집합).
-    ② top 근접 실패 (gate < 잔차 ≤ near_factor×gate): 접촉 하중 오염이
+    ① 밴드 내 단일: 자격 후보 전원의 적합을 수집한 뒤 결정한다 (선착 폐지 —
+       득표순 첫 적합 반환은 "1위가 무게로 탈락하면 무게가 2위를 선택"하는
+       I-V 위반 통로였다). 자격 = top의 single_share(기본 50%) 이상 득표
+       **또는** conf ≥ conf_override(기본 0.9) & refit_share 이상 득표
+       (진열 오염이 득표 순위를 왜곡해도 max-conf는 독립적 신호 — 실사고:
+       conf 1.0 진짜 상품이 19표 vs 오염 63표로 자격 미달). 적합이 여럿이면
+       vision 증거로 중재: 최고 conf가 최다 득표 적합보다 conf_margin(기본
+       0.15) 이상 우세할 때만 conf 승(reason "…single_arbitrated"), 아니면
+       득표 서열. 잔차는 중재 기준이 아니다 (무게 = 거부권 원칙).
+    ② top 근접 실패 (gate_n < 잔차 ≤ near_factor×gate_n): 접촉 하중 오염이
        실측 8~18g(segment_retry_gap 주석) — "delta가 오염됐다"가 "정체성이
        틀렸다"보다 우세. top 정체성·개수를 보존한 PARTIAL 반환
-       (freezer_vision_first_near_gate, conf×0.6). 이슈 #15의 정답 경로:
-       370g vs 176g×2=352(잔차 18) → 23번 ×2 PARTIAL.
+       (freezer_vision_first_near_gate, conf×0.6). 이슈 #15의 −370g 케이스는
+       gate_n(2)=20 ≥ 잔차 18이라 이제 ①에서 COMPLETE로 격상된다 (과금 동일).
     ③ 조합: **top 정체성 포함 필수**(최선 증거는 설명에 반드시 참여) +
        멤버는 combo_share(기본 30%) 이상 득표 — 배경 후보가 오염 잔차의
        filler로 끼어드는 것(이슈 #10 메로나 79×3)을 차단.
@@ -134,6 +159,15 @@ class FreezerVisionFirstStrategy:
         combo_share: float = 0.3,
         near_factor: float = 2.0,
         refit_share: float = 0.1,
+        count_unit_slack: float = 5.0,
+        # 개수당 게이트 가산(g) — gate_n(n) = gate + slack×(n−1). 0 = flat 게이트
+        # (구 동작). 원본 SAME_PRODUCT_COUNT_TOLERANCE_GRAMS(개당 5g) 대응.
+        conf_override: float = 0.9,
+        # ① 자격의 conf 문턱 — share 미달이어도 이 conf 이상(+refit_share 득표)
+        # 이면 적합 시도 자격. 2.0 = 사실상 비활성 (구 동작).
+        conf_margin: float = 0.15,
+        # ① 복수 적합 중재에서 conf 우세로 득표 서열을 뒤집는 최소 격차.
+        # 2.0 = 항상 득표 서열 (구 동작에 근사).
     ):
         self._max_kinds = max_kinds
         self._identity_pool = identity_pool
@@ -142,6 +176,9 @@ class FreezerVisionFirstStrategy:
         self._combo_share = combo_share
         self._near_factor = near_factor
         self._refit_share = refit_share
+        self._unit_slack = count_unit_slack
+        self._conf_override = conf_override
+        self._conf_margin = conf_margin
 
     def precondition(self, ctx: JudgmentContext) -> bool:
         return (
@@ -153,7 +190,6 @@ class FreezerVisionFirstStrategy:
     def solve(self, ctx: JudgmentContext) -> JudgmentResult | None:
         target = abs(ctx.delta_weight)
         gate = ctx.profile.count_gate
-        near = gate * self._near_factor
         by_class = _product_by_class(ctx)
         ranked = sorted(ctx.vision_candidates, key=lambda c: (-c.vote_count, -c.confidence))
         identities = [
@@ -169,22 +205,57 @@ class FreezerVisionFirstStrategy:
             n = min(max(1, round(target / p.unit_weight)), p.stock_qty)  # I12
             return n, abs(target - n * p.unit_weight)
 
-        # ① 밴드 내 단일 (I3 게이트) — top의 single_share 이상 득표만 시도
+        def gate_n(n: int) -> float:
+            # n-스케일 게이트 (설계 3a): DB 편차·접촉 오염은 개수에 비례 누적
+            return gate + self._unit_slack * (n - 1)
+
+        # ① 밴드 내 단일 (I3 게이트, 설계 3b/3c) — 자격 후보 전원의 적합을
+        # 수집한 뒤 vision 증거로 결정. 선착 반환 금지 (docstring ①).
+        def eligible(cand: VisionCandidate) -> bool:
+            if cand.vote_count >= self._single_share * top_c.vote_count:
+                return True
+            return (
+                cand.confidence >= self._conf_override
+                and cand.vote_count >= self._refit_share * top_c.vote_count
+            )
+
+        fits: list[tuple[ActiveProduct, VisionCandidate, int]] = []
         for p, cand in identities:
-            if cand.vote_count < self._single_share * top_c.vote_count:
+            if not eligible(cand):
                 continue
             count, residual = fit(p)
-            if residual <= gate:
-                return JudgmentResult(
-                    JudgmentStatus.COMPLETE,
-                    (ProductCount(p, count),),
-                    confidence=cand.confidence,
-                    reason="freezer_vision_first_single",
-                )
+            if residual <= gate_n(count):
+                fits.append((p, cand, count))
+        winner: tuple[ActiveProduct, VisionCandidate, int] | None = None
+        arbitrated = False
+        if len(fits) == 1:
+            winner = fits[0]
+        elif len(fits) >= 2:
+            vt = max(fits, key=lambda f: (f[1].vote_count, f[1].confidence))
+            bc = max(fits, key=lambda f: (f[1].confidence, f[1].vote_count))
+            if bc is vt:
+                winner = vt  # 득표·conf 증거 일치
+            elif bc[1].confidence >= vt[1].confidence + self._conf_margin:
+                winner, arbitrated = bc, True  # conf 결정적 우세 (설계 3b)
+            elif vt[1] is top_c:
+                winner = vt  # 전역 득표 1위가 적합 — 종전 서열 존중
+            # else: 전역 top 미적합 + conf 격차 부족 → 모호, ② near로 폴스루
+        if winner is not None:
+            p, cand, count = winner
+            return JudgmentResult(
+                JudgmentStatus.COMPLETE,
+                (ProductCount(p, count),),
+                confidence=cand.confidence,
+                reason=(
+                    "freezer_vision_first_single_arbitrated"
+                    if arbitrated
+                    else "freezer_vision_first_single"
+                ),
+            )
 
         # ② top 근접 실패 → 정체성 교체 대신 오염 가정, 개수 보존 PARTIAL
         n_top, r_top = fit(top_p)
-        if r_top <= near:
+        if r_top <= self._near_factor * gate_n(n_top):
             return JudgmentResult(
                 JudgmentStatus.PARTIAL,
                 (ProductCount(top_p, n_top),),
@@ -235,9 +306,9 @@ class FreezerVisionFirstStrategy:
             if cand.vote_count < self._refit_share * top_c.vote_count:
                 continue
             count, residual = fit(p)
-            if residual <= gate:
+            if residual <= gate_n(count):
                 fits_gate.append((p, cand, count))
-            elif residual <= near:
+            elif residual <= self._near_factor * gate_n(count):
                 fits_near.append((p, cand, count))
         chosen: tuple[ActiveProduct, VisionCandidate, int] | None = None
         if len(fits_gate) == 1:
@@ -256,7 +327,11 @@ class FreezerVisionFirstStrategy:
 
     def _allocations(self, products: list[ActiveProduct], target: float, gate: float):
         """각 종류 최소 1개(부분집합 크기가 곧 종류 수)로 target±gate를 설명하는
-        개수 배분을 백트래킹으로 열거. I12(stock)·총 개수 상한·무게 초과 가지치기."""
+        개수 배분을 백트래킹으로 열거. I12(stock)·총 개수 상한·무게 초과 가지치기.
+
+        의도적으로 flat 게이트 유지 (설계 3a의 예외): 조합은 우연 적합 공간이
+        조합적으로 커지고 실사고(#10 메로나 filler)가 조합형이었다 — n-스케일
+        확대는 ①(동일 정체성 n개)과 ④(유일-적합)에만 적용한다."""
 
         def rec(i: int, counts: list[int], weight: float, items: int):
             if i == len(products):

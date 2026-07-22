@@ -128,6 +128,7 @@ class ModelService:
             default_profile=self._default_profile,
             cross_zone=cross_zone,
             active_products_provider=products_provider,
+            count_unit_slack=self.settings.judgment_count_unit_slack,
         )
         # Phase 2 (L6 ②): 페널티 OFF primary + 페널티 ON shadow 병행 — diff만
         # 기록해 개선 방향을 검증한 뒤 Phase 3에서 PENALTY_ENABLED로 승격한다.
@@ -146,6 +147,7 @@ class ModelService:
                     source_conf_min=cross_zone.source_conf_min,
                 ),
                 active_products_provider=products_provider,
+                count_unit_slack=self.settings.judgment_count_unit_slack,
             )
             gateway_settler = ShadowSettlerRunner(self.settler, shadow)
             logger.info("[CONFIG] cross-zone penalty shadow settler enabled")
@@ -179,8 +181,11 @@ class ModelService:
                     combo_share=self.settings.judgment_combo_share,
                     near_factor=self.settings.judgment_near_factor,
                     refit_share=self.settings.judgment_refit_share,
+                    count_unit_slack=self.settings.judgment_count_unit_slack,
+                    conf_override=self.settings.judgment_conf_override,
+                    conf_margin=self.settings.judgment_conf_margin,
                 ),
-            )),
+            ), count_unit_slack=self.settings.judgment_count_unit_slack),
             early_termination_enabled=self.settings.early_termination_enabled,
             # 로드셀 안정 판정 (MODEL__WEIGHT__STABLE_WINDOW 등, 이슈 #14):
             # post-roll 샘플 수와 함께 최종 plateau 성립 조건을 결정한다.

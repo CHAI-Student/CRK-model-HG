@@ -153,6 +153,10 @@ class CloseSettler:
         # 스냅샷 provider(ActiveProductStore)를 주입한다. None이면 페널티
         # 패스 비활성 (기존 테스트/직접 생성 하위호환).
         active_products_provider: Callable[[], Sequence[ActiveProduct]] | None = None,
+        count_unit_slack: float = 5.0,
+        # 냉동 close 재solve의 개수당 게이트 가산(g) — 판정층 gate_n과 동일
+        # 원칙 (설계 3a, docs/0722_issue16_arbitration_design.md). I3 게이트를
+        # 쓰는 두 지점(판정·정산)이 같은 산식을 유지해야 한다. 0 = flat 게이트.
     ):
         self.error_policy = error_policy
         # zone이 profiles dict에 없을 때의 폴백 프로파일 (cabinet_type 이식) —
@@ -161,6 +165,7 @@ class CloseSettler:
         self.default_profile = default_profile
         self.cross_zone = cross_zone or CrossZonePenaltyConfig()
         self._products_provider = active_products_provider
+        self.count_unit_slack = count_unit_slack
         self._finalized: dict[str, FinalizedSettlement] = {}
 
     def settle(
@@ -310,8 +315,8 @@ class CloseSettler:
             if not hit:
                 notes.append(f"unmatched_return:zone{zone}:{wt:+.1f}g")
 
-    @staticmethod
     def _freezer_resolve(
+        self,
         baskets: dict[int, _Basket],
         events: Sequence[TriggerEvent],
         profiles: Mapping[int, SensorProfile],
@@ -336,9 +341,11 @@ class CloseSettler:
             if len(kinds) == 1:
                 p, _c = kinds[0]
                 count = round(-net / p.unit_weight) if p.unit_weight > 0 else 0
+                # I3 게이트 — n-스케일 (설계 3a): DB 편차·오염은 개수 비례 누적
+                gate_n = gate + self.count_unit_slack * max(0, count - 1)
                 if (
                     1 <= count <= p.stock_qty  # I12
-                    and abs(-net - count * p.unit_weight) <= gate  # I3
+                    and abs(-net - count * p.unit_weight) <= gate_n  # I3
                 ):
                     b.set_count(p.product_id, count)
                     notes.append(f"freezer_close_resolve:zone{zone}:{p.product_id}={count}")

@@ -152,6 +152,13 @@ class Settings:
     judgment_combo_share: float = 0.3
     judgment_near_factor: float = 2.0
     judgment_refit_share: float = 0.1
+    # ---- 무게 중재 재설계 노브 (이슈 #16, docs/0722_issue16_arbitration_design.md) ----
+    # count_unit_slack: 개수당 게이트 가산(g) — gate_n(n)=gate+slack×(n−1) (0=flat)
+    # conf_override: ① 자격의 conf 문턱 (share 미달 보완, 2.0=비활성)
+    # conf_margin: ① 복수 적합 중재에서 conf가 득표 서열을 뒤집는 최소 격차 (2.0=비활성)
+    judgment_count_unit_slack: float = 5.0
+    judgment_conf_override: float = 0.9
+    judgment_conf_margin: float = 0.15
     # ---- 조기 종료 (D7) — removal & 비freezer에서만 유효 ----
     early_termination_enabled: bool = True
     # ---- 모션 게이트 오버라이드 (None = SensorProfile 기본값 유지) ----
@@ -231,6 +238,11 @@ class Settings:
             judgment_combo_share=_env_float("MODEL__JUDGMENT__COMBO_SHARE", 0.3),
             judgment_near_factor=_env_float("MODEL__JUDGMENT__NEAR_FACTOR", 2.0),
             judgment_refit_share=_env_float("MODEL__JUDGMENT__REFIT_SHARE", 0.1),
+            judgment_count_unit_slack=_env_float(
+                "MODEL__JUDGMENT__COUNT_UNIT_SLACK", 5.0
+            ),
+            judgment_conf_override=_env_float("MODEL__JUDGMENT__CONF_OVERRIDE", 0.9),
+            judgment_conf_margin=_env_float("MODEL__JUDGMENT__CONF_MARGIN", 0.15),
             early_termination_enabled=_env_bool(
                 "MODEL__VISION__EARLY_TERMINATION", True
             ),

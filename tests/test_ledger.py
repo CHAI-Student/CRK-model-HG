@@ -159,6 +159,16 @@ class TestCloseSettler:
         result = s.settle("s1", events, PROFILES)
         assert any("freezer_close_gate_failed" in n for n in result.notes)
 
+    def test_freezer_close_resolve_gate_scales_with_count(self, cola):
+        # 설계 3a (issue #16): close 재solve의 I3 게이트도 개수 비례 —
+        # 100g×5, net −533(개당 편차 누적 33g)은 flat ±15로는 실패하지만
+        # gate_n(5)=15+5×4=35로 5개 확정된다 (판정층 gate_n과 동일 산식).
+        s = CloseSettler()
+        events = [removal("s1", 9, 1.0, cola, count=4, delta=-533.0)]
+        result = s.settle("s1", events, PROFILES)
+        assert any("freezer_close_resolve" in n for n in result.notes)
+        assert result.total_price == 5 * cola.unit_price
+
 
 class TestInterimAndShadow:
     def test_interim_is_distinct_type_and_rejected_by_payment(self, cola):

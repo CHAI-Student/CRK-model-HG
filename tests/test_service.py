@@ -234,6 +234,73 @@ class TestMultiTrayEvents:
         assert billed == {27: 1, 40: 1}
         assert "freezer_vision_first_unique_refit+pool_exhaustion" in j.reason
 
+    def test_partial_with_distinct_identity_billed_in_merge(self):
+        # 설계 4 (issue #16 순차 취출): 단일 트리거라면 near-gate PARTIAL도
+        # 정산기가 과금한다(#15 정답 경로) — 멀티트레이 병합도 형제 COMPLETE와
+        # 정체성이 겹치지 않는 PARTIAL은 과금에 포함해야 한다.
+        bagel = ActiveProduct(
+            "P27", "베이글", class_id=27, unit_weight=155.0, unit_price=2800, stock_qty=5
+        )
+        prod130 = ActiveProduct(
+            "P30", "요맘때", class_id=30, unit_weight=130.0, unit_price=2500, stock_qty=5
+        )
+
+        class SceneDetector(FakeDetector):
+            """130g 상품은 매 프레임(다득표), 베이글은 1/3 프레임 — 단 양 카메라
+            모두에서 잡혀 weighted conf 1.0 (conf_override 자격)."""
+
+            def detect(self, frame, allowed_class_ids=None):
+                self.calls += 1
+                dets = [Detection(30, 0.7, bbox=(50.0, 50.0, 100.0, 100.0))]
+                if self.calls % 3 == 0:
+                    dets.append(Detection(27, 0.9, bbox=(150.0, 50.0, 200.0, 100.0)))
+                return dets
+
+        detector = SceneDetector()
+        store = ActiveProductStore()
+        store.update([bagel, prod130])
+        pipe = TriggerPipeline(detector, {2: FREEZER}, store)
+        outcome = pipe.process(
+            "s1",
+            TriggerRequest(
+                2,
+                {"top": moving_frames(20), "side": moving_frames(20)},
+                dual_tray_samples((500, 345), (390, 285)),  # ch0 −155 / ch1 −105
+                1.0,
+            ),
+        )
+        j = outcome.event.judgment
+        assert j.status is JudgmentStatus.PARTIAL  # ch1은 near-gate PARTIAL
+        billed = {pc.product.class_id: pc.count for pc in j.products}
+        assert billed == {27: 1, 30: 1}
+        assert "partial_billed:ch1" in j.reason
+        assert "partial_billed:ch1" in outcome.trace.reason_codes
+
+    def test_mutual_duplicate_partials_not_billed(self):
+        # 가드 ②: PARTIAL끼리 같은 정체성이면 대칭 오염 가능성 — 과청구가
+        # 미청구보다 나쁘다(I13/D9) → 전부 제외 (현행 보수 동작 유지).
+        prod130 = ActiveProduct(
+            "P30", "요맘때", class_id=30, unit_weight=130.0, unit_price=2500, stock_qty=5
+        )
+        detector = FakeDetector(
+            detections=[Detection(30, 0.7, bbox=(50.0, 50.0, 100.0, 100.0))]
+        )
+        store = ActiveProductStore()
+        store.update([prod130])
+        pipe = TriggerPipeline(detector, {2: FREEZER}, store)
+        outcome = pipe.process(
+            "s1",
+            TriggerRequest(
+                2,
+                {"top": moving_frames(20)},
+                dual_tray_samples((500, 395), (400, 295)),  # ch0 −105 / ch1 −105
+                1.0,
+            ),
+        )
+        j = outcome.event.judgment
+        assert j.status is JudgmentStatus.NO_DETECTION
+        assert j.products == ()
+
     def test_single_tray_event_keeps_legacy_path(self, cola, bar170):
         # 이벤트 1개면 기존 단일 판정 경로 그대로 (multi_tray 미발동)
         svc = self._service(cola, bar170)
