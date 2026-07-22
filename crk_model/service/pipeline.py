@@ -527,6 +527,8 @@ class TriggerPipeline:
         # 트리거 단위 상태 초기화: 단계별 제거 카운터(issue #6 2차) + 손 궤적·
         # 정지 트랙(이슈 #10 — 이전 영상의 좌표가 다음 영상 필터 기준이 되던 결함)
         self._filters.reset_trigger_state()
+        # top ROI 방향 게이트 (P1-5): delta가 0이면 top ROI 미적용 (원본 동형)
+        self._filters.set_trigger_delta(delta)
         for camera in CAMERAS:
             frames = req.frames.get(camera)
             if frames is None:

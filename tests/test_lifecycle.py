@@ -426,6 +426,46 @@ class TestCabinetTypeDefaultProfile:
         assert outcome.event.judgment.reason == "weight_only"
         assert outcome.event.judgment.status.value == "complete"
 
+    def test_freezer_dual_top_layout_applies_vertical_roi(self, cola):
+        # P1-5 배선: cabinet_type=freezer ∧ camera_layout=dual_top_proxy면
+        # 두 카메라 모두 상단 절반(center_y <= 240)만 유지 — 하단(진열 선반)
+        # 검출은 vertical_roi 단계에서 몰수돼 후보가 되지 못한다.
+        settings = Settings(
+            cabinet_type="freezer", camera_layout="dual_top_proxy",
+            close_grace_s=0.0,
+        )
+        svc = ModelService(
+            FakeDetector(detections=[
+                Detection(1, 0.9, bbox=(50.0, 300.0, 100.0, 400.0))  # cy=350
+            ]),
+            clock=FakeClock(),
+            settings=settings,
+        )
+        svc.handle_multi_zone(open_payload(cola))
+        svc.handle_trigger(trigger_payload())
+        svc.process_pending()
+        outcome = svc.worker.outcomes[-1]
+        assert not outcome.event.vision_candidates
+        drops = outcome.trace.vote_summary["filter_drops_by_stage"]["vertical_roi"]
+        assert drops["top"] > 0
+
+    def test_dual_layout_default_keeps_lower_half_detections(self, cola):
+        # 회귀 방지: 기본 레이아웃(dual)에서는 수직 ROI가 꺼져 있어 하단
+        # 검출도 후보가 된다 (기존 동작 보존).
+        settings = Settings(cabinet_type="freezer", close_grace_s=0.0)
+        svc = ModelService(
+            FakeDetector(detections=[
+                Detection(1, 0.9, bbox=(50.0, 300.0, 100.0, 400.0))
+            ]),
+            clock=FakeClock(),
+            settings=settings,
+        )
+        svc.handle_multi_zone(open_payload(cola))
+        svc.handle_trigger(trigger_payload())
+        svc.process_pending()
+        outcome = svc.worker.outcomes[-1]
+        assert any(c.class_id == 1 for c in outcome.event.vision_candidates)
+
     def test_freezer_cabinet_type_applies_to_close_settlement(self, cola):
         """CLOSE 정산도 기본 프로파일을 따라야 한다 (판정·정산 tolerance 단일
         소스). removal -100g(콜라 1) 후 return +90g: freezer tolerance(±15g)면
@@ -572,7 +612,8 @@ class TestVisionTuningWiring:
         summary = svc.worker.outcomes[-1].trace.vote_summary
         assert "filter_drops_by_stage" in summary
         assert set(summary["filter_drops_by_stage"]) == {
-            "side_roi", "baseline", "static_track", "hand_path"
+            "side_roi", "vertical_roi", "hand_conf", "baseline",
+            "static_track", "hand_path",
         }
         # baseline shadow 검증용 클래스별 세부 (이슈 #14 후속)
         assert set(summary["baseline_drops_by_class"]) == {"top", "side"}

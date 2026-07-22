@@ -103,8 +103,10 @@ class ModelService:
         )
         self._default_profile = _default_profile_from_settings(self.settings)
         logger.info(
-            "[CONFIG] cabinet_type=%s default_profile=%s freezer_zones=%s",
-            self.settings.cabinet_type, self._default_profile.name, self.settings.freezer_zones,
+            "[CONFIG] cabinet_type=%s default_profile=%s freezer_zones=%s "
+            "camera_layout=%s",
+            self.settings.cabinet_type, self._default_profile.name,
+            self.settings.freezer_zones, self.settings.camera_layout,
         )
         self.snapshots = ActiveProductStore()
         self.event_log = EventLog()
@@ -212,6 +214,21 @@ class ModelService:
                 static_track_iou=self.settings.static_track_iou,
                 baseline_suppress_mode=self.settings.baseline_suppress_mode,
                 baseline_suppress_iou=self.settings.baseline_suppress_iou,
+                # 수직 ROI (P1-5): 냉동 dual-top에서만 두 카메라 공통 적용 —
+                # 냉장 기기는 camera_layout이 dual_top_proxy여도 켜지 않는다
+                # (원본 _uses_freezer_dual_top_profile: freezer ∧ dual_top).
+                vertical_roi_region=(
+                    self.settings.freezer_roi_vertical_region
+                    if (
+                        self.settings.cabinet_type == "freezer"
+                        and self.settings.camera_layout == "dual_top_proxy"
+                    )
+                    else "off"
+                ),
+                vertical_roi_y_split=self.settings.freezer_roi_y_split,
+                top_roi_enabled=self.settings.top_roi_enabled,
+                top_roi_y_split=self.settings.top_roi_y_split,
+                hand_conf_floor=self.settings.hand_confidence_threshold,
             ),
             voting_params={
                 "entry_conf_top": self.settings.top_confidence_threshold,

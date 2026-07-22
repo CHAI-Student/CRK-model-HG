@@ -46,6 +46,20 @@ _VALID_CABINET_TYPES = ("refrigerated", "freezer")
 
 _VALID_BASELINE_MODES = ("off", "shadow", "active")
 
+_VALID_CAMERA_LAYOUTS = ("dual", "dual_top_proxy")
+
+
+def _env_camera_layout(key: str, default: str) -> str:
+    raw = os.environ.get(key)
+    if not raw:
+        return default
+    normalized = raw.strip().lower()
+    if normalized not in _VALID_CAMERA_LAYOUTS:
+        # cabinet_type과 동일한 fail-closed: 오타가 조용히 dual로 폴백되면
+        # 냉동 dual-top 수직 ROI 없이 운영되고 있음을 알 수 없다.
+        raise ValueError(f"Invalid camera layout: {raw}")
+    return normalized
+
 
 def _env_baseline_mode(key: str, default: str) -> str:
     raw = os.environ.get(key)
@@ -144,6 +158,25 @@ class Settings:
     # shadow 실측으로 진짜 상품 표가 안 깎이는 걸 확인한 뒤 active로 승격.
     baseline_suppress_mode: str = "shadow"
     baseline_suppress_iou: float = 0.5
+    # ---- 수직 ROI (원본 정합 웨이브 2 — perf-gap P1-5 이식) ----
+    # camera_layout: "dual"(top+side, 기본) | "dual_top_proxy"(냉동 실기 —
+    #   side 스트림도 top 뷰). dual_top_proxy + cabinet_type=freezer면 두
+    #   카메라 모두 freezer 수직 ROI(기본 상단 절반)를 적용하고 side x-ROI는
+    #   생략한다 (원본 _uses_freezer_dual_top_profile 동형).
+    # freezer_roi_vertical_region/y_split: 유지할 절반과 분할선 (left-crop
+    #   480×480 좌표계). 원본 운영값 upper/240.
+    # top_roi_enabled/y_split: 냉장(dual) 레이아웃 top 카메라 전용 —
+    #   delta가 0이 아닐 때 하단 절반(center_y >= split)만 유지. 원본 기본은
+    #   true지만 HG는 냉동 dual-top 실기가 우선이라 보수적으로 off — 냉장
+    #   레이아웃 투입 시 켠다.
+    camera_layout: str = "dual"
+    freezer_roi_vertical_region: str = "upper"
+    freezer_roi_y_split: float = 240.0
+    top_roi_enabled: bool = False
+    top_roi_y_split: float = 240.0
+    # 손 검출 conf 하한 (perf-gap P1-7): 유령 손의 래치·궤적 오염 차단.
+    # 원본 운영값 0.30 (기본 0.40, 실배포 .env 0.30).
+    hand_confidence_threshold: float = 0.30
     # ---- 판정 I-V 노브 (이슈 #15, FreezerVisionFirst 단계별 임계) ----
     # single_share: top 득표 대비 이 비율 이상만 단일 정체성 교체 시도 허용
     # combo_share: 조합 멤버 자격 하한 / refit_share: 유일-적합 구제 자격 하한
@@ -248,6 +281,16 @@ class Settings:
             ),
             baseline_suppress_iou=_env_float(
                 "MODEL__VISION__BASELINE_SUPPRESS_IOU", 0.5
+            ),
+            camera_layout=_env_camera_layout("MODEL__VISION__CAMERA_LAYOUT", "dual"),
+            freezer_roi_vertical_region=os.environ.get(
+                "MODEL__VISION__FREEZER_ROI_VERTICAL_REGION", "upper"
+            ).strip().lower(),
+            freezer_roi_y_split=_env_float("MODEL__VISION__FREEZER_ROI_Y_SPLIT", 240.0),
+            top_roi_enabled=_env_bool("MODEL__VISION__TOP_ROI_ENABLED", False),
+            top_roi_y_split=_env_float("MODEL__VISION__TOP_ROI_Y_SPLIT", 240.0),
+            hand_confidence_threshold=_env_float(
+                "MODEL__VISION__HAND_CONFIDENCE_THRESHOLD", 0.30
             ),
             segment_retry_gap_grams=_env_float(
                 "MODEL__WEIGHT__SEGMENT_RETRY_GAP_GRAMS", 5.0

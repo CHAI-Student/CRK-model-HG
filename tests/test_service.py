@@ -670,6 +670,57 @@ class TestFilterChain:
         assert f.apply("side", [inside, outside]) == [inside]
         assert f.apply("top", [outside]) == [outside]  # top은 ROI 미적용
 
+    def test_vertical_roi_upper_keeps_upper_half_on_both_cameras(self):
+        # P1-5 (원본 freezer dual-top): 두 카메라 모두 center_y <= split 유지,
+        # side x-ROI는 생략 (side 스트림도 top 뷰).
+        f = DetectionFilterChain(
+            vertical_roi_region="upper", vertical_roi_y_split=240.0,
+            side_roi_max_center_x=240.0,
+        )
+        upper = Detection(1, 0.8, bbox=(300, 100, 400, 200))  # cy=150, cx=350
+        lower = Detection(2, 0.8, bbox=(100, 300, 200, 400))  # cy=350
+        for cam in ("top", "side"):
+            out = f.apply(cam, [upper, lower])
+            assert upper in out and lower not in out  # cx=350 > 240이어도 생존
+            assert f.drop_stats["vertical_roi"][cam] == 1
+            assert f.drop_stats["side_roi"][cam] == 0
+
+    def test_vertical_roi_lower_region(self):
+        f = DetectionFilterChain(vertical_roi_region="lower")
+        upper = Detection(1, 0.8, bbox=(100, 100, 200, 200))
+        lower = Detection(2, 0.8, bbox=(100, 300, 200, 400))
+        assert f.apply("top", [upper, lower]) == [lower]
+
+    def test_vertical_roi_invalid_region_rejected(self):
+        with pytest.raises(ValueError):
+            DetectionFilterChain(vertical_roi_region="uper")
+
+    def test_top_roi_lower_half_only_when_delta_nonzero(self):
+        # P1-5 (원본 top_roi): 냉장 레이아웃 top 카메라 — delta 있을 때
+        # center_y >= split(하단 절반)만 유지. delta 없으면 미적용, side 무관.
+        f = DetectionFilterChain(top_roi_enabled=True, top_roi_y_split=240.0)
+        upper = Detection(1, 0.8, bbox=(100, 100, 200, 200))  # cy=150
+        lower = Detection(2, 0.8, bbox=(100, 300, 200, 400))  # cy=350
+        assert f.apply("top", [upper, lower]) == [upper, lower]  # delta 미주입
+        f.set_trigger_delta(-100.0)
+        assert f.apply("top", [upper, lower]) == [lower]
+        assert upper in f.apply("side", [upper])  # side는 top ROI 대상 아님
+        f.set_trigger_delta(0.0)
+        assert f.apply("top", [upper]) == [upper]  # delta 0 → 미적용
+
+    def test_hand_conf_floor_drops_ghost_hand(self):
+        # P1-7 (원본 hand_confidence_threshold): 저신뢰 유령 손은 래치·궤적
+        # 입력에서 제외 — hand_path 기준을 오염시키지 않는다.
+        f = DetectionFilterChain(hand_conf_floor=0.3, hand_margin_px=40.0)
+        ghost = Detection(0, 0.1, is_hand=True, bbox=(300, 300, 320, 320))
+        real = Detection(0, 0.9, is_hand=True, bbox=(0, 0, 20, 20))
+        near_real = Detection(1, 0.8, bbox=(30, 30, 60, 60))
+        near_ghost = Detection(2, 0.8, bbox=(310, 310, 340, 340))
+        out = f.apply("top", [ghost, real, near_real, near_ghost])
+        assert ghost not in out and real in out
+        assert near_real in out and near_ghost not in out  # 유령 궤적 미등록
+        assert f.drop_stats["hand_conf"]["top"] == 1
+
     def test_hand_path_proximity(self):
         f = DetectionFilterChain(hand_margin_px=40.0)
         hand = Detection(0, 0.9, is_hand=True, bbox=(0, 0, 20, 20))

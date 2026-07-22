@@ -83,12 +83,40 @@ class DetectionFilterChain:
         static_track_iou: float = 0.85,
         baseline_suppress_mode: str = "shadow",
         baseline_suppress_iou: float = 0.5,
+        vertical_roi_region: str = "off",
+        # 냉동 dual-top 수직 ROI (원본 freezer_roi_vertical_region, P1-5 이식):
+        # "upper"|"lower"면 **두 카메라 모두** center_y 기준 해당 절반만 유지
+        # (dual_top_proxy — side 스트림도 실제로는 top 뷰). 이때 side x-ROI는
+        # 원본과 동일하게 생략된다. "off"(기본) = 기존 동작.
+        vertical_roi_y_split: float = 240.0,
+        # left-crop 480×480 좌표계(P0-1)의 분할선 — 원본 freezer_roi_y_split.
+        top_roi_enabled: bool = False,
+        # 냉장(top+side) 레이아웃의 top 카메라 수직 ROI (원본 top_roi_enabled):
+        # 트리거 delta가 0이 아닐 때 center_y >= split(하단 절반)만 유지.
+        # 수직 ROI(dual-top)가 켜져 있으면 그쪽이 우선한다.
+        top_roi_y_split: float = 240.0,
+        hand_conf_floor: float = 0.0,
+        # 손 검출 conf 하한 (원본 hand_confidence_threshold, P1-7 이식): 이
+        # 값 미만의 hand 검출은 래치·궤적에 쓰지 않는다 — 유령 손이 모션
+        # 게이트 래치(I16)와 hand_path 기준을 오염시키는 것을 차단. 0 = off.
     ):
         if baseline_suppress_mode not in ("off", "shadow", "active"):
             raise ValueError(
                 f"Invalid baseline_suppress_mode: {baseline_suppress_mode}"
             )
+        if vertical_roi_region not in ("off", "upper", "lower"):
+            # cabinet_type과 동일한 fail-closed: 오타가 조용히 off가 되면
+            # ROI 없이 운영되고 있음을 알 수 없다.
+            raise ValueError(f"Invalid vertical_roi_region: {vertical_roi_region}")
         self._side_max_cx = side_roi_max_center_x
+        self._vertical_region = vertical_roi_region
+        self._vertical_split = vertical_roi_y_split
+        self._top_roi_enabled = top_roi_enabled
+        self._top_roi_split = top_roi_y_split
+        self._hand_conf_floor = hand_conf_floor
+        # top ROI의 방향 게이트 (원본 _top_roi_direction): 트리거 delta가
+        # 0이면 필터 미적용. pipeline이 set_trigger_delta로 주입한다.
+        self._trigger_delta: float | None = None
         self._hand_margin = hand_margin_px
         self._hand_history_frames = hand_history_frames
         self._hand_history: dict[str, deque] = defaultdict(
@@ -130,6 +158,8 @@ class DetectionFilterChain:
     def reset_drop_stats(self) -> None:
         self.drop_stats = {
             "side_roi": {"top": 0, "side": 0},
+            "vertical_roi": {"top": 0, "side": 0},  # dual-top 수직 ROI + top ROI
+            "hand_conf": {"top": 0, "side": 0},
             "baseline": {"top": 0, "side": 0},  # shadow 모드에서는 "드랍했을" 수
             "static_track": {"top": 0, "side": 0},
             "hand_path": {"top": 0, "side": 0},
@@ -147,6 +177,29 @@ class DetectionFilterChain:
         self._frame_idx.clear()
         self._baseline_anchors.clear()
         self._hand_seen.clear()
+        self._trigger_delta = None
+
+    def set_trigger_delta(self, delta: float | None) -> None:
+        """top ROI의 방향 게이트 입력 (원본 _top_roi_direction) — delta가
+        None/0이면 top ROI 미적용. pipeline이 reset 직후 호출한다."""
+        self._trigger_delta = delta
+
+    def _vertical_roi_rejects(self, camera: str, d: Detection) -> bool:
+        """수직 ROI (P1-5): dual-top 수직 ROI가 켜져 있으면 두 카메라 공통,
+        아니면 top 카메라 한정 top ROI(delta 있을 때 하단 절반 유지)."""
+        cy = (d.bbox[1] + d.bbox[3]) / 2
+        if self._vertical_region != "off":
+            if self._vertical_region == "lower":
+                return cy < self._vertical_split
+            return cy > self._vertical_split  # upper: center_y <= split 유지
+        if (
+            self._top_roi_enabled
+            and camera == "top"
+            and self._trigger_delta is not None
+            and self._trigger_delta != 0.0
+        ):
+            return cy < self._top_roi_split  # 원본: center_y >= split 유지
+        return False
 
     def _is_static(self, camera: str, d: Detection) -> bool:
         """정지 트랙 갱신 + 억제 여부 판정. 검출이 억제되더라도 카운트는
@@ -192,7 +245,16 @@ class DetectionFilterChain:
 
     def apply(self, camera: str, detections: Sequence[Detection]) -> list[Detection]:
         self._frame_idx[camera] += 1
-        hands = [d for d in detections if d.is_hand]
+        # Hand conf floor (P1-7): 유령 손을 래치·궤적 입력에서 제외 — 통과한
+        # 손만 baseline 등록 중지·hand_path 기준·래치(I16)에 쓰인다.
+        hands = []
+        for d in detections:
+            if not d.is_hand:
+                continue
+            if self._hand_conf_floor > 0 and d.confidence < self._hand_conf_floor:
+                self.drop_stats["hand_conf"][camera] += 1
+                continue
+            hands.append(d)
         if hands:
             self._hand_seen[camera] = True  # 이후 프레임부터 baseline 등록 중지
         for h in hands:
@@ -205,8 +267,18 @@ class DetectionFilterChain:
             if d.is_hand:
                 continue
             if d.bbox != _ZERO_BBOX:
-                # Side ROI: 존 바깥(오른쪽) 검출 제거
-                if camera == "side" and _center_x(d.bbox) >= self._side_max_cx:
+                # 수직 ROI (P1-5): dual-top이면 두 카메라 공통(상/하단 절반),
+                # 아니면 top ROI(냉장 레이아웃, delta 있을 때만)
+                if self._vertical_roi_rejects(camera, d):
+                    self.drop_stats["vertical_roi"][camera] += 1
+                    continue
+                # Side ROI: 존 바깥(오른쪽) 검출 제거 — dual-top 수직 ROI가
+                # 켜져 있으면 side 스트림도 top 뷰이므로 생략 (원본 동형)
+                if (
+                    self._vertical_region == "off"
+                    and camera == "side"
+                    and _center_x(d.bbox) >= self._side_max_cx
+                ):
                     self.drop_stats["side_roi"][camera] += 1
                     continue
                 # Baseline: 손 등장 전부터 있던 배경 억제 — shadow 모드는
