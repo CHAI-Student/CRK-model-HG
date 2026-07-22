@@ -358,6 +358,25 @@ class TestJournalReplay:
         assert result.total_price == live["totalPrice"]
 
 
+class TestVisionTopObservability:
+    def test_flags_when_top_candidate_not_billed(self, cola):
+        # 이슈 #15: 65표 1위가 미매핑/게이트 탈락으로 소멸하고 하위 후보가
+        # 과금될 때, 파이프라인이 순위 역전 사실을 reason_codes로 남긴다
+        from crk_model.core.types import JudgmentResult, ProductCount, VisionCandidate
+        from crk_model.service.pipeline import _vision_top_not_billed
+
+        j = JudgmentResult(
+            JudgmentStatus.COMPLETE, (ProductCount(cola, 1),), 0.5, "strict"
+        )
+        top23 = VisionCandidate(23, 0.9, 65, 0.2)
+        mine = VisionCandidate(cola.class_id, 0.6, 16, 0.05)
+        assert _vision_top_not_billed((top23, mine), j) == "vision_top_not_billed:class23"
+        assert _vision_top_not_billed((mine,), j) is None  # 1위가 곧 과금 품목
+        assert _vision_top_not_billed((), j) is None  # 후보 없음
+        empty = JudgmentResult(JudgmentStatus.NO_DETECTION, reason="x")
+        assert _vision_top_not_billed((top23,), empty) is None  # 무과금은 대상 아님
+
+
 class TestFilterChain:
     def test_side_roi_drops_out_of_zone(self):
         f = DetectionFilterChain(side_roi_max_center_x=240.0)

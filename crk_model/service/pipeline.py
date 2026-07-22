@@ -41,6 +41,20 @@ from crk_model.service.snapshot import ActiveProductStore, ProductSnapshot
 CAMERAS = ("top", "side")
 
 
+def _vision_top_not_billed(candidates, judgment) -> str | None:
+    """관측성 (이슈 #15): 채택된 비전 1위 후보가 과금 목록에 없으면 사유 코드.
+
+    65표/0.86 1위가 미매핑·게이트 탈락으로 무성 소멸하고 16표 후보가
+    과금돼도 아카이브만으로는 알 수 없었다 — 전략과 무관하게 파이프라인이
+    "판정이 vision 순위를 뒤집었다"는 사실 자체를 기록한다."""
+    if not candidates or not judgment.products:
+        return None
+    top = max(candidates, key=lambda c: (c.vote_count, c.confidence))
+    if any(pc.product.class_id == top.class_id for pc in judgment.products):
+        return None
+    return f"vision_top_not_billed:class{top.class_id}"
+
+
 @dataclass(frozen=True)
 class TriggerRequest:
     zone: int
@@ -190,6 +204,9 @@ class TriggerPipeline:
         else:
             judgment = self._router.judge(ctx)
             judgment = self._segment_target_retry(ctx, judgment, analysis, trace)
+        top_code = _vision_top_not_billed(candidates, judgment)
+        if top_code:
+            trace.reason_codes.append(top_code)
         return self._outcome(
             session_id, req, delta, analysis.segments, judgment, trace, candidates
         )

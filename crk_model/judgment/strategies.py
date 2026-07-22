@@ -5,6 +5,18 @@
 (시계열 정보 보존)는 필연적 순서.
 
 모든 성공 결과는 라우터에서 enforce_full_delta_match(I6)를 거친다.
+
+I-V (이슈 #15 신설 불변식): weight_is_discriminative=False(freezer)에서
+청구 정체성은 vision 득표 순위에서만 유도한다. 무게의 권한은 ⑴ 지목된
+정체성의 개수 산정·검증, ⑵ 정체성의 반증뿐이며, 무게 적합성이 정체성을
+선택하는 경로는 금지(허용된 유일한 예외: freezer_vision_first ④의
+유일-적합 구제). 이에 따라 무게로 후보 중 정체성을 고르는 전략들
+(segment_weight_matching / stage_count_combo / same_weight_collision_guard /
+strict / same_product_count / relaxed)은 precondition에서 freezer를 배제한다.
+freezer에서 정체성을 청구할 수 있는 전략: vision_only,
+freezer_vision_first(밴드·근접·조합·유일적합), vision_first_identity_partial,
+detected_single_item_fallback(top 고정) — 전부 "정체성은 vision, 무게는
+개수/검증"을 지킨다.
 """
 from __future__ import annotations
 
@@ -72,24 +84,60 @@ class VisionOnlyStrategy:
 class FreezerVisionFirstStrategy:
     """순위 1: 냉동고 — vision 정체성 우선, 무게는 개수 게이트(±15g, I3)로만.
 
-    178g 사건 재발 방지: 근접 단일 후보가 있으면 후보들을 합쳐 청구하지 않는다.
+    I-V (이슈 #15 신설 불변식): weight_is_discriminative=False에서 무게의
+    권한은 ⑴ vision이 지목한 정체성의 개수 산정·검증(게이트)과 ⑵ 정체성의
+    반증(잔차가 커서 "이것만으로 설명 불가")에 한정된다. 무게 적합성으로
+    정체성을 **선택**하는 것은 금지 — ±15g 창은 여러 상품이 우연히 걸릴
+    만큼 넓고, 실제로 득표 1위(65표, 0.86)가 3g 차이로 게이트를 놓치자
+    16표 배경 후보가 "무게가 맞아서" COMPLETE 채택되는 사고가 났다
+    (이슈 #15: 같은 상품 2회 연속 취출이 로드셀 20g 차이로 서로 다른 두
+    상품으로 과금). 오검출 억제는 perception 계층(static/baseline/share
+    floor)의 책임이고, 판정층은 득표 순위를 신뢰한다 — 층별 단일 책임.
 
-    한 트리거 다품종 (카메라가 연속 동작을 한 녹화로 합치는 실기 특성):
-    - 단일 설명은 최상위 후보만이 아니라 **득표순으로 전 정체성**에 시도한다 —
-      최상위가 오검출(반사 등, 이슈 #8의 메로나)이어도 실제 상품의 단일 설명이
-      조합보다 앞선다.
-    - 조합은 2종 상한이 아니라 k=2..max_kinds(기본 4)종까지, vision이 실제로 본
-      상위 identity_pool개 안에서 탐색한다. 종류 수가 적은 설명 우선(특이도),
-      같은 k에서는 무게 오차 최소 → 득표 합 최대 순으로 채택 (전부 I3 게이트
-      통과 필수, I12 stock 상한).
+    단계 (해당 없으면 다음 단계로):
+    ① 밴드 내 단일: 득표순으로 시도하되 top의 single_share(기본 50%) 이상
+       득표한 정체성만 — vision 스스로 모호하다고 인정하는 범위 안에서만
+       무게가 중재한다 (178g 원칙·이슈 #8 오검출 1위 구제의 안전한 부분집합).
+    ② top 근접 실패 (gate < 잔차 ≤ near_factor×gate): 접촉 하중 오염이
+       실측 8~18g(segment_retry_gap 주석) — "delta가 오염됐다"가 "정체성이
+       틀렸다"보다 우세. top 정체성·개수를 보존한 PARTIAL 반환
+       (freezer_vision_first_near_gate, conf×0.6). 이슈 #15의 정답 경로:
+       370g vs 176g×2=352(잔차 18) → 23번 ×2 PARTIAL.
+    ③ 조합: **top 정체성 포함 필수**(최선 증거는 설명에 반드시 참여) +
+       멤버는 combo_share(기본 30%) 이상 득표 — 배경 후보가 오염 잔차의
+       filler로 끼어드는 것(이슈 #10 메로나 79×3)을 차단.
+    ④ 유일-적합 구제: top이 결정적으로 반증된 경우(잔차 > near), 나머지
+       정체성 중 잔차 ≤ near인 적합이 **정확히 하나**면 채택
+       (freezer_vision_first_unique_refit, conf×0.8; tolerance 초과 잔차는
+       라우터 I6이 PARTIAL로 강등). 적합이 둘 이상이면 무게로는 고를 수
+       없다는 뜻(I-V) → 불발. 단, refit_share(기본 10%) 미만 득표 후보는
+       적합 후보에서 아예 배제한다 — 이슈 #10 ses-1-1783924418에서 3표
+       (top 171의 1.75%) 멜로나가 79×3=237로 유일하게 걸려 COMPLETE
+       채택되던 사고: "vision이 사실상 못 본" 후보는 구제 대상도, 모호성
+       판단 대상도 아니다.
+    전 단계 불발 시 None → vision_first_identity_partial이 top 정체성을
+    count=1 PARTIAL로 보존한다.
     """
 
     name = "freezer_vision_first"
 
-    def __init__(self, max_kinds: int = 4, identity_pool: int = 6, max_total_items: int = 12):
+    def __init__(
+        self,
+        max_kinds: int = 4,
+        identity_pool: int = 6,
+        max_total_items: int = 12,
+        single_share: float = 0.5,
+        combo_share: float = 0.3,
+        near_factor: float = 2.0,
+        refit_share: float = 0.1,
+    ):
         self._max_kinds = max_kinds
         self._identity_pool = identity_pool
         self._max_total_items = max_total_items
+        self._single_share = single_share
+        self._combo_share = combo_share
+        self._near_factor = near_factor
+        self._refit_share = refit_share
 
     def precondition(self, ctx: JudgmentContext) -> bool:
         return (
@@ -101,19 +149,28 @@ class FreezerVisionFirstStrategy:
     def solve(self, ctx: JudgmentContext) -> JudgmentResult | None:
         target = abs(ctx.delta_weight)
         gate = ctx.profile.count_gate
+        near = gate * self._near_factor
         by_class = _product_by_class(ctx)
         ranked = sorted(ctx.vision_candidates, key=lambda c: (-c.vote_count, -c.confidence))
-        identities = [(by_class[c.class_id], c) for c in ranked if c.class_id in by_class]
-        identities = identities[: self._identity_pool]
+        identities = [
+            (by_class[c.class_id], c)
+            for c in ranked
+            if c.class_id in by_class and by_class[c.class_id].unit_weight > 0
+        ][: self._identity_pool]
         if not identities:
             return None
+        top_p, top_c = identities[0]
 
-        # ① 단일 정체성 우선 (I3 게이트, 178g 원칙) — 득표순 전 정체성 시도
+        def fit(p: ActiveProduct) -> tuple[int, float]:
+            n = min(max(1, round(target / p.unit_weight)), p.stock_qty)  # I12
+            return n, abs(target - n * p.unit_weight)
+
+        # ① 밴드 내 단일 (I3 게이트) — top의 single_share 이상 득표만 시도
         for p, cand in identities:
-            if p.unit_weight <= 0:
+            if cand.vote_count < self._single_share * top_c.vote_count:
                 continue
-            count = min(max(1, round(target / p.unit_weight)), p.stock_qty)  # I12
-            if abs(target - count * p.unit_weight) <= gate:
+            count, residual = fit(p)
+            if residual <= gate:
                 return JudgmentResult(
                     JudgmentStatus.COMPLETE,
                     (ProductCount(p, count),),
@@ -121,11 +178,26 @@ class FreezerVisionFirstStrategy:
                     reason="freezer_vision_first_single",
                 )
 
-        # ② k정체성 조합 (k=2..max_kinds, 종류 적은 설명 우선 — 여전히 I3 필수)
-        pool = [(p, c) for p, c in identities if p.unit_weight > 0]
-        for k in range(2, min(self._max_kinds, len(pool)) + 1):
+        # ② top 근접 실패 → 정체성 교체 대신 오염 가정, 개수 보존 PARTIAL
+        n_top, r_top = fit(top_p)
+        if r_top <= near:
+            return JudgmentResult(
+                JudgmentStatus.PARTIAL,
+                (ProductCount(top_p, n_top),),
+                confidence=top_c.confidence * 0.6,
+                reason="freezer_vision_first_near_gate",
+            )
+
+        # ③ k정체성 조합 (top 포함 필수, 멤버 combo_share 이상, I3 필수)
+        rest = [
+            (p, c)
+            for p, c in identities[1:]
+            if c.vote_count >= self._combo_share * top_c.vote_count
+        ]
+        for k in range(2, min(self._max_kinds, len(rest) + 1) + 1):
             best: tuple[tuple[float, int], tuple, tuple] | None = None
-            for subset in itertools.combinations(pool, k):
+            for tail in itertools.combinations(rest, k - 1):
+                subset = ((top_p, top_c),) + tail
                 for alloc in self._allocations([p for p, _ in subset], target, gate):
                     weight = sum(c * p.unit_weight for (p, _), c in zip(subset, alloc, strict=True))
                     key = (
@@ -142,6 +214,25 @@ class FreezerVisionFirstStrategy:
                     confidence=sum(cand.confidence for _, cand in subset) / len(subset),
                     reason="freezer_vision_first_combo",
                 )
+
+        # ④ 유일-적합 구제 — top 결정적 반증 시, 나머지 중 near 내 적합이
+        # 정확히 하나일 때만 (둘 이상이면 무게로는 못 고른다, I-V).
+        # refit_share 미만 득표는 적합/모호성 판단에서 제외 (docstring ④).
+        fits = []
+        for p, cand in identities[1:]:
+            if cand.vote_count < self._refit_share * top_c.vote_count:
+                continue
+            count, residual = fit(p)
+            if residual <= near:
+                fits.append((p, cand, count))
+        if len(fits) == 1:
+            p, cand, count = fits[0]
+            return JudgmentResult(
+                JudgmentStatus.COMPLETE,
+                (ProductCount(p, count),),
+                confidence=cand.confidence * 0.8,
+                reason="freezer_vision_first_unique_refit",
+            )
         return None
 
     def _allocations(self, products: list[ActiveProduct], target: float, gate: float):
@@ -191,6 +282,11 @@ class SegmentWeightMatchingStrategy:
         self._matcher = matcher or StrictWeightMatcher()
 
     def precondition(self, ctx: JudgmentContext) -> bool:
+        # I-V (이슈 #15): 구간별 무게로 후보 중 정체성을 고르는 전략 —
+        # freezer에서는 무게가 정체성 판별자 자격이 없으므로 배제.
+        # freezer 다품종은 freezer_vision_first 조합(top 포함)이 담당.
+        if not ctx.profile.weight_is_discriminative:
+            return False
         removal = [s for s in ctx.segments if s.delta_grams < 0]
         return len(removal) >= 2 and bool(ctx.vision_candidates)
 
@@ -254,6 +350,11 @@ class StageCountCombinationStrategy:
         self._require_no_vision = require_no_vision
 
     def precondition(self, ctx: JudgmentContext) -> bool:
+        # I-V (이슈 #15): stage 무게로 정체성을 고르는 전략 — freezer 배제.
+        # 특히 require_no_vision=True 인스턴스는 전 재고 센티널 후보로 순수
+        # 무게 식별을 하므로(178g 사건과 동형) freezer에서 치명적이었다.
+        if not ctx.profile.weight_is_discriminative:
+            return False
         if self._require_no_vision and ctx.vision_candidates:
             return False
         targets = ctx.stage_hints.get("segment_targets")
@@ -394,7 +495,14 @@ class SameWeightCollisionGuardStrategy:
     name = "same_weight_collision_guard"
 
     def precondition(self, ctx: JudgmentContext) -> bool:
-        return bool(ctx.vision_candidates) and ctx.delta_weight < 0
+        # I-V (이슈 #15): 무게 창(±tol)이 정체성 후보군을 만드는 전략 —
+        # freezer 배제 (freezer의 동일 무게 충돌은 freezer_vision_first의
+        # 득표 순위가 이미 해소한다).
+        return (
+            ctx.profile.weight_is_discriminative
+            and bool(ctx.vision_candidates)
+            and ctx.delta_weight < 0
+        )
 
     def solve(self, ctx: JudgmentContext) -> JudgmentResult | None:
         target = abs(ctx.delta_weight)
@@ -429,7 +537,11 @@ class StrictStrategy:
         self._matcher = matcher or StrictWeightMatcher()
 
     def precondition(self, ctx: JudgmentContext) -> bool:
-        return bool(ctx.vision_candidates)
+        # I-V (이슈 #15): 무게 우선 조합 탐색이 vision 후보 중 정체성을
+        # 선택하는 기본 경로 — freezer에서는 freezer_vision_first가 불발한
+        # 뒤 이 전략이 같은 무게 산술로 오식별을 재생산하는 누수가 있었다
+        # (65표 top 게이트 탈락 후 16표 배경 후보 조합 채택). freezer 배제.
+        return ctx.profile.weight_is_discriminative and bool(ctx.vision_candidates)
 
     def solve(self, ctx: JudgmentContext) -> JudgmentResult | None:
         best = self._matcher.best(
@@ -452,7 +564,9 @@ class SameProductCountStrategy:
     name = "same_product_count"
 
     def precondition(self, ctx: JudgmentContext) -> bool:
-        return bool(ctx.vision_candidates)
+        # I-V (이슈 #15): 후보들 중 무게 오차 최소를 고르는 전략 — freezer
+        # 배제 (freezer의 동일 상품 n개는 freezer_vision_first ①/②가 담당).
+        return ctx.profile.weight_is_discriminative and bool(ctx.vision_candidates)
 
     def solve(self, ctx: JudgmentContext) -> JudgmentResult | None:
         target = abs(ctx.delta_weight)
@@ -503,7 +617,10 @@ class RelaxedStrategy:
         self._relax = relax_factor
 
     def precondition(self, ctx: JudgmentContext) -> bool:
-        return bool(ctx.vision_candidates)
+        # I-V (이슈 #15): tolerance×2 무게 조합 — freezer 배제. freezer의
+        # "top 반증 후 완화 재시도"는 freezer_vision_first ④(유일-적합
+        # 구제, 같은 2×gate 창 + 유일성 조건)가 안전한 형태로 대체한다.
+        return ctx.profile.weight_is_discriminative and bool(ctx.vision_candidates)
 
     def solve(self, ctx: JudgmentContext) -> JudgmentResult | None:
         relaxed_tol = ctx.profile.tolerance_grams * self._relax
