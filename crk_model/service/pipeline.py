@@ -31,6 +31,7 @@ from crk_model.ingest.loadcell import (
     LoadcellSample,
 )
 from crk_model.judgment.interfaces import JudgmentContext
+from crk_model.judgment.likelihood import WeightLikelihoodScorer
 from crk_model.judgment.router import JudgmentRouter
 from crk_model.ledger.events import TriggerEvent
 from crk_model.perception.detector import HAND_CLASS_ID, Detector
@@ -86,6 +87,10 @@ class TriggerTrace:
     # diff를 아카이브로 실측해 승격 여부를 결정한다 (특히 primary가
     # insufficient_*로 delta=0을 낼 때 BOCPD가 보는 값).
     loadcell_shadow: dict | None = None
+    # 무게 우도 score shadow (docs/0722_weight_likelihood_design.md Phase 1):
+    # 판정 미사용 — 이벤트(트레이)별 score 순위와 현행 판정의 diff 기록.
+    # mismatch=true 세션을 아카이브에서 수집해 승격(Phase 2/3)을 결정한다.
+    likelihood_shadow: list[dict] | None = None
 
 
 @dataclass(frozen=True)
@@ -132,6 +137,12 @@ class TriggerPipeline:
         bocpd_shadow_enabled: bool = False,
         # BOCPD shadow 분석기 (research §2): 라이브러리 기본 False(하위호환),
         # 운영값은 Settings가 주입 (MODEL__LOADCELL__BOCPD_SHADOW).
+        likelihood_shadow_enabled: bool = False,
+        # 무게 우도 score shadow (research §1-2 승인분, Phase 1): 라이브러리
+        # 기본 False(하위호환), 운영값은 Settings가 주입
+        # (MODEL__JUDGMENT__LIKELIHOOD_SHADOW). 판정·정산 무변경 — trace 기록만.
+        likelihood_params: Mapping | None = None,
+        # WeightLikelihoodScorer 생성 인자 (k/sigma_db 등, MODEL__JUDGMENT__* env).
     ):
         self._detector = detector
         self._profiles = dict(profiles)
@@ -146,6 +157,11 @@ class TriggerPipeline:
         self._motion_evidence_enabled = motion_evidence_enabled
         self._motion_evidence_floor = motion_evidence_floor_px
         self._bocpd_shadow = bocpd_shadow_enabled
+        self._likelihood: WeightLikelihoodScorer | None = (
+            WeightLikelihoodScorer(**dict(likelihood_params or {}))
+            if likelihood_shadow_enabled
+            else None
+        )
 
     def process(self, session_id: str, req: TriggerRequest) -> TriggerOutcome:
         try:
@@ -246,6 +262,7 @@ class TriggerPipeline:
         else:
             judgment = self._router.judge(ctx)
             judgment = self._segment_target_retry(ctx, judgment, analysis, trace)
+            self._likelihood_shadow(ctx, judgment, trace)
         top_code = _vision_top_not_billed(candidates, judgment)
         if top_code:
             trace.reason_codes.append(top_code)
@@ -275,6 +292,13 @@ class TriggerPipeline:
             j = self._segment_target_retry(ectx, j, ev, trace)
             results.append((ev, j))
         results = self._pool_exhaustion_retry(ctx, results, trace)
+        for ev, j in results:
+            self._likelihood_shadow(
+                replace(ctx, delta_weight=ev.delta_grams, segments=ev.segments),
+                j,
+                trace,
+                channel=ev.channel,
+            )
 
         complete = [
             (ev, j) for ev, j in results
@@ -344,6 +368,39 @@ class TriggerPipeline:
             reason=f"multi_tray[{reasons}]",
             strategy=f"multi_tray[{strategies}]",
         )
+
+    def _likelihood_shadow(
+        self,
+        ctx: JudgmentContext,
+        judgment: JudgmentResult,
+        trace: TriggerTrace,
+        channel: int | None = None,
+    ) -> None:
+        """무게 우도 score shadow (Phase 1) — 판정 경로를 절대 깨지 않는다.
+
+        σ_d는 BOCPD shadow의 delta_std가 있으면 그것을 쓴다 (설계 §2 —
+        BOCPD 승격 시 자연 연결). 실패·비적용은 조용히 건너뛰거나 error만
+        기록한다 (BOCPD shadow와 동일 격리 패턴)."""
+        if self._likelihood is None:
+            return
+        try:
+            sigma_d = None
+            sh = trace.loadcell_shadow
+            if sh and isinstance(sh.get("delta_std"), (int, float)):
+                sigma_d = float(sh["delta_std"])
+            entry = self._likelihood.shadow(ctx, judgment, sigma_d=sigma_d)
+        except Exception as exc:  # noqa: BLE001 — shadow 격리
+            entry = {"scorer": "weight_likelihood", "error": type(exc).__name__}
+        if entry is None:
+            return
+        if channel is not None:
+            entry["channel"] = channel
+        if trace.likelihood_shadow is None:
+            trace.likelihood_shadow = []
+        trace.likelihood_shadow.append(entry)
+        if entry.get("mismatch"):
+            suffix = f":ch{channel}" if channel is not None else ""
+            trace.reason_codes.append(f"likelihood_shadow_mismatch{suffix}")
 
     def _pool_exhaustion_retry(
         self,

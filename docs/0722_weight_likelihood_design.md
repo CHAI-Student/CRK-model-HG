@@ -1,6 +1,8 @@
 # 무게 이벤트의 확률화 — 우도비 상한 방식 설계 (research §1-2 승인분)
 
-상태: 설계 — 구현 전 (2026-07-22). 근거: claudedocs/research_judgment_performance_20260722.md
+상태: **Phase 1 (shadow) 구현 완료** (2026-07-23, `judgment/likelihood.py` —
+fix_logs.md 해당 항목 참조). Phase 2/3은 아카이브 실측 후.
+근거: claudedocs/research_judgment_performance_20260722.md
 §1(FAIM/Grab), issue #16 실기 4건, docs/0722_issue16_arbitration_design.md.
 
 ## 1. 문제 — 경첩(hinge)의 불연속

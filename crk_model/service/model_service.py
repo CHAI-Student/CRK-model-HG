@@ -190,6 +190,13 @@ class ModelService:
             motion_evidence_enabled=self.settings.motion_evidence_enabled,
             motion_evidence_floor_px=self.settings.motion_evidence_floor_px,
             bocpd_shadow_enabled=self.settings.bocpd_shadow,
+            # 무게 우도 score shadow (MODEL__JUDGMENT__LIKELIHOOD_*, Phase 1):
+            # 판정 미사용 — 아카이브 diff 실측용 (BOCPD shadow와 동일 패턴).
+            likelihood_shadow_enabled=self.settings.likelihood_shadow,
+            likelihood_params={
+                "k": self.settings.likelihood_k,
+                "sigma_db": self.settings.likelihood_sigma_db,
+            },
             # 로드셀 안정 판정 (MODEL__WEIGHT__STABLE_WINDOW 등, 이슈 #14):
             # post-roll 샘플 수와 함께 최종 plateau 성립 조건을 결정한다.
             analyzer_factory=lambda profile: LoadcellAnalyzer(

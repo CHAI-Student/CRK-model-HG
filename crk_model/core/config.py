@@ -159,6 +159,14 @@ class Settings:
     judgment_count_unit_slack: float = 5.0
     judgment_conf_override: float = 0.9
     judgment_conf_margin: float = 0.15
+    # ---- 무게 우도 score shadow (docs/0722_weight_likelihood_design.md Phase 1) ----
+    # 판정 미사용 — 이벤트별 score 순위와 현행 판정의 diff만 trace/아카이브에
+    # 기록. k는 우도비 상한(clamp): 1이면 무게 무력(거부권만), 클수록 무게가
+    # vision 사전비를 뒤집을 수 있는 폭이 커진다. sigma_db는 DB unit_weight
+    # 개당 편차(g) — 아카이브 잔차 실측으로 보정한다 (conformal 대상).
+    likelihood_shadow: bool = True
+    likelihood_k: float = 20.0
+    likelihood_sigma_db: float = 5.0
     # ---- 조기 종료 (D7) — removal & 비freezer에서만 유효 ----
     early_termination_enabled: bool = True
     # ---- 모션 게이트 오버라이드 (None = SensorProfile 기본값 유지) ----
@@ -253,6 +261,9 @@ class Settings:
             ),
             judgment_conf_override=_env_float("MODEL__JUDGMENT__CONF_OVERRIDE", 0.9),
             judgment_conf_margin=_env_float("MODEL__JUDGMENT__CONF_MARGIN", 0.15),
+            likelihood_shadow=_env_bool("MODEL__JUDGMENT__LIKELIHOOD_SHADOW", True),
+            likelihood_k=_env_float("MODEL__JUDGMENT__LIKELIHOOD_K", 20.0),
+            likelihood_sigma_db=_env_float("MODEL__JUDGMENT__LIKELIHOOD_SIGMA_DB", 5.0),
             early_termination_enabled=_env_bool(
                 "MODEL__VISION__EARLY_TERMINATION", True
             ),

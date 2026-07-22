@@ -68,6 +68,7 @@ def _trace_to_dict(trace: TriggerTrace | None) -> dict:
         "reason_codes": list(trace.reason_codes),
         "vote_summary": dict(trace.vote_summary) if trace.vote_summary else {},
         "loadcell_shadow": trace.loadcell_shadow,
+        "likelihood_shadow": trace.likelihood_shadow,
     }
 
 
