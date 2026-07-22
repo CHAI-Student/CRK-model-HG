@@ -61,16 +61,6 @@ def _env_choice(key: str, default: str, valid: tuple[str, ...]) -> str:
     return normalized
 
 
-def _env_camera_layout(key: str, default: str) -> str:
-    raw = os.environ.get(key)
-    if not raw:
-        return default
-    normalized = raw.strip().lower()
-    if normalized not in _VALID_CAMERA_LAYOUTS:
-        # cabinet_type과 동일한 fail-closed: 오타가 조용히 dual로 폴백되면
-        # 냉동 dual-top 수직 ROI 없이 운영되고 있음을 알 수 없다.
-        raise ValueError(f"Invalid camera layout: {raw}")
-    return normalized
 
 
 def _env_baseline_mode(key: str, default: str) -> str:
@@ -299,7 +289,9 @@ class Settings:
             baseline_suppress_iou=_env_float(
                 "MODEL__VISION__BASELINE_SUPPRESS_IOU", 0.5
             ),
-            camera_layout=_env_camera_layout("MODEL__VISION__CAMERA_LAYOUT", "dual"),
+            camera_layout=_env_choice(
+                "MODEL__VISION__CAMERA_LAYOUT", "dual", _VALID_CAMERA_LAYOUTS
+            ),
             freezer_roi_vertical_region=os.environ.get(
                 "MODEL__VISION__FREEZER_ROI_VERTICAL_REGION", "upper"
             ).strip().lower(),
