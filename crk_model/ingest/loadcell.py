@@ -61,6 +61,8 @@ class LoadcellAnalysis:
 
 
 class LoadcellAnalyzer:
+    name = "plateau"  # MODEL__LOADCELL__ANALYZER 식별자 (bocpd 대응물과 대칭)
+
     def __init__(
         self,
         profile: SensorProfile,

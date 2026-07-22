@@ -49,6 +49,18 @@ _VALID_BASELINE_MODES = ("off", "shadow", "active")
 _VALID_CAMERA_LAYOUTS = ("dual", "dual_top_proxy")
 
 
+def _env_choice(key: str, default: str, valid: tuple[str, ...]) -> str:
+    raw = os.environ.get(key)
+    if not raw:
+        return default
+    normalized = raw.strip().lower()
+    if normalized not in valid:
+        # fail-closed: 오타가 조용히 기본값이 되면 의도한 구성이 아닌 채
+        # 운영되고 있음을 알 수 없다 (cabinet_type과 동일 원칙).
+        raise ValueError(f"Invalid value for {key}: {raw}")
+    return normalized
+
+
 def _env_camera_layout(key: str, default: str) -> str:
     raw = os.environ.get(key)
     if not raw:
@@ -215,6 +227,11 @@ class Settings:
     # ---- 로드셀 안정 판정 (0.8s 캐던스 기준값, 이슈 #14) ----
     loadcell_stable_window: int = 3
     loadcell_stability_threshold_grams: float = 2.5
+    # primary 분석기 선택 (이슈 #14 승격 스위치): "plateau"(기본, 3연속 안정
+    # 창) | "bocpd"(run-length 변화점 — shadow 실측에서 우세 확인 후 env로
+    # 승격). bocpd primary일 때 shadow는 자동으로 plateau로 바뀌어 대칭
+    # diff가 유지된다.
+    loadcell_analyzer: str = "plateau"
     # BOCPD shadow 분석기 (research §2): 판정 미사용, 아카이브 diff 실측용.
     # plateau 휴리스틱이 못 보는 delta(#14 무음 0원, 연속 취출 플래토 붕괴)를
     # 변화점 검출이 어떻게 읽는지 병행 기록 — 승격은 실측 후 결정.
@@ -317,6 +334,9 @@ class Settings:
             ),
             bocpd_shadow=_env_bool("MODEL__LOADCELL__BOCPD_SHADOW", True),
             motion_gate_keepalive=_env_opt_int("MODEL__VISION__MOTION_GATE_KEEPALIVE"),
+            loadcell_analyzer=_env_choice(
+                "MODEL__LOADCELL__ANALYZER", "plateau", ("plateau", "bocpd")
+            ),
             loadcell_stable_window=_env_int("MODEL__WEIGHT__STABLE_WINDOW", 3),
             loadcell_stability_threshold_grams=_env_float(
                 "MODEL__WEIGHT__STABILITY_THRESHOLD_GRAMS", 2.5

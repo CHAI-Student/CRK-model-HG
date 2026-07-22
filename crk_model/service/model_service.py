@@ -27,6 +27,7 @@ from crk_model.gateway.state_machine import (
     MultiZoneGateway,
     build_payment_payload,
 )
+from crk_model.ingest.bocpd import BocpdLoadcellAnalyzer
 from crk_model.ingest.idempotency import IdempotencyRegistry
 from crk_model.ingest.loadcell import LoadcellAnalyzer
 from crk_model.judgment.router import JudgmentRouter, default_pipeline
@@ -201,10 +202,25 @@ class ModelService:
             },
             # 로드셀 안정 판정 (MODEL__WEIGHT__STABLE_WINDOW 등, 이슈 #14):
             # post-roll 샘플 수와 함께 최종 plateau 성립 조건을 결정한다.
-            analyzer_factory=lambda profile: LoadcellAnalyzer(
-                profile,
-                stable_window=self.settings.loadcell_stable_window,
-                stability_threshold_grams=self.settings.loadcell_stability_threshold_grams,
+            # MODEL__LOADCELL__ANALYZER=bocpd면 primary를 BOCPD 어댑터로 교체
+            # (승격 스위치 — shadow 실측 우세 확인 후에만 켠다).
+            analyzer_factory=(
+                (
+                    lambda profile: BocpdLoadcellAnalyzer(
+                        profile,
+                        sigma=self.settings.loadcell_stability_threshold_grams,
+                    )
+                )
+                if self.settings.loadcell_analyzer == "bocpd"
+                else (
+                    lambda profile: LoadcellAnalyzer(
+                        profile,
+                        stable_window=self.settings.loadcell_stable_window,
+                        stability_threshold_grams=(
+                            self.settings.loadcell_stability_threshold_grams
+                        ),
+                    )
+                )
             ),
             # 비전 튜닝 (MODEL__VISION__*, issue #6 2차): 진입 컷·투표 임계는
             # 현장 카메라/조명에 따라 env로 조정한다 (.env.example 참조).

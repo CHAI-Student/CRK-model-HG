@@ -426,6 +426,26 @@ class TestCabinetTypeDefaultProfile:
         assert outcome.event.judgment.reason == "weight_only"
         assert outcome.event.judgment.status.value == "complete"
 
+    def test_bocpd_primary_switch_swaps_shadow_to_plateau(self, cola):
+        # 이슈 #14 승격 스위치: MODEL__LOADCELL__ANALYZER=bocpd — primary가
+        # BOCPD 어댑터로 바뀌고, shadow는 plateau로 뒤집혀 대칭 diff 유지.
+        settings = Settings(loadcell_analyzer="bocpd", close_grace_s=0.0)
+        svc = ModelService(FakeDetector(), clock=FakeClock(), settings=settings)
+        svc.handle_multi_zone(open_payload(cola))
+        svc.handle_trigger(trigger_payload())  # delta -100 = cola 1개
+        svc.process_pending()
+        outcome = svc.worker.outcomes[-1]
+        assert outcome.event.judgment.status.value == "complete"
+        assert abs(outcome.event.delta_weight - (-100.0)) < 5.0
+        sh = outcome.trace.loadcell_shadow
+        assert sh is not None and sh["analyzer"] == "plateau"
+        assert sh["mismatch"] is False  # 깨끗한 계단 — 두 분석기 일치
+
+    def test_invalid_loadcell_analyzer_env_rejected(self, monkeypatch):
+        monkeypatch.setenv("MODEL__LOADCELL__ANALYZER", "bocdp")
+        with pytest.raises(ValueError):
+            Settings.from_env()
+
     def test_freezer_dual_top_layout_applies_vertical_roi(self, cola):
         # P1-5 배선: cabinet_type=freezer ∧ camera_layout=dual_top_proxy면
         # 두 카메라 모두 상단 절반(center_y <= 240)만 유지 — 하단(진열 선반)

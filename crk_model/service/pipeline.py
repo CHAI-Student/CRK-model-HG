@@ -200,7 +200,8 @@ class TriggerPipeline:
             )
             return self._outcome(session_id, req, 0.0, (), judgment, trace)
 
-        analysis = self._analyzer_factory(profile).analyze(req.loadcells)
+        analyzer = self._analyzer_factory(profile)
+        analysis = analyzer.analyze(req.loadcells)
         vision_only = not analysis.stabilized and analysis.reason in (
             "insufficient_samples",
             "insufficient_stable_regions",
@@ -215,25 +216,39 @@ class TriggerPipeline:
             trace.reason_codes.append("return_stabilization_pending")
         delta = analysis.delta_weight
         if self._bocpd_shadow:
-            # shadow는 판정 경로를 절대 깨지 않는다 — 실패는 기록만
+            # shadow는 판정 경로를 절대 깨지 않는다 — 실패는 기록만.
+            # primary가 bocpd로 승격된 경우(MODEL__LOADCELL__ANALYZER=bocpd)
+            # 자기 비교는 무의미하므로 plateau를 shadow로 돌려 대칭 diff를
+            # 유지한다 (승격 후에도 회귀 방향의 mismatch를 관측 가능).
             try:
-                sh = BocpdAnalyzer().analyze(req.loadcells)
-                trace.loadcell_shadow = {
-                    "analyzer": "bocpd",
-                    "delta": round(sh.delta_weight, 2),
-                    "delta_std": round(sh.delta_std, 2),
-                    "channels": [
-                        {
-                            "channel": c.channel,
-                            "delta": round(c.delta, 2),
-                            "levels": [round(s.level, 1) for s in c.segments],
-                        }
-                        for c in sh.channels
-                    ],
-                    "primary_delta": round(delta, 2),
-                    "primary_reason": analysis.reason,
-                    "mismatch": abs(sh.delta_weight - delta) > 5.0,
-                }
+                if getattr(analyzer, "name", "plateau") == "bocpd":
+                    sh_plateau = LoadcellAnalyzer(profile).analyze(req.loadcells)
+                    trace.loadcell_shadow = {
+                        "analyzer": "plateau",
+                        "delta": round(sh_plateau.delta_weight, 2),
+                        "reason": sh_plateau.reason,
+                        "primary_delta": round(delta, 2),
+                        "primary_reason": analysis.reason,
+                        "mismatch": abs(sh_plateau.delta_weight - delta) > 5.0,
+                    }
+                else:
+                    sh = BocpdAnalyzer().analyze(req.loadcells)
+                    trace.loadcell_shadow = {
+                        "analyzer": "bocpd",
+                        "delta": round(sh.delta_weight, 2),
+                        "delta_std": round(sh.delta_std, 2),
+                        "channels": [
+                            {
+                                "channel": c.channel,
+                                "delta": round(c.delta, 2),
+                                "levels": [round(s.level, 1) for s in c.segments],
+                            }
+                            for c in sh.channels
+                        ],
+                        "primary_delta": round(delta, 2),
+                        "primary_reason": analysis.reason,
+                        "mismatch": abs(sh.delta_weight - delta) > 5.0,
+                    }
             except Exception as exc:  # noqa: BLE001 — shadow 격리
                 trace.loadcell_shadow = {"analyzer": "bocpd", "error": type(exc).__name__}
 

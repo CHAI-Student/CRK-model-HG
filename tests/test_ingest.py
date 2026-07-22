@@ -201,3 +201,70 @@ class TestBocpdShadow:
         a = BocpdAnalyzer().analyze([LoadcellSample(0.0, (500.0,))])
         assert a.reason == "insufficient_samples"
         assert a.delta_weight == 0.0
+
+
+class TestBocpdPrimaryAdapter:
+    """BocpdLoadcellAnalyzer — LoadcellAnalyzer 계약 동형 (승격 스위치 대상)."""
+
+    @staticmethod
+    def _series(levels, per=3, dt=0.8):
+        from crk_model.ingest.loadcell import LoadcellSample
+
+        out, ts = [], 0.0
+        for lv in levels:
+            for _ in range(per):
+                out.append(LoadcellSample(ts, (lv,)))
+                ts += dt
+        return out
+
+    def test_quick_takeout_creep_yields_delta_where_plateau_fails(self):
+        # 이슈 #14 패턴: post-roll 5샘플에 creep(745→700→560)이 걸쳐 있으면
+        # plateau(3연속 창)는 insufficient지만 BOCPD primary는 delta를 읽는다.
+        from crk_model.core.profiles import FREEZER
+        from crk_model.ingest.bocpd import BocpdLoadcellAnalyzer
+        from crk_model.ingest.loadcell import LoadcellAnalyzer, LoadcellSample
+
+        xs = [745.0, 745.0, 700.0, 560.0, 560.0]
+        samples = [LoadcellSample(i * 0.8, (v,)) for i, v in enumerate(xs)]
+        plateau = LoadcellAnalyzer(FREEZER).analyze(samples)
+        assert not plateau.stabilized  # 현행 실패 계약의 확인 (전제)
+        a = BocpdLoadcellAnalyzer(FREEZER).analyze(samples)
+        assert a.stabilized
+        assert abs(a.delta_weight - (-185.0)) < 10.0
+        assert len(a.events) == 1 and a.events[0].channel == 0
+
+    def test_return_needs_stabilization_contract(self):
+        # 반품(+delta)인데 마지막 레벨 지속이 stabilization_wait 미만이면
+        # plateau 경로와 동일하게 구간화 보류 (QA Q3 ①).
+        from crk_model.core.profiles import FREEZER
+        from crk_model.ingest.bocpd import BocpdLoadcellAnalyzer
+
+        samples = self._series([400.0] * 6 + [555.0], per=1, dt=0.4)
+        a = BocpdLoadcellAnalyzer(FREEZER, stabilization_wait_s=1.0).analyze(samples)
+        assert a.reason == "needs_return_stabilization"
+        assert not a.stabilized and a.segments == ()
+        assert a.delta_weight > 100.0  # delta는 실어 보낸다 (구 계약)
+
+    def test_flat_series_keeps_vision_only_contract(self):
+        from crk_model.core.profiles import FREEZER
+        from crk_model.ingest.bocpd import BocpdLoadcellAnalyzer
+
+        a = BocpdLoadcellAnalyzer(FREEZER).analyze(self._series([500.0], per=10))
+        assert a.reason == "insufficient_stable_regions"
+        assert not a.stabilized and a.delta_weight == 0.0
+
+    def test_two_channel_events_for_multi_tray(self):
+        from crk_model.core.profiles import FREEZER
+        from crk_model.ingest.bocpd import BocpdLoadcellAnalyzer
+        from crk_model.ingest.loadcell import LoadcellSample
+
+        out, ts = [], 0.0
+        for k in range(20):
+            v0 = 500.0 if k < 10 else 345.0
+            v1 = 420.0 if k < 10 else 285.0
+            out.append(LoadcellSample(ts, (v0, v1)))
+            ts += 0.8
+        a = BocpdLoadcellAnalyzer(FREEZER).analyze(out)
+        assert a.stabilized and len(a.events) == 2
+        deltas = {e.channel: e.delta_grams for e in a.events}
+        assert abs(deltas[0] - (-155.0)) < 5.0 and abs(deltas[1] - (-135.0)) < 5.0

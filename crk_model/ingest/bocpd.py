@@ -25,7 +25,13 @@ import math
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from crk_model.ingest.loadcell import LoadcellSample
+from crk_model.core.profiles import SensorProfile
+from crk_model.core.types import WeightSegment
+from crk_model.ingest.loadcell import (
+    ChannelWeightEvent,
+    LoadcellAnalysis,
+    LoadcellSample,
+)
 
 
 @dataclass(frozen=True)
@@ -148,3 +154,85 @@ def _logsumexp(vals: list[float]) -> float:
     if m == -math.inf:
         return m
     return m + math.log(sum(math.exp(v - m) for v in vals))
+
+
+class BocpdLoadcellAnalyzer:
+    """BOCPD를 primary 분석기로 승격할 때의 어댑터 — LoadcellAnalyzer 계약 동형.
+
+    `MODEL__LOADCELL__ANALYZER=bocpd`로 선택된다 (기본 plateau — 승격은
+    아카이브 실측에서 shadow가 우세할 때만, 레포 관행). 반환 계약은
+    LoadcellAnalysis 그대로: reason 문자열(insufficient_* /
+    needs_return_stabilization), min_weight_change 채널 게이트, 세그먼트
+    스텝 임계, 반품 안정화 대기(QA Q3 ①), 채널 이벤트(멀티트레이 2단계)
+    전부 plateau 경로와 동일 의미론을 유지한다 — 바뀌는 것은 "안정 구간"의
+    정의(3연속 std 창 → run-length 사후분포)뿐이다.
+    """
+
+    name = "bocpd"
+
+    def __init__(
+        self,
+        profile: SensorProfile,
+        *,
+        sigma: float = 2.5,
+        hazard: float = 0.1,
+        stabilization_wait_s: float = 1.0,
+    ):
+        self._profile = profile
+        self._inner = BocpdAnalyzer(sigma=sigma, hazard=hazard)
+        self._stab_wait = stabilization_wait_s
+
+    def analyze(self, samples: Sequence[LoadcellSample]) -> LoadcellAnalysis:
+        if len(samples) < 2:
+            return LoadcellAnalysis(0.0, (), False, 0.0, "insufficient_samples")
+        res = self._inner.analyze(samples)
+        min_change = self._profile.min_weight_change_grams
+        step = self._profile.segment_step_grams
+        baseline = sum(c.segments[0].level for c in res.channels)
+        events: list[ChannelWeightEvent] = []
+        pending_delta = 0.0
+        pending = False
+        moved = False
+        for c in res.channels:
+            if len(c.segments) >= 2:
+                moved = True
+            if abs(c.delta) < min_change:
+                continue  # 평탄/노이즈 트레이 — baseline에만 기여
+            if c.delta > 0:
+                # 반품 안정화 대기 (QA Q3 ①): 마지막 레벨이 충분히 지속돼야
+                # 구간화 — plateau 경로와 동일 계약.
+                last = c.segments[-1]
+                duration = samples[last.end].ts - samples[last.start].ts
+                if duration < self._stab_wait:
+                    pending = True
+                    pending_delta += c.delta
+                    continue
+            segs = tuple(
+                WeightSegment(
+                    samples[prev.end].ts, samples[cur.start].ts, cur.level - prev.level
+                )
+                for prev, cur in zip(c.segments, c.segments[1:], strict=False)
+                if abs(cur.level - prev.level) >= step
+            )
+            events.append(ChannelWeightEvent(c.channel, c.delta, segs))
+        if pending:
+            delta = pending_delta + sum(e.delta_grams for e in events)
+            return LoadcellAnalysis(
+                delta, (), False, baseline, "needs_return_stabilization"
+            )
+        if events:
+            segments = sorted(
+                (s for e in events for s in e.segments), key=lambda s: s.start_ts
+            )
+            delta = sum(e.delta_grams for e in events)
+            return LoadcellAnalysis(
+                delta, tuple(segments), True, baseline, events=tuple(events)
+            )
+        if moved:
+            # 변화는 있었지만 전 채널 게이트 미달 — 합산 delta를 실어 보내
+            # pipeline의 below_min_weight_change 스킵이 판단 (plateau 동형)
+            return LoadcellAnalysis(res.delta_weight, (), True, baseline)
+        # 전 채널 평탄 — plateau 경로의 "전 채널 평탄" 계약과 동일하게
+        # vision_only 강제 사유를 유지한다 (로드셀이 트리거를 냈는데 변화가
+        # 안 보이면 로드셀 판독을 신뢰하지 않는 보수적 방향).
+        return LoadcellAnalysis(0.0, (), False, baseline, "insufficient_stable_regions")
