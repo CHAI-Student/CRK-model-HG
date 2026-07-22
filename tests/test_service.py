@@ -184,6 +184,56 @@ class TestMultiTrayEvents:
             for rc in outcome.trace.reason_codes
         )
 
+    def test_issue16_retry_with_near_band_distractor_recovered(self):
+        # 이슈 #16 재현 2차 (실기 코멘트 YAML): 재판정 풀에 168g 배경 후보
+        # (다득표)와 115g near 밴드 교란 후보가 섞인 케이스. 구 ④는
+        # "적합 2개(135g 잔차 0 + 115g 잔차 20)=모호"로 불발했다 — 하드
+        # 게이트 유일 적합(135g)은 near 밴드 적합과 무관하게 채택돼야 한다.
+        bagel = ActiveProduct(
+            "P27", "베이글", class_id=27, unit_weight=155.0, unit_price=2800, stock_qty=5
+        )
+        dumpling = ActiveProduct(
+            "P13", "만두", class_id=13, unit_weight=168.0, unit_price=3700, stock_qty=5
+        )
+        hotdog135 = ActiveProduct(
+            "P40", "핫도그135", class_id=40, unit_weight=135.0, unit_price=3000, stock_qty=5
+        )
+        hotdog115 = ActiveProduct(
+            "P24", "핫도그115", class_id=24, unit_weight=115.0, unit_price=2500, stock_qty=5
+        )
+
+        class CommentSceneDetector(FakeDetector):
+            """27 매 프레임(20표), 13 절반(10표), 40·24 는 1/5(각 4표)."""
+
+            def detect(self, frame, allowed_class_ids=None):
+                self.calls += 1
+                dets = [Detection(27, 0.7, bbox=(50.0, 50.0, 100.0, 100.0))]
+                if self.calls % 2 == 0:
+                    dets.append(Detection(13, 0.85, bbox=(150.0, 150.0, 200.0, 200.0)))
+                if self.calls % 5 == 0:
+                    dets.append(Detection(40, 0.95, bbox=(150.0, 50.0, 200.0, 100.0)))
+                    dets.append(Detection(24, 0.70, bbox=(250.0, 50.0, 300.0, 100.0)))
+                return dets
+
+        detector = CommentSceneDetector()
+        store = ActiveProductStore()
+        store.update([bagel, dumpling, hotdog135, hotdog115])
+        pipe = TriggerPipeline(detector, {2: FREEZER}, store)
+        outcome = pipe.process(
+            "s1",
+            TriggerRequest(
+                2,
+                {"top": moving_frames(20)},
+                dual_tray_samples((500, 345), (420, 285)),  # ch0 −155 / ch1 −135
+                1.0,
+            ),
+        )
+        j = outcome.event.judgment
+        assert j.status is JudgmentStatus.COMPLETE
+        billed = {pc.product.class_id: pc.count for pc in j.products}
+        assert billed == {27: 1, 40: 1}
+        assert "freezer_vision_first_unique_refit+pool_exhaustion" in j.reason
+
     def test_single_tray_event_keeps_legacy_path(self, cola, bar170):
         # 이벤트 1개면 기존 단일 판정 경로 그대로 (multi_tray 미발동)
         svc = self._service(cola, bar170)

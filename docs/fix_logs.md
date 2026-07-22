@@ -628,3 +628,26 @@ hand conf floor — perf-gap 보고서 §10 참조.
   (득표 20:4 불균형 + −155/−135 동시 이벤트 → 두 상품 모두 ×1 COMPLETE).
   전체 `pytest -q` → 240 passed, 3 failed(기존 macOS ffmpeg 환경 문제).
   `ruff check .` clean.
+
+## 2026-07-22 (issue #16 2차) 재판정 발동에도 미채택 — unique-refit 모호성 판정 정교화
+
+- **증상**: 1차 수정 배포 후 같은 시나리오 재현(이슈 코멘트 YAML) — trace에
+  `multi_tray_pool_exhaustion_retry:ch1`은 찍혔으나 여전히 베이글 1개만 과금.
+- **원인**: 이번 영상엔 배경 후보가 더 있었다 — 재판정 풀 {13:25표(168g),
+  40:8표(135g), 24:8표(115g)}에서 새 top(13)은 잔차 33으로 결정적 반증(>near 30)
+  → ④ unique-refit로 진행했으나, −135g 타깃에 40(잔차 0)과 24(잔차 20)
+  **둘 다 near(30g) 안**이라 "적합 2개=모호"로 불발 → 재판정 결과가
+  COMPLETE가 아니어서 채택 안 됨(악화 금지 정상 동작).
+- **수정** (`strategies.py` ④): 적합을 2계층으로 분리 — **하드 게이트(±gate)
+  내 유일 적합이면 near 밴드(gate<r≤near) 적합과 무관하게 채택**, 하드
+  게이트 적합이 없을 때만 near 밴드 유일 적합 사용. near 밴드는 top의 접촉
+  오염 가정(②)을 위한 창이지 대안 정체성의 적합 창이 아니다. 하드 게이트
+  안에 2개 이상이면 종전대로 모호·불발 (I-V의 "±15g 창은 우연이 겹칠 만큼
+  넓다" 원칙 유지 — 기존 모호성 테스트(370g: 잔차 0 vs 10, 둘 다 게이트 내)
+  는 여전히 불발).
+- **검증**: 회귀 테스트
+  `test_issue16_retry_with_near_band_distractor_recovered`(코멘트 YAML 동형:
+  27×20표/13×10표/40×4표/24×4표, −155/−135) → 27×1 + 40×1 COMPLETE,
+  reason `freezer_vision_first_unique_refit+pool_exhaustion`.
+  전체 241 passed / 3 env-failed, ruff clean. 기존 refit 테스트 2건
+  (`test_unique_refit_rescues...`, `test_ambiguous_refit_refused...`) 무변경 통과.

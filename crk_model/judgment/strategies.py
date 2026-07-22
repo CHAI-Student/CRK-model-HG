@@ -107,9 +107,13 @@ class FreezerVisionFirstStrategy:
        멤버는 combo_share(기본 30%) 이상 득표 — 배경 후보가 오염 잔차의
        filler로 끼어드는 것(이슈 #10 메로나 79×3)을 차단.
     ④ 유일-적합 구제: top이 결정적으로 반증된 경우(잔차 > near), 나머지
-       정체성 중 잔차 ≤ near인 적합이 **정확히 하나**면 채택
+       정체성 중 적합이 **정확히 하나**면 채택
        (freezer_vision_first_unique_refit, conf×0.8; tolerance 초과 잔차는
-       라우터 I6이 PARTIAL로 강등). 적합이 둘 이상이면 무게로는 고를 수
+       라우터 I6이 PARTIAL로 강등). 적합은 2계층 — 하드 게이트(±gate) 내
+       유일 적합이면 near 밴드(gate<r≤near) 적합과 무관하게 채택하고
+       (이슈 #16 2차: near 밴드는 top 오염 가정용 창이지 대안의 적합 창이
+       아니다), 하드 게이트 적합이 없으면 near 밴드 유일 적합을 쓴다.
+       하드 게이트 안에 둘 이상이면 무게로는 고를 수
        없다는 뜻(I-V) → 불발. 단, refit_share(기본 10%) 미만 득표 후보는
        적합 후보에서 아예 배제한다 — 이슈 #10 ses-1-1783924418에서 3표
        (top 171의 1.75%) 멜로나가 79×3=237로 유일하게 걸려 COMPLETE
@@ -218,15 +222,30 @@ class FreezerVisionFirstStrategy:
         # ④ 유일-적합 구제 — top 결정적 반증 시, 나머지 중 near 내 적합이
         # 정확히 하나일 때만 (둘 이상이면 무게로는 못 고른다, I-V).
         # refit_share 미만 득표는 적합/모호성 판단에서 제외 (docstring ④).
-        fits = []
+        # 적합은 2계층으로 나눈다 (이슈 #16 재현 2차): 하드 게이트(±gate) 적합이
+        # 유일하면 near 밴드(gate<r≤near) 적합은 모호성 근거가 아니다 — near
+        # 밴드는 top의 접촉 오염 가정(②)을 위한 창이지 대안 정체성의 적합
+        # 창이 아니다. 실사고: −135g 이벤트에서 135g 상품(잔차 0)이 115g
+        # 상품(잔차 20, near 밴드)과 "적합 2개=모호"로 묶여 불발 → 미과금.
+        # 하드 게이트 안에 2개 이상이면 여전히 모호 (I-V: ±15g 창은 우연이
+        # 겹칠 만큼 넓다 — 그 원칙은 유지).
+        fits_gate: list[tuple[ActiveProduct, VisionCandidate, int]] = []
+        fits_near: list[tuple[ActiveProduct, VisionCandidate, int]] = []
         for p, cand in identities[1:]:
             if cand.vote_count < self._refit_share * top_c.vote_count:
                 continue
             count, residual = fit(p)
-            if residual <= near:
-                fits.append((p, cand, count))
-        if len(fits) == 1:
-            p, cand, count = fits[0]
+            if residual <= gate:
+                fits_gate.append((p, cand, count))
+            elif residual <= near:
+                fits_near.append((p, cand, count))
+        chosen: tuple[ActiveProduct, VisionCandidate, int] | None = None
+        if len(fits_gate) == 1:
+            chosen = fits_gate[0]
+        elif not fits_gate and len(fits_near) == 1:
+            chosen = fits_near[0]
+        if chosen is not None:
+            p, cand, count = chosen
             return JudgmentResult(
                 JudgmentStatus.COMPLETE,
                 (ProductCount(p, count),),
