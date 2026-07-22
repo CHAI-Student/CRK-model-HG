@@ -14,6 +14,7 @@ jetson = ["fastapi>=0.100.0", "uvicorn[standard]>=0.23.0"]
 [project.scripts]
 model-service-hg = "crk_model.adapters.serve:main"
 label-session = "crk_model.adapters.label_cli:main"
+analyze-sessions = "crk_model.adapters.analyze_cli:main"
 
 [build-system]
 requires = ["setuptools>=68"]

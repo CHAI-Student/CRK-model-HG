@@ -94,6 +94,11 @@ def _event_to_dict(
                 {
                     "product_id": pc.product.product_id,
                     "name": pc.product.name,
+                    # class_id/unit_weight: 정답 라벨(ground_truth, class_id
+                    # 기반)·σ_db 잔차 실측(analyze-sessions)이 아카이브만으로
+                    # 대조 가능하도록 기록 (가격만으로는 불가능했다).
+                    "class_id": pc.product.class_id,
+                    "unit_weight": pc.product.unit_weight,
                     "count": pc.count,
                     "unit_price": pc.product.unit_price,
                     "total_price": pc.total_price,
@@ -129,6 +134,8 @@ def _zone_to_dict(zb: ZoneBasket) -> dict:
             {
                 "product_id": pc.product.product_id,
                 "name": pc.product.name,
+                "class_id": pc.product.class_id,
+                "unit_weight": pc.product.unit_weight,
                 "count": pc.count,
                 "unit_price": pc.product.unit_price,
                 "total_price": pc.total_price,

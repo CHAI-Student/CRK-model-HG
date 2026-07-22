@@ -150,6 +150,17 @@ label-session ses-10-1784698526 --take 2:27x1 --take 3:30x1
 `--take [존:]<class_id|이름>x<개수>` 반복 지정, 재실행 시 기존 라벨 대체
 (오기입 정정). 미라벨 세션은 `ground_truth: null`로 남는다.
 
+**오프라인 실측 리포트 (`analyze-sessions`)**: 아카이브(+정답 라벨)만으로
+① BOCPD·무게 우도 shadow의 mismatch 목록과 라벨 대비 정오 집계(Phase 2 승격
+게이트 실측치), ② 정답 상품의 후보 통계 분위수 → 채택 임계 제안(conformal),
+③ (delta, 정답 배정) 개당 잔차 → `LIKELIHOOD_SIGMA_DB` 제안을 출력한다.
+읽기 전용 — 판정·정산·아카이브를 변경하지 않는다.
+
+```bash
+analyze-sessions                 # data/sessions 전체 리포트
+analyze-sessions --json          # 기계 판독용
+```
+
 ### 정산 notes 해석표
 
 `[OPS][CLOSE]`·세션 아카이브 YAML·`[GATEWAY] FINALIZED` 로그의 `notes=[...]`는
