@@ -33,6 +33,12 @@ class SensorProfile:
     motion_gate_keepalive: int
     # I15: freezer·반품에는 조기 종료 금지 (반품은 delta 부호로 별도 차단)
     early_termination_allowed: bool
+    # 모션 변위 증거(원본 motion_min_displacement_px 대응, issue #16 후속):
+    # 클래스 트랙의 누적 변위가 max(floor, bbox×0.10)을 넘어야 투표 유효.
+    # "집어간 상품은 움직이고 진열 상품은 안 움직인다"의 직접 검사 —
+    # static_track/baseline이 대리 신호로 쫓던 물리의 일반해. freezer는
+    # 김서림·AE 스윙 노이즈 때문에 원본과 동일하게 +2px 보수적.
+    motion_evidence_floor_px: float = 10.0
 
     @property
     def count_gate(self) -> float:
@@ -53,6 +59,7 @@ REFRIGERATOR = SensorProfile(
     motion_gate_threshold=0.02,
     motion_gate_keepalive=8,
     early_termination_allowed=True,
+    motion_evidence_floor_px=10.0,  # 원본 MOTION_MIN_DISPLACEMENT_PX
 )
 
 FREEZER = SensorProfile(
@@ -65,4 +72,5 @@ FREEZER = SensorProfile(
     motion_gate_threshold=0.005,  # 김서림/성에 → 스킵 이득이 0에 수렴해도 정확도 무손실 (fail-safe)
     motion_gate_keepalive=4,
     early_termination_allowed=False,  # I15
+    motion_evidence_floor_px=12.0,  # 원본 FREEZER_MOTION_MIN_DISPLACEMENT_PX
 )

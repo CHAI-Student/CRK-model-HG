@@ -165,9 +165,19 @@ class Settings:
     # 프로파일 상수(냉장 0.02/8, 냉동 0.005/4)를 기기 전 존에 대해 덮어쓴다.
     motion_gate_threshold: float | None = None
     motion_gate_keepalive: int | None = None
+    # ---- 모션 변위 증거 (issue #16 후속 — 원본 변위 필터 이식) ----
+    # 변위 없는 카메라×클래스의 표를 combine에서 몰수. static_track이 못 잡는
+    # "깜빡이는 정지 물체"까지 커버해 baseline(손 타이밍 대리 신호)을 대체한다.
+    # floor None = 프로파일 기본(냉장 10px/냉동 12px, left-crop 좌표계).
+    motion_evidence_enabled: bool = True
+    motion_evidence_floor_px: float | None = None
     # ---- 로드셀 안정 판정 (0.8s 캐던스 기준값, 이슈 #14) ----
     loadcell_stable_window: int = 3
     loadcell_stability_threshold_grams: float = 2.5
+    # BOCPD shadow 분석기 (research §2): 판정 미사용, 아카이브 diff 실측용.
+    # plateau 휴리스틱이 못 보는 delta(#14 무음 0원, 연속 취출 플래토 붕괴)를
+    # 변화점 검출이 어떻게 읽는지 병행 기록 — 승격은 실측 후 결정.
+    bocpd_shadow: bool = True
     # 오염 delta 이중 타깃 재시도 (이슈 #10): |delta − sum(segments)|가 이
     # 값을 넘으면(접촉 하중 오염 서명) delta 타깃 판정 실패 시 세그먼트 합
     # 타깃으로 1회 재판정. 실측 오염 트리거 8~18g / 깨끗한 트리거 0.
@@ -247,6 +257,11 @@ class Settings:
                 "MODEL__VISION__EARLY_TERMINATION", True
             ),
             motion_gate_threshold=_env_opt_float("MODEL__VISION__MOTION_GATE_THRESHOLD"),
+            motion_evidence_enabled=_env_bool("MODEL__VISION__MOTION_EVIDENCE", True),
+            motion_evidence_floor_px=_env_opt_float(
+                "MODEL__VISION__MOTION_EVIDENCE_FLOOR_PX"
+            ),
+            bocpd_shadow=_env_bool("MODEL__LOADCELL__BOCPD_SHADOW", True),
             motion_gate_keepalive=_env_opt_int("MODEL__VISION__MOTION_GATE_KEEPALIVE"),
             loadcell_stable_window=_env_int("MODEL__WEIGHT__STABLE_WINDOW", 3),
             loadcell_stability_threshold_grams=_env_float(

@@ -187,6 +187,9 @@ class ModelService:
                 ),
             ), count_unit_slack=self.settings.judgment_count_unit_slack),
             early_termination_enabled=self.settings.early_termination_enabled,
+            motion_evidence_enabled=self.settings.motion_evidence_enabled,
+            motion_evidence_floor_px=self.settings.motion_evidence_floor_px,
+            bocpd_shadow_enabled=self.settings.bocpd_shadow,
             # 로드셀 안정 판정 (MODEL__WEIGHT__STABLE_WINDOW 등, 이슈 #14):
             # post-roll 샘플 수와 함께 최종 plateau 성립 조건을 결정한다.
             analyzer_factory=lambda profile: LoadcellAnalyzer(

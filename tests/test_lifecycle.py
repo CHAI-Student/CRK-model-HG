@@ -11,6 +11,7 @@ import datetime
 import threading
 import time
 from dataclasses import asdict
+from dataclasses import replace as dc_replace
 
 import pytest
 
@@ -51,7 +52,18 @@ class FakeDetector:
         self.last_allowed = allowed_class_ids
         if self.error:
             raise self.error
-        return list(self._detections)
+        # 모션 변위 증거(perception/motion_evidence.py) 통과용 드리프트 —
+        # 실물 취출 상품은 움직인다. 12px/프레임, %8 순환으로 side ROI(400)
+        # 경계 안에 머문다 (점프 84px ≤ max_jump 150 → 같은 트랙으로 누적).
+        off = 12.0 * (self.calls % 8)
+        out = []
+        for d in self._detections:
+            x1, y1, x2, y2 = d.bbox
+            if (x1, y1, x2, y2) == (0.0, 0.0, 0.0, 0.0):
+                out.append(d)
+            else:
+                out.append(dc_replace(d, bbox=(x1 + off, y1, x2 + off, y2)))
+        return out
 
 
 def frame(value):

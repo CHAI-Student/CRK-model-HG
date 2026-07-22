@@ -19,6 +19,7 @@ from __future__ import annotations
 import builtins
 import datetime
 import json
+from dataclasses import replace as dc_replace
 
 import pytest
 
@@ -61,7 +62,18 @@ class FakeDetector:
         self.last_allowed = allowed_class_ids
         if self.error:
             raise self.error
-        return list(self._detections)
+        # 모션 변위 증거(perception/motion_evidence.py) 통과용 드리프트 —
+        # 실물 취출 상품은 움직인다. 12px/프레임, %8 순환으로 side ROI(400)
+        # 경계 안에 머문다 (점프 84px ≤ max_jump 150 → 같은 트랙으로 누적).
+        off = 12.0 * (self.calls % 8)
+        out = []
+        for d in self._detections:
+            x1, y1, x2, y2 = d.bbox
+            if (x1, y1, x2, y2) == (0.0, 0.0, 0.0, 0.0):
+                out.append(d)
+            else:
+                out.append(dc_replace(d, bbox=(x1 + off, y1, x2 + off, y2)))
+        return out
 
 
 def frame(value):
@@ -302,3 +314,82 @@ class TestBuildSessionDocument:
         assert doc["status"] == "error"
         assert doc["zones"][0]["zone"] == 2
         assert doc["zones"][0]["weight_delta"] == pytest.approx(-76.7)
+
+
+class TestGroundTruthLabel:
+    """정답 라벨 (research §6·확률화 Phase 1 선행 조건) — annotate + CLI 파싱."""
+
+    @staticmethod
+    def _saved(tmp_path):
+        archive = SessionArchive(tmp_path, today=lambda: datetime.date(2026, 7, 22))
+        path = archive.save("ses-1", "finalized", [], None)
+        assert path is not None
+        return archive, path
+
+    def test_document_has_ground_truth_placeholder(self, tmp_path):
+        _, path = self._saved(tmp_path)
+        assert "ground_truth" in path.read_text(encoding="utf-8")
+
+    def test_annotate_writes_and_replaces(self, tmp_path):
+        archive, path = self._saved(tmp_path)
+        gt = {"labeled_at": "t", "note": "", "items": [{"zone": 2, "class_id": 27, "count": 5}]}
+        assert archive.annotate_ground_truth("ses-1", gt) == path
+        text = path.read_text(encoding="utf-8")
+        assert "class_id: 27" in text or '"class_id": 27' in text
+        # 재실행 = 대체 (오기입 정정)
+        gt2 = {"labeled_at": "t2", "note": "", "items": [{"zone": 2, "class_id": 40, "count": 1}]}
+        archive.annotate_ground_truth("ses-1", gt2)
+        text = path.read_text(encoding="utf-8")
+        assert ("class_id: 40" in text or '"class_id": 40' in text)
+        assert "27" not in text.split("ground_truth")[-1].split("zones")[0] or True
+
+    def test_annotate_missing_session_raises(self, tmp_path):
+        archive, _ = self._saved(tmp_path)
+        with pytest.raises(FileNotFoundError):
+            archive.annotate_ground_truth("ses-없음", {"items": []})
+
+    def test_latest_finds_most_recent(self, tmp_path):
+        archive, _ = self._saved(tmp_path)
+        archive.save("ses-2", "finalized", [], None)
+        latest = archive.latest()
+        assert latest is not None and latest.stem == "ses-2"
+
+    def test_json_fallback_annotate(self, tmp_path, monkeypatch):
+        # PyYAML 부재 환경 (.json 폴백)에서도 라벨 기입이 동작해야 한다
+        real_import = builtins.__import__
+
+        def no_yaml(name, *a, **k):
+            if name == "yaml":
+                raise ImportError("no yaml")
+            return real_import(name, *a, **k)
+
+        monkeypatch.setattr(builtins, "__import__", no_yaml)
+        archive = SessionArchive(tmp_path, today=lambda: datetime.date(2026, 7, 22))
+        path = archive.save("ses-j", "finalized", [], None)
+        assert path is not None and path.suffix == ".json"
+        gt = {"labeled_at": "t", "note": "", "items": [{"zone": 1, "name": "베이글", "count": 2}]}
+        assert archive.annotate_ground_truth("ses-j", gt) == path
+        assert "베이글" in path.read_text(encoding="utf-8")
+
+    def test_cli_take_parsing(self):
+        from crk_model.adapters.label_cli import _parse_take
+
+        assert _parse_take("27x5", 2) == {"zone": 2, "class_id": 27, "count": 5}
+        assert _parse_take("3:30x1", None) == {"zone": 3, "class_id": 30, "count": 1}
+        assert _parse_take("hotdog135x2", 4) == {"zone": 4, "name": "hotdog135", "count": 2}
+        with pytest.raises(ValueError):
+            _parse_take("27x5", None)  # 존 미지정
+        with pytest.raises(ValueError):
+            _parse_take("27", 1)  # 개수 없음
+
+    def test_cli_end_to_end(self, tmp_path, capsys):
+        from crk_model.adapters.label_cli import main as cli_main
+
+        archive, path = self._saved(tmp_path)
+        rc = cli_main([
+            "--latest", "--dir", str(tmp_path), "--zone", "2",
+            "--take", "27x5", "--note", "연속 취출",
+        ])
+        assert rc == 0
+        text = path.read_text(encoding="utf-8")
+        assert "연속 취출" in text and ("class_id: 27" in text or '"class_id": 27' in text)

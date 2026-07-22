@@ -24,6 +24,7 @@ from crk_model.core.types import (
     VisionCandidate,
 )
 from crk_model.frames.motion_gate import Frame, HandLatch, MotionGate
+from crk_model.ingest.bocpd import BocpdAnalyzer
 from crk_model.ingest.loadcell import (
     ChannelWeightEvent,
     LoadcellAnalyzer,
@@ -35,6 +36,7 @@ from crk_model.ledger.events import TriggerEvent
 from crk_model.perception.detector import HAND_CLASS_ID, Detector
 from crk_model.perception.early_termination import EarlyTerminator
 from crk_model.perception.filters import DetectionFilterChain
+from crk_model.perception.motion_evidence import MotionEvidence
 from crk_model.perception.voting import VotingEnsemble
 from crk_model.service.snapshot import ActiveProductStore, ProductSnapshot
 
@@ -80,6 +82,10 @@ class TriggerTrace:
     # 케이스를 사후에 재구성하기 위한 클래스별/카메라별 요약
     # ({"classes": VotingEnsemble.debug_summary(), "filtered_out_by_camera": {...}}).
     vote_summary: dict = field(default_factory=dict)
+    # BOCPD shadow (research §2): 판정에는 미사용 — 기존 분석기와의 delta
+    # diff를 아카이브로 실측해 승격 여부를 결정한다 (특히 primary가
+    # insufficient_*로 delta=0을 낼 때 BOCPD가 보는 값).
+    loadcell_shadow: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -115,6 +121,17 @@ class TriggerPipeline:
         # 서명으로 보고, delta 타깃 판정 실패 시 세그먼트 합 타깃으로 1회
         # 재판정한다 (아래 _segment_target_retry). 실측: 오염 트리거는 8~18g,
         # 깨끗한 트리거는 0.
+        motion_evidence_enabled: bool = False,
+        # 모션 변위 증거 (perception/motion_evidence.py, issue #16 후속):
+        # 변위 없는 카메라×클래스의 표를 combine에서 몰수. 라이브러리 기본
+        # False(하위호환 — 기존 직접 생성 테스트 보존), 운영값은 Settings가
+        # True로 주입 (MODEL__VISION__MOTION_EVIDENCE).
+        motion_evidence_floor_px: float | None = None,
+        # None = 프로파일 기본 (냉장 10px / 냉동 12px — 원본
+        # MOTION_MIN_DISPLACEMENT_PX 동형, left-crop 좌표계 전제).
+        bocpd_shadow_enabled: bool = False,
+        # BOCPD shadow 분석기 (research §2): 라이브러리 기본 False(하위호환),
+        # 운영값은 Settings가 주입 (MODEL__LOADCELL__BOCPD_SHADOW).
     ):
         self._detector = detector
         self._profiles = dict(profiles)
@@ -126,6 +143,9 @@ class TriggerPipeline:
         self._default_profile = default_profile
         self._voting_params = dict(voting_params) if voting_params else {}
         self._segment_retry_gap = segment_retry_gap_grams
+        self._motion_evidence_enabled = motion_evidence_enabled
+        self._motion_evidence_floor = motion_evidence_floor_px
+        self._bocpd_shadow = bocpd_shadow_enabled
 
     def process(self, session_id: str, req: TriggerRequest) -> TriggerOutcome:
         try:
@@ -178,6 +198,28 @@ class TriggerPipeline:
             # 재수집은 장치측 훅 (QA Q3 ① 순서 계약) — 구간화 보류 사실만 기록
             trace.reason_codes.append("return_stabilization_pending")
         delta = analysis.delta_weight
+        if self._bocpd_shadow:
+            # shadow는 판정 경로를 절대 깨지 않는다 — 실패는 기록만
+            try:
+                sh = BocpdAnalyzer().analyze(req.loadcells)
+                trace.loadcell_shadow = {
+                    "analyzer": "bocpd",
+                    "delta": round(sh.delta_weight, 2),
+                    "delta_std": round(sh.delta_std, 2),
+                    "channels": [
+                        {
+                            "channel": c.channel,
+                            "delta": round(c.delta, 2),
+                            "levels": [round(s.level, 1) for s in c.segments],
+                        }
+                        for c in sh.channels
+                    ],
+                    "primary_delta": round(delta, 2),
+                    "primary_reason": analysis.reason,
+                    "mismatch": abs(sh.delta_weight - delta) > 5.0,
+                }
+            except Exception as exc:  # noqa: BLE001 — shadow 격리
+                trace.loadcell_shadow = {"analyzer": "bocpd", "error": type(exc).__name__}
 
         if not vision_only and abs(delta) < profile.min_weight_change_grams:
             # 저무게 스킵: vision 전체 생략 = YOLO 호출 0 (QA Q8)
@@ -402,6 +444,15 @@ class TriggerPipeline:
         trace: TriggerTrace,
     ) -> tuple[VisionCandidate, ...]:
         voting = VotingEnsemble(**self._voting_params)
+        evidence = None
+        if self._motion_evidence_enabled:
+            floor = (
+                self._motion_evidence_floor
+                if self._motion_evidence_floor is not None
+                else profile.motion_evidence_floor_px
+            )
+            evidence = MotionEvidence(floor_px=floor)
+            voting.attach_motion_evidence(evidence)
         terminator = EarlyTerminator(profile, enabled=self._et_enabled)
         stopped = False
         filtered_out: dict[str, int] = {}  # 진단(work item 3): 카메라별 필터 제거 개수
@@ -446,7 +497,12 @@ class TriggerPipeline:
                     detections = self._filters.apply(camera, raw)
                     camera_filtered_out += len(raw) - len(detections)
                     trace.yolo_calls += 1
-                    voting.add_frame(camera, detections)
+                    tids = (
+                        evidence.observe(camera, detections)
+                        if evidence is not None
+                        else None
+                    )
+                    voting.add_frame(camera, detections, track_ids=tids)
                     latch.update_after_inference(any(d.is_hand for d in detections))
                     if terminator.should_stop(
                         delta_weight=delta,
@@ -482,6 +538,9 @@ class TriggerPipeline:
                 for cam, by_cls in self._filters.baseline_drops_by_class.items()
             },
             "entry_dropped_by_camera": dict(voting.entry_dropped),
+            # 변위 증거 진단 (issue #16 후속): 카메라×클래스별 통과/최대경로/
+            # 임계 — rejected_by: "no_motion"의 근거를 아카이브에서 재구성.
+            "motion_evidence": evidence.summary() if evidence is not None else None,
         }
         return voting.combine()
 

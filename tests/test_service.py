@@ -1,6 +1,7 @@
 """service: 연결단 검증 — E2E 흐름, I2 fail-closed, 저무게 스킵, I1 에러 전파,
 멱등성(I7), 기동 fail-fast(리뷰 #1), 저널 replay(G2.5 훅), 필터 체인."""
 from dataclasses import asdict
+from dataclasses import replace as dc_replace
 
 import pytest
 
@@ -43,7 +44,18 @@ class FakeDetector:
         self.last_allowed = allowed_class_ids
         if self.error:
             raise self.error
-        return list(self._detections)
+        # 모션 변위 증거(perception/motion_evidence.py) 통과용 드리프트 —
+        # 실물 취출 상품은 움직인다. 12px/프레임, %8 순환으로 side ROI(400)
+        # 경계 안에 머문다 (점프 84px ≤ max_jump 150 → 같은 트랙으로 누적).
+        off = 12.0 * (self.calls % 8)
+        out = []
+        for d in self._detections:
+            x1, y1, x2, y2 = d.bbox
+            if (x1, y1, x2, y2) == (0.0, 0.0, 0.0, 0.0):
+                out.append(d)
+            else:
+                out.append(dc_replace(d, bbox=(x1 + off, y1, x2 + off, y2)))
+        return out
 
 
 def frame(value):
@@ -473,6 +485,66 @@ class TestAllowedClassIds:
         )
         assert detector.allowed_seen  # 추론은 일어났고
         assert all(-1 not in s for s in detector.allowed_seen)
+
+
+class TestMotionEvidencePipeline:
+    """변위 필터 파이프라인 통합 (issue #16 후속): 진열 상품 표 몰수."""
+
+    def test_static_display_class_removed_from_candidates(self):
+        # 실기 로그 4의 근본 차단: 진열 만두가 매 프레임 잡혀 63표 1위가 돼도
+        # 변위 증거가 없으면 후보에서 몰수 — 진짜 상품이 득표 1위가 된다.
+        held = ActiveProduct(
+            "P23", "취출상품", class_id=23, unit_weight=175.0, unit_price=3000, stock_qty=5
+        )
+        display = ActiveProduct(
+            "P13", "진열만두", class_id=13, unit_weight=185.0, unit_price=2100, stock_qty=5
+        )
+
+        class Scene(FakeDetector):
+            """진열(13)은 정지, 취출(23)은 12px/프레임 이동."""
+
+            def detect(self, frame, allowed_class_ids=None):
+                self.calls += 1
+                off = 12.0 * (self.calls % 8)
+                return [
+                    Detection(13, 0.79, bbox=(300.0, 300.0, 350.0, 350.0)),
+                    Detection(23, 0.95, bbox=(50.0 + off, 50.0, 100.0 + off, 100.0)),
+                ]
+
+        detector = Scene()
+        store = ActiveProductStore()
+        store.update([held, display])
+        pipe = TriggerPipeline(detector, {2: FREEZER}, store, motion_evidence_enabled=True)
+        outcome = pipe.process(
+            "s1",
+            TriggerRequest(2, {"top": moving_frames(12)}, samples(500, 325), 1.0),
+        )
+        j = outcome.event.judgment
+        assert j.status is JudgmentStatus.COMPLETE
+        assert [(pc.product.class_id, pc.count) for pc in j.products] == [(23, 1)]
+        summary = outcome.trace.vote_summary
+        assert summary["classes"][13]["rejected_by"] == "no_motion"
+        assert summary["motion_evidence"]["top"][13]["passed"] is False
+        assert summary["motion_evidence"]["top"][23]["passed"] is True
+
+
+class TestBocpdShadowWiring:
+    def test_shadow_recorded_in_trace(self, cola):
+        # research §2: shadow는 판정 미사용 — trace.loadcell_shadow로만 남는다
+        detector = FakeDetector()
+        store = ActiveProductStore()
+        store.update([cola])
+        pipe = TriggerPipeline(
+            detector, {1: REFRIGERATOR}, store, bocpd_shadow_enabled=True
+        )
+        outcome = pipe.process(
+            "s1",
+            TriggerRequest(1, {"top": moving_frames(4)}, samples(500, 400), 1.0),
+        )
+        sh = outcome.trace.loadcell_shadow
+        assert sh is not None and sh["analyzer"] == "bocpd"
+        assert abs(sh["delta"] - (-100.0)) < 5.0
+        assert sh["mismatch"] is False  # primary(-100)와 일치
 
 
 class TestGuards:

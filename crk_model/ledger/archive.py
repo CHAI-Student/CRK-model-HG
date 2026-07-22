@@ -47,6 +47,16 @@ logger = logging.getLogger(__name__)
 _DATE_FMT = "%Y-%m-%d"
 
 
+def _load_document(path: Path) -> dict:
+    if path.suffix == ".json":
+        import json
+
+        return json.loads(path.read_text(encoding="utf-8"))
+    import yaml
+
+    return yaml.safe_load(path.read_text(encoding="utf-8"))
+
+
 def _trace_to_dict(trace: TriggerTrace | None) -> dict:
     if trace is None:
         return {}
@@ -57,6 +67,7 @@ def _trace_to_dict(trace: TriggerTrace | None) -> dict:
         "early_terminated": trace.early_terminated,
         "reason_codes": list(trace.reason_codes),
         "vote_summary": dict(trace.vote_summary) if trace.vote_summary else {},
+        "loadcell_shadow": trace.loadcell_shadow,
     }
 
 
@@ -179,6 +190,11 @@ def build_session_document(
         "product_count": product_count,
         "notes": notes,
         "error_detail": error_detail,
+        # 정답 라벨 (research §6·확률화 Phase 1의 선행 조건): 실험자가 실제
+        # 취출 품목/수량을 사후 기입한다 — `label-session` CLI 또는
+        # SessionArchive.annotate_ground_truth(). None = 미라벨.
+        # 스키마: {labeled_at, note, items: [{zone, class_id|name, count}]}
+        "ground_truth": None,
         "zones": zones,
         "triggers": triggers,
     }
@@ -296,6 +312,68 @@ class SessionArchive:
             encoding="utf-8",
         )
         return path
+
+    def find(self, session_id: str) -> Path | None:
+        """날짜 디렉토리 전체에서 세션 파일 탐색 (최신 날짜 우선)."""
+        if self._dir is None or not self._dir.exists():
+            return None
+        for date_dir in sorted(
+            (c for c in self._dir.iterdir() if c.is_dir()), reverse=True
+        ):
+            for suffix in (".yaml", ".json"):
+                path = date_dir / f"{session_id}{suffix}"
+                if path.exists():
+                    return path
+        return None
+
+    def latest(self) -> Path | None:
+        """가장 최근 아카이브 파일 — 실험 직후 `label-session --latest`용."""
+        if self._dir is None or not self._dir.exists():
+            return None
+        candidates = [
+            p
+            for date_dir in self._dir.iterdir()
+            if date_dir.is_dir()
+            for p in date_dir.iterdir()
+            if p.suffix in (".yaml", ".json")
+        ]
+        if not candidates:
+            return None
+        return max(candidates, key=lambda p: p.stat().st_mtime)
+
+    def annotate_ground_truth(self, session_id: str, ground_truth: dict) -> Path:
+        """저장된 세션 문서에 정답 라벨을 기입한다 (기존 라벨은 대체).
+
+        conformal 보정(research §6)·무게 확률화 Phase 1 diff 정오 판정의
+        데이터 소스 — 실험 시 실제 취출 품목/수량의 구조화 (이슈 코멘트
+        수기 기록의 대체). save()와 달리 실패를 삼키지 않는다: 라벨링은
+        사람이 지금 실행 중인 작업이라 조용한 실패가 더 해롭다."""
+        path = self.find(session_id)
+        if path is None:
+            raise FileNotFoundError(
+                f"session archive not found: {session_id} (dir={self._dir})"
+            )
+        doc = _load_document(path)
+        doc["ground_truth"] = ground_truth
+        self._rewrite(path, doc)
+        return path
+
+    @staticmethod
+    def _rewrite(path: Path, doc: dict) -> None:
+        if path.suffix == ".json":
+            import json
+
+            path.write_text(
+                json.dumps(doc, ensure_ascii=False, indent=2, default=str),
+                encoding="utf-8",
+            )
+            return
+        import yaml  # yaml 파일이 존재한다 = PyYAML로 저장됐다 (폴백 규칙)
+
+        path.write_text(
+            yaml.dump(doc, default_flow_style=False, allow_unicode=True, sort_keys=False),
+            encoding="utf-8",
+        )
 
     def _prune_old(self, current: datetime.date) -> None:
         """보존기간(MODEL__SESSION__ARCHIVE_RETENTION_DAYS) 초과 날짜 디렉토리

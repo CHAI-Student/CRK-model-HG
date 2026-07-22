@@ -3,7 +3,13 @@ import pytest
 from conftest import cand
 
 from crk_model.core.profiles import FREEZER, REFRIGERATOR
-from crk_model.perception import Detection, EarlyTerminationConfig, EarlyTerminator, VotingEnsemble
+from crk_model.perception import (
+    Detection,
+    EarlyTerminationConfig,
+    EarlyTerminator,
+    MotionEvidence,
+    VotingEnsemble,
+)
 
 
 class TestVoting:
@@ -196,3 +202,93 @@ class TestEarlyTermination:
             active_products=[cola, water],
             frames_since_hand_exit=6,
         )
+
+
+class TestMotionEvidence:
+    """모션 변위 증거 (issue #16 후속, 원본 변위 필터 이식): "집어간 상품은
+    움직이고 진열 상품은 안 움직인다"의 직접 검사 — static_track(연속 정지)·
+    baseline(손 타이밍)이 대리 신호로 쫓던 물리의 일반해."""
+
+    @staticmethod
+    def _moving(i, cid=1, conf=0.9):
+        off = 12.0 * i
+        return Detection(cid, conf, bbox=(50.0 + off, 50.0, 100.0 + off, 100.0))
+
+    @staticmethod
+    def _wire(**voting_kwargs):
+        ev = MotionEvidence(floor_px=10.0)
+        v = VotingEnsemble(min_vote_count=1, conf_floor=0.0, **voting_kwargs)
+        v.attach_motion_evidence(ev)
+        return ev, v
+
+    def test_static_class_vetoed_moving_class_passes(self):
+        ev, v = self._wire()
+        for i in range(10):
+            dets = [self._moving(i), Detection(2, 0.95, bbox=(300.0, 300.0, 350.0, 350.0))]
+            ev.observe("top", dets)
+            v.add_frame("top", dets)
+        assert {c.class_id for c in v.combine()} == {1}
+        assert v.debug_summary()[2]["rejected_by"] == "no_motion"
+
+    def test_flickering_static_object_vetoed(self):
+        # baseline이 잡으려던 "깜빡이는 고정 물체": 관측에 공백이 있어도
+        # 변위 ~0이면 몰수 — static_track(연속 IoU 요건)과의 결정적 차이.
+        ev, v = self._wire()
+        for i in range(20):
+            dets = [self._moving(i)]
+            if i % 4 == 0:  # 4프레임에 1번만 깜빡임
+                dets.append(Detection(2, 0.9, bbox=(300.0, 300.0, 350.0, 350.0)))
+            ev.observe("top", dets)
+            v.add_frame("top", dets)
+        assert {c.class_id for c in v.combine()} == {1}
+
+    def test_zero_bbox_exempt_fail_open(self):
+        # bbox 없는 검출은 변위를 잴 수 없다 — filters.py와 동일한
+        # "실패 방향 = 증거 보존" 원칙으로 면제.
+        ev, v = self._wire()
+        for _ in range(5):
+            dets = [Detection(3, 0.9)]
+            ev.observe("top", dets)
+            v.add_frame("top", dets)
+        assert {c.class_id for c in v.combine()} == {3}
+
+    def test_per_camera_veto_independent(self):
+        # top에서는 정지(진열 각도), side에서는 움직임 → side 표만 유효
+        ev, v = self._wire()
+        for i in range(10):
+            top_dets = [Detection(1, 0.9, bbox=(50.0, 50.0, 100.0, 100.0))]
+            side_dets = [self._moving(i)]
+            ev.observe("top", top_dets)
+            v.add_frame("top", top_dets)
+            ev.observe("side", side_dets)
+            v.add_frame("side", side_dets)
+        (c,) = v.combine()
+        assert c.vote_count == 10  # top 10표 몰수, side 10표만
+        assert c.confidence == pytest.approx(0.9 * 0.40)  # side-only 가중
+
+    def test_vetoed_top_class_does_not_poison_share_floor(self):
+        # 몰수된 배경 1위가 min_vote_share의 기준(top_votes)을 오염시키면
+        # 진짜 상품이 상대 하한에 걸린다 — 몰수 반영 후 기준이어야 한다.
+        ev, v = self._wire(min_vote_share=0.5)
+        for i in range(20):
+            dets = [Detection(9, 0.9, bbox=(300.0, 300.0, 350.0, 350.0))]  # 정지 20표
+            if i % 4 == 0:
+                dets.append(self._moving(i, cid=1))  # 움직임 5표 (정지 1위의 25%)
+            ev.observe("top", dets)
+            v.add_frame("top", dets)
+        assert {c.class_id for c in v.combine()} == {1}
+
+    def test_same_class_display_instance_votes_dropped_track_level(self):
+        # 트랙릿 투표 (research §3 적용): 같은 클래스가 진열(정지)+취출(이동)로
+        # 동시에 있으면, 클래스 단위 판정으로는 진열 인스턴스 표까지 전부
+        # 살아남는다 — 트랙 귀속 투표는 움직인 트랙의 표만 남긴다.
+        ev, v = self._wire()
+        for i in range(10):
+            dets = [
+                self._moving(i),  # 취출 인스턴스
+                Detection(1, 0.9, bbox=(300.0, 300.0, 350.0, 350.0)),  # 진열 인스턴스
+            ]
+            tids = ev.observe("top", dets)
+            v.add_frame("top", dets, track_ids=tids)
+        (c,) = v.combine()
+        assert c.vote_count == 10  # 클래스 단위였다면 20 — 진열 트랙 10표 몰수

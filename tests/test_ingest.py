@@ -142,3 +142,62 @@ class TestPerChannelAnalysis:
         a = analyzer().analyze(samples)
         assert not a.stabilized
         assert a.reason == "insufficient_stable_regions"
+
+
+class TestBocpdShadow:
+    """BOCPD shadow 분석기 (research §2) — plateau 휴리스틱의 사각 커버 검증."""
+
+    @staticmethod
+    def _series(levels, per=3, dt=0.8, ch=1):
+        from crk_model.ingest.loadcell import LoadcellSample
+
+        out, ts = [], 0.0
+        for lv in levels:
+            for _ in range(per):
+                vals = tuple([lv] + [0.0] * (ch - 1)) if ch == 1 else lv
+                out.append(LoadcellSample(ts, vals if isinstance(vals, tuple) else (vals,)))
+                ts += dt
+        return out
+
+    def test_clean_step_delta(self):
+        from crk_model.ingest.bocpd import BocpdAnalyzer
+
+        samples = self._series([500.0, 345.0], per=10)
+        a = BocpdAnalyzer().analyze(samples)
+        assert abs(a.delta_weight - (-155.0)) < 3.0
+        assert a.delta_std < 3.0
+
+    def test_rapid_two_sample_plateaus_where_plateau_heuristic_fails(self):
+        # issue #16 로그 3 패턴: 1.6s 간격 연속 취출 → 플래토가 2샘플뿐.
+        # stable_window=3 휴리스틱은 중간 플래토를 안정 판정하지 못하지만
+        # BOCPD는 연속성 요건 없이 계단 전체를 읽는다.
+        from crk_model.ingest.bocpd import BocpdAnalyzer
+
+        levels = [820.0] * 3 + [665.0] * 2 + [510.0] * 2 + [355.0] * 2 + [200.0] * 3
+        samples = self._series(levels, per=1)
+        a = BocpdAnalyzer().analyze(samples)
+        assert abs(a.delta_weight - (-620.0)) < 5.0
+        assert len(a.channels[0].segments) >= 4  # 계단이 구간으로 분해됨
+
+    def test_two_channel_independent_changes(self):
+        from crk_model.ingest.bocpd import BocpdAnalyzer
+        from crk_model.ingest.loadcell import LoadcellSample
+
+        out, ts = [], 0.0
+        for k in range(20):
+            v0 = 500.0 if k < 10 else 345.0  # ch0 −155
+            v1 = 420.0 if k < 14 else 285.0  # ch1 −135 (다른 시점)
+            out.append(LoadcellSample(ts, (v0, v1)))
+            ts += 0.8
+        a = BocpdAnalyzer().analyze(out)
+        assert abs(a.channels[0].delta - (-155.0)) < 3.0
+        assert abs(a.channels[1].delta - (-135.0)) < 3.0
+        assert abs(a.delta_weight - (-290.0)) < 5.0
+
+    def test_insufficient_samples_reason(self):
+        from crk_model.ingest.bocpd import BocpdAnalyzer
+        from crk_model.ingest.loadcell import LoadcellSample
+
+        a = BocpdAnalyzer().analyze([LoadcellSample(0.0, (500.0,))])
+        assert a.reason == "insufficient_samples"
+        assert a.delta_weight == 0.0

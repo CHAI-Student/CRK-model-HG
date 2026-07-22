@@ -79,24 +79,68 @@ class VotingEnsemble:
         self._side_only_weight = side_only_weight
         self._min_share = min_vote_share
         self._entry_conf = {"top": entry_conf_top, "side": entry_conf_side}
-        self._votes: dict[str, dict[int, list[float]]] = {
+        # (conf, track_id|None) — 트랙 귀속 표 (트랙릿 투표, motion_evidence 참조)
+        self._votes: dict[str, dict[int, list[tuple[float, int | None]]]] = {
             "top": defaultdict(list),
             "side": defaultdict(list),
         }
         self.gate_passed_frames = 0  # 분모 (단일 정의)
         self.entry_dropped = {"top": 0, "side": 0}  # 진단: 진입 컷 탈락 수
+        # 모션 변위 증거 (perception/motion_evidence.py): attach되면 combine
+        # 시점에 "변위 없는 카메라×클래스"의 표를 몰수한다 — 진열/배경 검출이
+        # 득표 순위를 오염시키는 것을 투표 진입 전이 아니라 결합 시점에
+        # 사후 일괄 차단 (원본 _apply_motion_filter_and_votes 대응). None이면
+        # 무효 (라이브러리 하위호환 — 운영 배선은 pipeline이 한다).
+        self._motion_evidence = None
 
-    def add_frame(self, camera: str, detections: Sequence[Detection]) -> None:
-        """게이트 통과(=추론된) 프레임에서만 호출."""
+    def add_frame(
+        self, camera: str, detections: Sequence[Detection], track_ids=None
+    ) -> None:
+        """게이트 통과(=추론된) 프레임에서만 호출.
+
+        track_ids: MotionEvidence.observe()가 반환한 검출별 트랙 귀속
+        (detections와 정렬 동일). 주어지면 트랙릿 투표 — 표가 트랙에
+        귀속되어 combine 시점에 트랙 단위로 변위 검증된다. None이면
+        표는 클래스 단위 변위 판정으로 폴백 (하위호환)."""
         self.gate_passed_frames += 1
         entry = self._entry_conf.get(camera, 0.0)
-        for d in detections:
+        tids = track_ids if track_ids is not None else [None] * len(detections)
+        for d, tid in zip(detections, tids, strict=True):
             if d.is_hand:
                 continue
             if d.confidence < entry:
                 self.entry_dropped[camera] += 1  # 진단용 — 어디서 죽었는지 추적
                 continue
-            self._votes[camera][d.class_id].append(d.confidence)
+            self._votes[camera][d.class_id].append((d.confidence, tid))
+
+    def attach_motion_evidence(self, evidence) -> None:
+        self._motion_evidence = evidence
+
+    def _effective_votes(self, camera: str, cid: int) -> list[float]:
+        """변위 증거 반영 후의 유효 표(conf 리스트).
+
+        트랙 귀속이 있는 표는 **트랙 단위**로 검증한다 (트랙릿 투표 — 같은
+        클래스의 진열 인스턴스 표는 몰수되고 움직인 트랙의 표만 남는다).
+        귀속 없는 표(tid None: zero-bbox 면제 또는 직접 사용)는 클래스 단위
+        판정으로 폴백."""
+        votes = self._votes[camera].get(cid, [])
+        if not votes:
+            return []
+        if self._motion_evidence is None:
+            return [conf for conf, _ in votes]
+        ev = self._motion_evidence
+        out = []
+        class_ok: bool | None = None  # lazy — tid 없는 표가 있을 때만 평가
+        for conf, tid in votes:
+            if tid is not None:
+                if ev.track_qualifies(tid):
+                    out.append(conf)
+                continue
+            if class_ok is None:
+                class_ok = ev.class_motion(camera, cid)
+            if class_ok:
+                out.append(conf)
+        return out
 
     def _weighted_confidence(self, top: list[float], side: list[float]) -> float:
         """원본 voting_ensemble.py combine() 427-458행과 동형 산식.
@@ -119,11 +163,12 @@ class VotingEnsemble:
 
     def _top_votes(self) -> int:
         """상대 하한(min_vote_share)의 기준값 — 전 class 중 최다 득표.
-        1위 자신은 share=1.0이라 절대 잘리지 않는다."""
+        1위 자신은 share=1.0이라 절대 잘리지 않는다. 변위 몰수 반영 후 기준
+        (몰수된 배경 1위가 share 기준을 오염시키면 안 된다)."""
         classes = set(self._votes["top"]) | set(self._votes["side"])
         return max(
             (
-                len(self._votes["top"].get(cid, [])) + len(self._votes["side"].get(cid, []))
+                len(self._effective_votes("top", cid)) + len(self._effective_votes("side", cid))
                 for cid in classes
             ),
             default=0,
@@ -135,10 +180,12 @@ class VotingEnsemble:
         vote_floor = self._top_votes() * self._min_share
         out: list[VisionCandidate] = []
         for cid in classes:
-            top = self._votes["top"].get(cid, [])
-            side = self._votes["side"].get(cid, [])
+            top = self._effective_votes("top", cid)
+            side = self._effective_votes("side", cid)
             weighted = self._weighted_confidence(top, side)
             votes = len(top) + len(side)
+            if votes == 0:
+                continue  # 변위 몰수로 전멸 (debug_summary가 no_motion으로 보고)
             ratio = votes / denominator
             if not (ratio >= self._min_ratio or votes >= self._min_count):
                 continue
@@ -160,13 +207,19 @@ class VotingEnsemble:
         vote_floor = self._top_votes() * self._min_share
         summary: dict[int, dict] = {}
         for cid in classes:
-            top = self._votes["top"].get(cid, [])
-            side = self._votes["side"].get(cid, [])
+            raw_votes = len(self._votes["top"].get(cid, [])) + len(
+                self._votes["side"].get(cid, [])
+            )
+            top = self._effective_votes("top", cid)
+            side = self._effective_votes("side", cid)
             weighted = self._weighted_confidence(top, side)
             votes = len(top) + len(side)
             ratio = votes / denominator
             passes_ratio_gate = ratio >= self._min_ratio or votes >= self._min_count
-            if not passes_ratio_gate:
+            if votes == 0 and raw_votes > 0:
+                rejected_by = "no_motion"  # 변위 증거 없음 — 진열/배경 검출
+                votes = raw_votes  # 진단에는 원 득표를 남긴다 (얼마나 몰수됐나)
+            elif not passes_ratio_gate:
                 rejected_by = "ratio"
             elif votes < vote_floor:
                 rejected_by = "share"
