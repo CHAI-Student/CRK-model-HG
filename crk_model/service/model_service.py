@@ -349,8 +349,10 @@ class ModelService:
                     )
                     if self._tray_memory is not None:
                         # 트레이 증거는 세션 경계를 넘지 않는다 (cold-start
-                        # = prior 0 = 현행 동작, ledger/tray_memory.py)
-                        self._tray_memory.reset()
+                        # = prior 0 = 현행 동작). session_id 고정으로 이전
+                        # 세션의 잔여 트리거(워커, 락 밖)가 새 세션 맵에
+                        # 기록/소비하는 순서 역전을 차단 (tray_memory.py 동시성).
+                        self._tray_memory.reset(session_id)
                     # issue #6: class_id==-1(미매핑, http_app._active_product_fields
                     # 참고)인 상품이 있으면 vision_candidates가 비어 weight_only 오청구
                     # 재발 위험 — OPEN마다 매핑 성공률을 즉시 로그로 남긴다.

@@ -16,9 +16,12 @@
 같은 원리):
 - COMPLETE + 무게 뒷받침(vision_only 아님 — I6를 통과한 COMPLETE는 delta
   전량 설명이 보장됨)
-- 채택된 vision 1위가 과금 목록에 포함 (판정이 vision 순위를 뒤집지 않은
-  경우만 — `pipeline._vision_top_not_billed is None`)
 - PARTIAL·near_gate·refit(무게가 고른 예외 경로)은 등록하지 않는다.
+- vision 1위 일치 조건은 Phase 1에서 **제외**했다 (5차 배치 ses-10: 오염이
+  심한 존일수록 vision-top 불일치가 흔한데 그게 정확히 prior가 필요한
+  상황이라 닭-달걀 — z5의 44 COMPLETE가 top 불일치(held 13)로 등록이
+  막혀 z2 held 44에 페널티가 없었다). shadow 전용이라 완화가 안전하고,
+  승격 전 아카이브 라벨 실측으로 재평가한다.
 
 소비 (Phase 1: 무게 우도 shadow의 log_p_tray 항):
 - 같은 트레이 증거 있음 → +boost (동일 트레이 반복 취출 일관성)
@@ -29,8 +32,13 @@
 - 채널 미상(존 합산 이벤트)이면 존 수준으로 완화 매칭 — 모호한 증거로
   등록은 하되 같은 존 전체를 same으로 취급해 과잉 강등을 피한다.
 
-동시성: ModelService의 코스 그레인 RLock 아래에서만 접근된다 (worker 처리와
-handle_multi_zone[OPEN 리셋]이 같은 락을 공유) — 자체 락 없음.
+동시성: reset()은 handle_multi_zone(OPEN, 서비스 락 안)에서, record/
+priors_for는 워커 스레드의 추론 중(락 **밖**)에 호출된다 — 이전 세션의
+잔여 트리거 처리와 새 OPEN 리셋이 겹칠 수 있다. 개별 dict 연산은 GIL로
+원자적이지만, 구 세션 증거가 리셋 직후의 새 세션 맵에 새어드는 순서
+역전이 가능하므로 **세션 id 가드**로 막는다: reset(session_id)가 현재
+세션을 고정하고, record/priors_for는 호출측 session_id가 불일치하면
+기록 거부/중립({})을 반환한다 (fail 방향 = 무영향). 자체 락 없음.
 """
 from __future__ import annotations
 
@@ -49,17 +57,39 @@ class SessionTrayMemory:
         self._evidence: dict[tuple[int, int | None], dict[int, int]] = defaultdict(
             lambda: defaultdict(int)
         )
+        # 세션 id 가드 (모듈 docstring 동시성): None이면 가드 비활성
+        # (라이브러리 직접 사용·기존 테스트 하위호환).
+        self._session_id: str | None = None
 
-    def reset(self) -> None:
-        """세션 OPEN마다 호출 — 세션 경계 밖으로 새지 않는다."""
+    def reset(self, session_id: str | None = None) -> None:
+        """세션 OPEN마다 호출 — 세션 경계 밖으로 새지 않는다.
+
+        session_id를 주면 이후 record/priors_for가 다른 세션의 잔여
+        트리거(리셋과 경쟁하는 워커 처리)를 거부한다."""
         self._evidence.clear()
+        self._session_id = session_id
 
-    def record(self, zone: int, channel: int | None, class_id: int, count: int = 1) -> None:
+    def _session_mismatch(self, session_id: str | None) -> bool:
+        return (
+            self._session_id is not None
+            and session_id is not None
+            and session_id != self._session_id
+        )
+
+    def record(
+        self,
+        zone: int,
+        channel: int | None,
+        class_id: int,
+        count: int = 1,
+        *,
+        session_id: str | None = None,
+    ) -> None:
         """등록 게이트 통과가 확인된 확정 정체성 1건을 기록한다.
 
-        게이트 판단(COMPLETE·top 일치 등)은 호출측(pipeline) 책임 — 이
-        모듈은 채널 키 관리와 prior 계산만 담당한다."""
-        if count <= 0:
+        게이트 판단(COMPLETE 등)은 호출측(pipeline) 책임 — 이 모듈은
+        채널 키 관리와 prior 계산만 담당한다."""
+        if count <= 0 or self._session_mismatch(session_id):
             return
         self._evidence[(zone, channel)][class_id] += count
 
@@ -85,9 +115,16 @@ class SessionTrayMemory:
         return 0.0
 
     def priors_for(
-        self, zone: int, channel: int | None, class_ids
+        self,
+        zone: int,
+        channel: int | None,
+        class_ids,
+        *,
+        session_id: str | None = None,
     ) -> dict[int, float]:
         """후보 class_id들의 0이 아닌 prior만 모아 반환 (shadow 기록용)."""
+        if self._session_mismatch(session_id):
+            return {}  # 구 세션 잔여 트리거 — 새 세션 증거를 소비하지 않는다
         out: dict[int, float] = {}
         for cid in class_ids:
             v = self.log_prior(zone, channel, cid)

@@ -279,7 +279,7 @@ class TriggerPipeline:
             vision_only=vision_only,
         )
         if len(analysis.events) >= 2:
-            judgment = self._judge_tray_events(ctx, analysis, trace)
+            judgment = self._judge_tray_events(ctx, analysis, trace, session_id)
         else:
             # 단일 이벤트라도 게이트를 넘은 채널이 정확히 하나면 트레이가
             # 특정된다 — 트레이 메모리의 키/prior 해상도로 쓴다.
@@ -288,8 +288,10 @@ class TriggerPipeline:
             )
             judgment = self._router.judge(ctx)
             judgment = self._segment_target_retry(ctx, judgment, analysis, trace)
-            self._likelihood_shadow(ctx, judgment, trace, channel=channel)
-            self._record_tray_evidence(ctx, judgment, channel)
+            self._likelihood_shadow(
+                ctx, judgment, trace, channel=channel, session_id=session_id
+            )
+            self._record_tray_evidence(ctx, judgment, channel, session_id)
         top_code = _vision_top_not_billed(candidates, judgment)
         if top_code:
             trace.reason_codes.append(top_code)
@@ -298,7 +300,11 @@ class TriggerPipeline:
         )
 
     def _judge_tray_events(
-        self, ctx: JudgmentContext, analysis, trace: TriggerTrace
+        self,
+        ctx: JudgmentContext,
+        analysis,
+        trace: TriggerTrace,
+        session_id: str | None = None,
     ) -> JudgmentResult:
         """2단계: 트레이별 동시 이벤트를 이벤트당 1회씩 개별 판정 후 병합.
 
@@ -325,13 +331,14 @@ class TriggerPipeline:
                 j,
                 trace,
                 channel=ev.channel,
+                session_id=session_id,
             )
         # 등록은 shadow 계산이 전부 끝난 뒤 — 같은 트리거의 형제 이벤트가
         # 서로의 prior에 영향을 주지 않는다 (트리거 시작 시점의 메모리로만
         # shadow 산출, 등록은 트리거 단위 원자적).
         for ev, j in results:
             self._record_tray_evidence(
-                replace(ctx, delta_weight=ev.delta_grams), j, ev.channel
+                replace(ctx, delta_weight=ev.delta_grams), j, ev.channel, session_id
             )
 
         complete = [
@@ -409,6 +416,7 @@ class TriggerPipeline:
         judgment: JudgmentResult,
         trace: TriggerTrace,
         channel: int | None = None,
+        session_id: str | None = None,
     ) -> None:
         """무게 우도 score shadow (Phase 1) — 판정 경로를 절대 깨지 않는다.
 
@@ -425,7 +433,10 @@ class TriggerPipeline:
             tray_prior = None
             if self._tray_memory is not None and ctx.vision_candidates:
                 tray_prior = self._tray_memory.priors_for(
-                    ctx.zone, channel, [c.class_id for c in ctx.vision_candidates]
+                    ctx.zone,
+                    channel,
+                    [c.class_id for c in ctx.vision_candidates],
+                    session_id=session_id,
                 )
             entry = self._likelihood.shadow(
                 ctx, judgment, sigma_d=sigma_d, tray_prior=tray_prior
@@ -448,25 +459,32 @@ class TriggerPipeline:
         ctx: JudgmentContext,
         judgment: JudgmentResult,
         channel: int | None,
+        session_id: str | None = None,
     ) -> None:
         """세션 트레이 메모리 등록 (ledger/tray_memory.py 등록 게이트).
 
         오판 전파 차단: COMPLETE + 무게 뒷받침(vision_only 아님 — I6 통과
-        COMPLETE는 delta 전량 설명 보장) + 채택된 vision 1위가 과금 목록에
-        포함된 판정만 등록한다. PARTIAL·near_gate와 무게가 정체성을 고른
-        예외 경로(unique_refit)는 등록하지 않는다."""
+        COMPLETE는 delta 전량 설명 보장)만 등록한다. PARTIAL·near_gate와
+        무게가 정체성을 고른 예외 경로(unique_refit)는 등록하지 않는다.
+
+        vision 1위 일치 조건은 Phase 1에서 제외 (5차 배치 ses-10): 오염이
+        심한 존일수록 top 불일치가 흔한데 그게 정확히 prior가 필요한 상황
+        — top 일치 게이트는 닭-달걀이다. shadow 전용이라 완화가 안전하고,
+        승격 전 라벨 실측으로 재평가한다 (tray_memory.py docstring)."""
         if self._tray_memory is None or ctx.vision_only:
             return
         if judgment.status is not JudgmentStatus.COMPLETE or not judgment.products:
             return
         if "refit" in (judgment.reason or ""):
             return
-        if _vision_top_not_billed(ctx.vision_candidates, judgment) is not None:
-            return
         for pc in judgment.products:
             if pc.product.class_id > 0:
                 self._tray_memory.record(
-                    ctx.zone, channel, pc.product.class_id, pc.count
+                    ctx.zone,
+                    channel,
+                    pc.product.class_id,
+                    pc.count,
+                    session_id=session_id,
                 )
 
     def _pool_exhaustion_retry(
@@ -626,7 +644,8 @@ class TriggerPipeline:
                     camera_filtered_out += len(raw) - len(detections)
                     trace.yolo_calls += 1
                     tids = (
-                        evidence.observe(camera, detections)
+                        # pos 전달 = T1 트랙별 위치 계측 (motion_evidence.py)
+                        evidence.observe(camera, detections, pos=pos)
                         if evidence is not None
                         else None
                     )

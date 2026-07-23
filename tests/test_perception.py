@@ -316,3 +316,28 @@ class TestMotionEvidence:
             v.add_frame("top", dets, track_ids=tids)
         (c,) = v.combine()
         assert c.vote_count == 10  # 클래스 단위였다면 20 — 진열 트랙 10표 몰수
+
+    def test_track_pos_stats_recorded_in_summary(self):
+        # T1 계측 (docs/0723_tracklet_cost_benefit.md §8): 트랙별 first/last/
+        # head_obs가 summary().track_detail로 노출 — held 강등(0713 A-2)의
+        # 트랙 단위 재구현과 단절률(G2) 실측 입력. 판정 경로 무영향.
+        ev = MotionEvidence(floor_px=10.0, head_frames=3)
+        for pos in range(6):
+            dets = [self._moving(pos)]  # pos 0부터 계속 움직이는 트랙
+            if pos >= 4:  # 뒤늦게 등장한 정지 트랙 (head 밖)
+                dets.append(Detection(2, 0.9, bbox=(300.0, 300.0, 350.0, 350.0)))
+            ev.observe("top", dets, pos=pos)
+        s = ev.summary()["top"]
+        (t1,) = s[1]["track_detail"]
+        assert (t1["first"], t1["last"], t1["obs"], t1["head_obs"]) == (0, 5, 6, 3)
+        assert t1["passed"] is True
+        (t2,) = s[2]["track_detail"]
+        assert (t2["first"], t2["head_obs"], t2["passed"]) == (4, 0, False)
+        assert s[2]["tracks"] == 1
+
+    def test_track_pos_stats_optional_backward_compat(self):
+        # pos 미제공 호출(기존 라이브러리 사용)은 계측만 생략된다.
+        ev = MotionEvidence(floor_px=10.0)
+        ev.observe("top", [self._moving(0)])
+        (t,) = ev.summary()["top"][1]["track_detail"]
+        assert (t["first"], t["last"], t["head_obs"]) == (-1, -1, 0)

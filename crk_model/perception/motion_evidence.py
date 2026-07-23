@@ -22,6 +22,15 @@ baseline은 손 신호에 의존해 top(프리롤에 이미 손)에서는 무력
   클래스를 면제한다 (filters.py와 동일한 "실패 방향 = 증거 보존" 원칙).
 - 적용 지점: VotingEnsemble.combine()의 클래스 거부권 (perception 계층 —
   판정층은 이미 걸러진 득표 순위를 신뢰한다는 층별 책임 유지).
+- T1 계측 (docs/0723_tracklet_cost_benefit.md §8, 판정 영향 0): 트랙별
+  디코드 위치 통계(first/last/head_obs)를 summary()의 track_detail로
+  아카이브에 싣는다. 용도 두 가지 — ① held-object 강등(0713 A-2)을 클래스
+  단위가 아닌 **트랙 단위**로 재구현하기 위한 분포 실측 (S2: 같은 클래스의
+  carried-in 트랙과 새 취출 트랙은 first_pos가 다르다), ② 트리거당 트랙
+  수로 grab 순간의 트랙 단절(fragmentation) 빈도 실측 (G2 재연관 창 도입
+  판단 근거). pos는 voting.add_frame과 동일한 "게이트 스킵 포함 디코드
+  위치" — head_obs는 표가 아니라 관측 수 기준이다 (entry_conf 미달 저신뢰
+  검출도 트랙은 이으므로, held 트랙의 프리롤 존재를 표보다 빠짐없이 센다).
 """
 from __future__ import annotations
 
@@ -46,6 +55,10 @@ class _Track:
     size_sum: float = 0.0  # max(w,h) 누적 (임계 스케일용)
     n: int = 0
     matched_frame: int = -1  # 프레임당 1회 매칭 (동일 프레임 다중 흡수 방지)
+    # T1 위치 계측 (모듈 docstring) — 디코드 스트림 위치(pos) 기준
+    first_pos: int = -1
+    last_pos: int = -1
+    head_obs: int = 0  # pos < head_frames 관측 수
 
     def observe(self, cx: float, cy: float, size: float, frame_idx: int) -> None:
         step = ((cx - self.last_cx) ** 2 + (cy - self.last_cy) ** 2) ** 0.5
@@ -69,6 +82,7 @@ class MotionEvidence:
     floor_px: float = 10.0
     size_scale: float = 0.10  # 원본 bbox_size×0.10 (스케일 적응 임계)
     max_jump_px: float = 150.0  # 원본 max_distance_px 계열 — 트랙 연결 점프 상한
+    head_frames: int = 30  # T1: head 구간 길이 — voting head_frames와 동일 규약
     _tracks: dict[tuple[str, int], list[_Track]] = field(
         default_factory=lambda: defaultdict(list)
     )
@@ -80,12 +94,15 @@ class MotionEvidence:
     _next_tid: int = 0
 
     def observe(
-        self, camera: str, detections: Sequence[Detection]
+        self, camera: str, detections: Sequence[Detection], pos: int | None = None
     ) -> list[int | None]:
         """검출을 트랙에 귀속시키고 검출별 트랙 id를 반환 (트랙릿 투표).
 
         반환 리스트는 detections와 정렬이 같다. None = 손 또는 bbox 없음
-        (트랙 귀속 불가 — 투표 계층에서 클래스 단위 판정으로 폴백)."""
+        (트랙 귀속 불가 — 투표 계층에서 클래스 단위 판정으로 폴백).
+
+        pos: 게이트 스킵 포함 디코드 위치 (voting.add_frame과 동일 값) —
+        T1 트랙별 위치 계측 입력. None이면 계측 생략 (하위호환)."""
         idx = self._frame_idx[camera]
         self._frame_idx[camera] = idx + 1
         ids: list[int | None] = []
@@ -117,6 +134,12 @@ class MotionEvidence:
                 self._next_tid += 1
                 tracks.append(best)
             best.observe(cx, cy, size, idx)
+            if pos is not None:
+                if best.first_pos < 0:
+                    best.first_pos = pos
+                best.last_pos = pos
+                if pos < self.head_frames:
+                    best.head_obs += 1
             ids.append(best.tid)
         return ids
 
@@ -139,7 +162,11 @@ class MotionEvidence:
         return any(t.passes(self.floor_px, self.size_scale) for t in tracks)
 
     def summary(self) -> dict:
-        """vote_summary 진단용 — 카메라×클래스별 통과 여부와 최대 경로/임계."""
+        """vote_summary 진단용 — 카메라×클래스별 통과 여부와 최대 경로/임계.
+
+        track_detail (T1): 트랙별 {first/last/obs/head_obs/passed} — 관측 수
+        상위 8개까지 (배경 깜빡임으로 생기는 1~2관측 잔트랙의 아카이브
+        범람 방지; 전체 트랙 수는 tracks가 이미 담는다)."""
         out: dict[str, dict[int, dict]] = defaultdict(dict)
         for (camera, cid), tracks in self._tracks.items():
             best = max(tracks, key=lambda t: max(t.path, t.max_disp))
@@ -148,11 +175,22 @@ class MotionEvidence:
                 if best.n
                 else self.floor_px
             )
+            detail = [
+                {
+                    "first": t.first_pos,
+                    "last": t.last_pos,
+                    "obs": t.n,
+                    "head_obs": t.head_obs,
+                    "passed": t.passes(self.floor_px, self.size_scale),
+                }
+                for t in sorted(tracks, key=lambda t: -t.n)[:8]
+            ]
             out[camera][cid] = {
                 "passed": self.class_motion(camera, cid),
                 "best_path": round(max(best.path, best.max_disp), 1),
                 "threshold": round(thr, 1),
                 "tracks": len(tracks),
+                "track_detail": detail,
             }
         for camera, cid in self._exempt:
             out[camera].setdefault(cid, {"passed": True, "exempt": True})

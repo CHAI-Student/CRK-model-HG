@@ -1,11 +1,12 @@
 """analyze-sessions — 아카이브 오프라인 리포트 (research §6, 로드맵 단기 ②).
 
 계약: 읽기 전용 — shadow 정오 집계(Phase 2 승격 게이트), conformal 분위수,
-σ_db 잔차 실측. 구 아카이브(class_id/unit_weight 미기록)는 조용히 제외.
+σ_db 잔차 실측, tray prior 개입(무-prior 순위 복원), 트랙릿 T1(head_obs
+분포·단절). 구 아카이브(class_id/unit_weight/track_detail 미기록)는 조용히 제외.
 """
 import json
 
-from crk_model.adapters.analyze_cli import analyze, load_documents, main
+from crk_model.adapters.analyze_cli import analyze, load_documents, main, render
 
 
 def _doc(session_id="ses-1", **over):
@@ -164,6 +165,91 @@ class TestAnalyze:
         report = analyze([doc])
         assert report["billing"]["correct"] == 0
         assert report["billing"]["wrong"][0]["diffs"][0]["zone"] == 3
+
+    def test_tray_prior_flip_detected_and_labeled_eval(self):
+        # 이슈 #17 ses-5 재현: prior 없으면 44×3이 1위(score −0.476), prior
+        # (−2.5)로 3×1이 1위 — ranking의 score − log_p_tray로 무-prior 순위를
+        # 복원해 flip을 검출하고, GT(3×1) 대비 prior_helped로 집계.
+        doc = _doc(
+            ground_truth=_gt({"zone": 4, "class_id": 3, "count": 1}),
+            triggers=[_trigger(zone=4, delta=-230.0, trace={
+                "likelihood_shadow": [{
+                    "scorer": "weight_likelihood",
+                    "mismatch": True,
+                    "tray_prior": {44: -2.5},
+                    "current": {"items": [[44, 3]], "score": -2.976},
+                    "top": {"items": [[3, 1]], "score": -2.91},
+                    "ranking": [
+                        {"items": [[3, 1]], "score": -2.91},
+                        {"items": [[44, 3]], "score": -2.976, "log_p_tray": -2.5},
+                    ],
+                }]
+            })],
+        )
+        report = analyze([doc])
+        tp = report["tray_prior"]
+        assert tp["observed"] == 1
+        (flip,) = tp["flips"]
+        assert flip["without_prior"] == [(44, 3)]
+        assert flip["with_prior"] == [(3, 1)]
+        assert flip["prior_correct"] is True
+        assert tp["labeled_eval"] == {
+            "prior_helped": 1, "prior_hurt": 0, "both_wrong": 0
+        }
+        assert "tray prior shadow" in render(report)
+
+    def test_tray_prior_without_rank_change_not_a_flip(self):
+        # prior가 실렸지만 1위가 그대로면 개입 계수만 오르고 flip은 아니다
+        doc = _doc(triggers=[_trigger(trace={
+            "likelihood_shadow": [{
+                "mismatch": False,
+                "tray_prior": {44: -2.5},
+                "current": {"items": [[3, 1]]},
+                "top": {"items": [[3, 1]], "score": -0.1},
+                "ranking": [
+                    {"items": [[3, 1]], "score": -0.1},
+                    {"items": [[44, 3]], "score": -4.0, "log_p_tray": -2.5},
+                ],
+            }]
+        })])
+        report = analyze([doc])
+        assert report["tray_prior"]["observed"] == 1
+        assert report["tray_prior"]["flips"] == []
+
+    def test_tracklet_head_split_and_fragmentation(self):
+        # T1 (docs/0723_tracklet_cost_benefit.md §8): 정답 클래스 트랙과
+        # 비정답(held/배경) 트랙의 head_obs 분리 실측 + 트랙 ≥ 4 단절 의심.
+        doc = _doc(
+            ground_truth=_gt({"zone": 2, "class_id": 30, "count": 1}),
+            triggers=[_trigger(zone=2, trace={
+                "vote_summary": {"motion_evidence": {"top": {
+                    30: {"passed": True, "tracks": 1, "track_detail": [
+                        {"first": 140, "last": 200, "obs": 20,
+                         "head_obs": 0, "passed": True},
+                    ]},
+                    27: {"passed": True, "tracks": 5, "track_detail": [
+                        {"first": 0, "last": 400, "obs": 200,
+                         "head_obs": 28, "passed": True},
+                    ]},
+                }}},
+            })],
+        )
+        # 구 아카이브 (track_detail 이전) — 조용히 제외
+        old = _doc("ses-old", triggers=[_trigger(trace={
+            "vote_summary": {"motion_evidence": {"top": {
+                13: {"passed": False, "tracks": 2},
+            }}},
+        })])
+        report = analyze([doc, old])
+        tk = report["tracklet"]
+        assert tk["triggers"] == 1
+        assert tk["gt_head_obs"] == [0.0]
+        assert tk["non_gt_head_obs"] == [28.0]
+        (frag,) = tk["fragmented"]
+        assert frag["class_id"] == 27 and frag["tracks"] == 5
+        assert tk["quantiles"]["tracks_per_class"]["max"] == 5.0
+        out = render(report)
+        assert "트랙릿 T1" in out and "단절 의심" in out
 
     def test_old_archive_without_class_id_skipped_quietly(self):
         doc = _doc(

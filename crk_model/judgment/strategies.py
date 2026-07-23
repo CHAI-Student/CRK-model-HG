@@ -123,6 +123,9 @@ class FreezerVisionFirstStrategy:
        vision 증거로 중재: 최고 conf가 최다 득표 적합보다 conf_margin(기본
        0.15) 이상 우세할 때만 conf 승(reason "…single_arbitrated"), 아니면
        득표 서열. 잔차는 중재 기준이 아니다 (무게 = 거부권 원칙).
+       margin 비교는 conf 상한 1.0에서 포화시킨다(min(0.99, vt+margin)) —
+       vt conf > 0.85면 어떤 후보도 margin 우세가 원리적으로 불가능해지는
+       구조적 결함 (실기 ses-10 z1: 정답 conf 1.0이 0.855+0.15=1.005에 패배).
     ② top 근접 실패 (gate_n < 잔차 ≤ near_factor×gate_n): 접촉 하중 오염이
        실측 8~18g(segment_retry_gap 주석) — "delta가 오염됐다"가 "정체성이
        틀렸다"보다 우세. top 정체성·개수를 보존한 PARTIAL 반환
@@ -187,6 +190,15 @@ class FreezerVisionFirstStrategy:
         self._conf_margin = conf_margin
         self._refit_arb_floor = refit_arb_conf_floor
 
+    def _arb_threshold(self, rival_conf: float) -> float:
+        """중재 승리에 필요한 bc conf — 상한 포화 (docstring ①).
+
+        margin ≥ 1.0은 비활성 센티널(env 롤백 계약 "2.0=비활성")이라 포화를
+        적용하지 않는다 — 포화하면 conf ≥ 0.99 후보가 비활성 설정에서도
+        중재를 발동해 버린다."""
+        raw = rival_conf + self._conf_margin
+        return raw if self._conf_margin >= 1.0 else min(0.99, raw)
+
     def precondition(self, ctx: JudgmentContext) -> bool:
         return (
             not ctx.profile.weight_is_discriminative
@@ -242,7 +254,10 @@ class FreezerVisionFirstStrategy:
             bc = max(fits, key=lambda f: (f[1].confidence, f[1].vote_count))
             if bc is vt:
                 winner = vt  # 득표·conf 증거 일치
-            elif bc[1].confidence >= vt[1].confidence + self._conf_margin:
+            elif bc[1].confidence >= self._arb_threshold(vt[1].confidence):
+                # 상한 포화 (docstring ①): vt conf가 0.85를 넘으면 +margin이
+                # 1.0을 초과해 중재가 원리적으로 봉쇄된다 — conf 척도는
+                # 천장에서 압축되므로 0.99 이상은 결정적 우세로 취급.
                 winner, arbitrated = bc, True  # conf 결정적 우세 (설계 3b)
             elif vt[1] is top_c:
                 winner = vt  # 전역 득표 1위가 적합 — 종전 서열 존중
@@ -334,7 +349,9 @@ class FreezerVisionFirstStrategy:
             # 옳고, 기존 모호성 픽스처(conf 동률)도 계속 불발).
             bc = max(fits_gate, key=lambda f: (f[1].confidence, f[1].vote_count))
             if bc[1].confidence >= self._refit_arb_floor and all(
-                f is bc or bc[1].confidence >= f[1].confidence + self._conf_margin
+                # ① 과 동일한 상한 포화 (_arb_threshold) — 경쟁 적합 conf >
+                # 0.85면 +margin이 1.0을 초과해 중재 봉쇄되는 같은 구조적 결함.
+                f is bc or bc[1].confidence >= self._arb_threshold(f[1].confidence)
                 for f in fits_gate
             ):
                 # 절대 하한: margin 우세만으로는 "덜 흐린 유령"이 이긴다

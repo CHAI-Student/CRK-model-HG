@@ -10,6 +10,13 @@
    ("목표 재현율에서 역산" — 손튜닝 노브의 대체).
 3. **σ_db 실측** — (delta, 정답 배정) 잔차의 개당 분포 →
    `MODEL__JUDGMENT__LIKELIHOOD_SIGMA_DB`·gate_n slack의 보정 입력.
+4. **tray prior 개입** — likelihood shadow의 tray_prior가 score 1위를 실제로
+   바꾼 entry(ranking의 log_p_tray를 빼면 무-prior 순위를 복원할 수 있다)와,
+   라벨 대비 "prior 덕 정답 / prior 탓 오답" 집계 → penalty(기본 2.5) 보정.
+5. **트랙릿 T1** — vote_summary.motion_evidence.track_detail의 트랙별
+   head_obs 분포(정답 클래스 vs 비정답: held 강등 T2 임계 근거)와 클래스당
+   트랙 수(단절/fragmentation → G2 재연관 창 도입 판단).
+   docs/0723_tracklet_cost_benefit.md §8.
 
 사용 예 (Jetson, 실험 후):
 
@@ -78,6 +85,11 @@ def _billed_multiset(products: list[dict]) -> list[tuple[int, int]] | None:
             return None
         out[int(cid)] = out.get(int(cid), 0) + int(p.get("count", 0))
     return sorted(out.items())
+
+
+def _norm_items(items) -> list[tuple[int, int]]:
+    """shadow ranking의 items([[cid, count], ...]) → 정렬 튜플 멀티셋."""
+    return sorted((int(c), int(n)) for c, n in (items or []))
 
 
 def _session_epoch(doc: dict) -> float | None:
@@ -152,6 +164,26 @@ def analyze(docs: list[dict]) -> dict:
         # 과금 정오 총괄: 라벨된 세션의 최종 확정(zones products) vs GT.
         # shadow mismatch와 달리 "현행 판정이 결국 맞게 청구했는가"의 헤드라인.
         "billing": {"labeled": 0, "correct": 0, "unknown_schema": 0, "wrong": []},
+        # tray prior 개입 (ledger/tray_memory.py Phase 1): observed = prior가
+        # 실린 entry 수, flips = prior가 score 1위를 바꾼 entry (ranking에서
+        # score − log_p_tray로 무-prior 순위 복원 — ranking이 상위 5로
+        # 잘려 있어 근사이지만 후보 풀이 작아 실용상 충분).
+        "tray_prior": {
+            "observed": 0,
+            "flips": [],
+            # 라벨 정오는 단일 entry 트리거 한정 — 멀티트레이 entry는 채널
+            # 단위라 존 GT와 직접 비교가 성립하지 않는다.
+            "labeled_eval": {"prior_helped": 0, "prior_hurt": 0, "both_wrong": 0},
+        },
+        # 트랙릿 T1 (docs/0723_tracklet_cost_benefit.md §8): head_obs 분포와
+        # 클래스당 트랙 수 — held 강등(T2) 임계·재연관 창(G2) 판단 입력.
+        "tracklet": {
+            "triggers": 0,
+            "tracks_per_class": [],
+            "gt_head_obs": [],
+            "non_gt_head_obs": [],
+            "fragmented": [],  # 트랙 ≥ 4 (카메라×클래스) — 단절 의심
+        },
     }
     for doc in docs:
         if "_load_error" in doc:
@@ -252,6 +284,86 @@ def analyze(docs: list[dict]) -> dict:
                             ev["both_wrong"] += 1
                     report["likelihood"]["mismatches"].append(record)
 
+                # tray prior 개입 (report 키 주석 참조): entry별 무-prior 순위
+                # 복원 후 1위가 달라진 것만 flip으로 집계
+                tp = report["tray_prior"]
+                for e in entries:
+                    prior = e.get("tray_prior")
+                    if not prior:
+                        continue
+                    tp["observed"] += 1
+                    ranking = e.get("ranking") or []
+                    if not ranking:
+                        continue
+                    top_with = ranking[0]  # scored 정렬 보존 (shadow 계약)
+                    top_wo = max(
+                        ranking,
+                        key=lambda r: (r.get("score") or 0.0)
+                        - (r.get("log_p_tray") or 0.0),
+                    )
+                    with_items = _norm_items(top_with.get("items"))
+                    wo_items = _norm_items(top_wo.get("items"))
+                    if with_items == wo_items:
+                        continue
+                    rec = {
+                        "session": sid,
+                        "zone": zone,
+                        "channel": e.get("channel"),
+                        "prior": prior,
+                        "with_prior": with_items,
+                        "without_prior": wo_items,
+                    }
+                    if gt_zone and len(entries) == 1:
+                        with_ok = with_items == gt_zone
+                        wo_ok = wo_items == gt_zone
+                        rec["ground_truth"] = gt_zone
+                        rec["prior_correct"] = with_ok
+                        ev = tp["labeled_eval"]
+                        if with_ok and not wo_ok:
+                            ev["prior_helped"] += 1
+                        elif wo_ok and not with_ok:
+                            ev["prior_hurt"] += 1
+                        elif not with_ok and not wo_ok:
+                            ev["both_wrong"] += 1
+                    tp["flips"].append(rec)
+
+            # 트랙릿 T1 (report 키 주석 참조) — 라벨 없이도 트랙 수 분포는
+            # 집계, head_obs의 GT 분리 실측은 라벨 트리거 한정
+            me = (trace.get("vote_summary") or {}).get("motion_evidence") or {}
+            if isinstance(me, dict):
+                tk = report["tracklet"]
+                gt_ids = {cid for cid, _ in gt_zone}
+                saw_detail = False
+                for camera, classes in me.items():
+                    if not isinstance(classes, dict):
+                        continue
+                    for cid, info in classes.items():
+                        detail = (info or {}).get("track_detail")
+                        if detail is None:
+                            continue  # 구 아카이브 (T1 이전) — 조용히 제외
+                        saw_detail = True
+                        n_tracks = int(info.get("tracks") or len(detail))
+                        tk["tracks_per_class"].append(float(n_tracks))
+                        if n_tracks >= 4:
+                            tk["fragmented"].append({
+                                "session": sid,
+                                "zone": zone,
+                                "camera": camera,
+                                "class_id": int(cid),
+                                "tracks": n_tracks,
+                            })
+                        if gt_zone:
+                            bucket = (
+                                "gt_head_obs"
+                                if int(cid) in gt_ids
+                                else "non_gt_head_obs"
+                            )
+                            for t in detail:
+                                if int(t.get("first", -1)) >= 0:  # pos 계측 있는 트랙만
+                                    tk[bucket].append(float(t.get("head_obs") or 0))
+                if saw_detail:
+                    tk["triggers"] += 1
+
             if not gt_zone:
                 continue
 
@@ -309,6 +421,12 @@ def analyze(docs: list[dict]) -> dict:
         # 우도 σ_db 제안: 편향 포함 RMS — 잔차의 "전형적 크기"
         rms = (sum(r * r for r in residuals) / n) ** 0.5
         report["sigma_db"]["suggested_sigma_db"] = round(rms, 2)
+    tk = report["tracklet"]
+    tk["quantiles"] = {
+        k: _quantiles(tk[k])
+        for k in ("tracks_per_class", "gt_head_obs", "non_gt_head_obs")
+        if tk[k]
+    }
     return report
 
 
@@ -378,6 +496,76 @@ def render(report: dict) -> str:
             f"현행만 정답 {ev['current_correct']} / 둘 다 오답 {ev['both_wrong']}"
         )
         lines.append("  → Phase 2 승격 게이트: score만 정답이 우세할 때만 진행")
+
+    tp = report["tray_prior"]
+    if tp["observed"]:
+        lines.append("")
+        lines.append(
+            f"--- tray prior shadow (개입 {tp['observed']} entry, "
+            f"1위 변경 {len(tp['flips'])}건) ---"
+        )
+        for f in tp["flips"]:
+            ch = f" ch{f['channel']}" if f.get("channel") is not None else ""
+            verdict = ""
+            if "prior_correct" in f:
+                verdict = (
+                    f"  [GT {f['ground_truth']} → prior "
+                    f"{'O' if f['prior_correct'] else 'X'}]"
+                )
+            lines.append(
+                f"  {f['session']} zone{f['zone']}{ch}: prior {f['prior']} — "
+                f"무-prior 1위 {f['without_prior']} → {f['with_prior']}{verdict}"
+            )
+        pev = tp["labeled_eval"]
+        if any(pev.values()):
+            lines.append(
+                f"  라벨 정오 (단일 entry 한정): prior 덕 정답 "
+                f"{pev['prior_helped']} / prior 탓 오답 {pev['prior_hurt']} / "
+                f"둘 다 오답 {pev['both_wrong']}"
+            )
+            lines.append(
+                "  → PENALTY(2.5) 보정: hurt > 0이면 완화 검토, "
+                "helped 우세 지속 시 Phase 2 근거"
+            )
+
+    tk = report["tracklet"]
+    if tk["triggers"]:
+        lines.append("")
+        lines.append(
+            f"--- 트랙릿 T1 (track_detail 관측 트리거 {tk['triggers']}개) ---"
+        )
+        tq = tk.get("quantiles") or {}
+        if tq.get("tracks_per_class"):
+            q = tq["tracks_per_class"]
+            lines.append(
+                f"  트랙/클래스: n={q['n']} median={q['median']:.3g} "
+                f"max={q['max']:.3g} — max가 물리 인스턴스 수를 넘으면 단절"
+            )
+        if tk["fragmented"]:
+            lines.append(
+                f"  단절 의심(트랙 ≥ 4) {len(tk['fragmented'])}건: "
+                + ", ".join(
+                    f"{f['session']}/z{f['zone']}/{f['camera']}/c{f['class_id']}"
+                    f"({f['tracks']})"
+                    for f in tk["fragmented"]
+                )
+            )
+            lines.append("  → 빈발 시 재연관 창(G2, 0723 문서 §2) 도입")
+        for key, label in (
+            ("gt_head_obs", "정답 클래스"),
+            ("non_gt_head_obs", "비정답(배경·held)"),
+        ):
+            if tq.get(key):
+                q = tq[key]
+                lines.append(
+                    f"  head_obs {label}: n={q['n']} median={q['median']:.3g} "
+                    f"max={q['max']:.3g}"
+                )
+        if tq.get("gt_head_obs") and tq.get("non_gt_head_obs"):
+            lines.append(
+                "  → 두 분포가 분리되면 held 트랙 강등(T2) 임계 확정 가능 "
+                "(0713 §10의 트랙 단위 재실측)"
+            )
 
     lines.append("")
     lines.append("--- conformal 보정 (라벨된 정답 상품의 후보 통계) ---")
@@ -477,7 +665,11 @@ def render_session(doc: dict) -> str:
         vs = trace.get("vote_summary") or {}
         if vs.get("classes"):
             lines.append(f"   vote_summary.classes: {vs['classes']}")
-        for key in ("filter_drops_by_stage", "entry_dropped_by_camera"):
+        for key in (
+            "filter_drops_by_stage",
+            "entry_dropped_by_camera",
+            "motion_evidence",  # T1: track_detail 포함 — held/단절 사후 분석
+        ):
             if vs.get(key):
                 lines.append(f"   vote_summary.{key}: {vs[key]}")
         for key in ("loadcell_shadow", "likelihood_shadow"):

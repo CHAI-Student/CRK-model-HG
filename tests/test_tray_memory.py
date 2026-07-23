@@ -3,7 +3,10 @@
 계약: 정적 planogram(금지) 대체 — 운영 입력 없음, OPEN 리셋(cold-start =
 prior 0 = 현행 동작), 키는 (zone, channel)(존마다 좌/우 트레이가 별개 상품
 가능), 소비는 likelihood shadow의 log_p_tray 항뿐(Phase 1, 판정 무변경).
-등록 게이트: COMPLETE + 무게 뒷받침 + vision 1위 일치만 (오판 전파 차단).
+등록 게이트: COMPLETE + 무게 뒷받침만 (오판 전파 차단; vision 1위 일치
+조건은 5차 ses-10 닭-달걀로 Phase 1에서 제외 — tray_memory.py docstring).
+세션 가드: reset(session_id) 후 다른 세션 id의 record/priors_for는
+무시/중립 (OPEN 리셋 ↔ 구 세션 잔여 트리거의 워커 경쟁 차단).
 """
 from conftest import cand
 
@@ -81,6 +84,20 @@ class TestMemoryUnit:
         assert m.log_prior(4, 1, 44) == 0.0
         assert m.snapshot() == {}
 
+    def test_session_guard_blocks_stale_trigger(self):
+        # OPEN 리셋(락 안)과 구 세션 잔여 트리거(워커, 락 밖)의 순서 역전:
+        # 리셋이 세션 id를 고정하면 불일치 record는 무시, priors_for는 중립.
+        m = SessionTrayMemory()
+        m.reset("ses-2")
+        m.record(1, 0, 44, session_id="ses-1")  # 구 세션 잔여 → 무시
+        assert m.snapshot() == {}
+        m.record(1, 0, 44, session_id="ses-2")
+        assert m.snapshot() == {"1:0": {44: 1}}
+        assert m.priors_for(2, 0, [44], session_id="ses-1") == {}  # 중립
+        assert m.priors_for(2, 0, [44], session_id="ses-2") == {44: -2.5}
+        # id 미제공(라이브러리 직접 사용)은 가드 비활성 — 하위호환
+        assert m.priors_for(2, 0, [44]) == {44: -2.5}
+
 
 class TestScorerTrayPrior:
     def test_ses5_ranking_flips_with_other_tray_penalty(self):
@@ -113,7 +130,7 @@ class TestRecordGate:
         store.update([MELONA, ITEM3])
         return TriggerPipeline(None, {1: FREEZER}, store, tray_memory=memory)
 
-    def test_records_only_weight_backed_top_billed_complete(self):
+    def test_records_only_weight_backed_complete(self):
         m = SessionTrayMemory()
         pipe = self._pipe(m)
         candidates = [cand(44, 0.85, 58), cand(3, 0.84, 7)]
@@ -133,12 +150,6 @@ class TestRecordGate:
         )
         assert m.snapshot() == {}
 
-        # vision 1위(44)가 아닌 과금 → 미등록
-        pipe._record_tray_evidence(
-            _ctx(-224.0, [MELONA, ITEM3], candidates), _complete(ITEM3, 1), 0
-        )
-        assert m.snapshot() == {}
-
         # vision_only(무게 무근거) → 미등록
         pipe._record_tray_evidence(
             _ctx(-79.0, [MELONA], candidates, vision_only=True),
@@ -146,11 +157,23 @@ class TestRecordGate:
         )
         assert m.snapshot() == {}
 
-        # COMPLETE + top 일치 → 등록
+        # COMPLETE + 무게 뒷받침 → 등록
         pipe._record_tray_evidence(
             _ctx(-79.0, [MELONA], candidates), _complete(MELONA, 1), 0
         )
         assert m.snapshot() == {"1:0": {44: 1}}
+
+    def test_records_despite_vision_top_mismatch(self):
+        # ses-10 완화 (tray_memory.py docstring): vision 1위(44, held 오염)가
+        # 아닌 3의 COMPLETE 과금도 등록한다 — top 불일치가 흔한 오염 존이
+        # 정확히 prior가 필요한 곳이라 일치 게이트는 닭-달걀이었다.
+        m = SessionTrayMemory()
+        pipe = self._pipe(m)
+        candidates = [cand(44, 0.85, 58), cand(3, 0.84, 7)]
+        pipe._record_tray_evidence(
+            _ctx(-224.0, [MELONA, ITEM3], candidates), _complete(ITEM3, 1), 0
+        )
+        assert m.snapshot() == {"1:0": {3: 1}}
 
 
 class _MovingDetector:
@@ -203,6 +226,24 @@ class TestPipelineWiring:
         )
         entry = second.trace.likelihood_shadow[0]
         assert entry["tray_prior"] == {44: -2.5}
+
+    def test_session_guard_wired_through_pipeline(self):
+        # ModelService가 reset("other")로 세션을 고정한 뒤 다른 세션 id의
+        # 트리거가 처리되면(리셋 경쟁 시나리오) 등록이 무시되는지 — pipeline이
+        # session_id를 record까지 실어 나르는 배선 검증.
+        memory = SessionTrayMemory()
+        memory.reset("other-session")
+        store = ActiveProductStore()
+        store.update([MELONA])
+        pipe = TriggerPipeline(
+            _MovingDetector(), {1: FREEZER}, store, tray_memory=memory
+        )
+        out = pipe.process(
+            "s1",
+            TriggerRequest(1, {"top": _moving_frames(8)}, _samples(500, 421), 1.0),
+        )
+        assert out.event.judgment.status is JudgmentStatus.COMPLETE
+        assert memory.snapshot() == {}  # 세션 불일치 → 미등록
 
     def test_without_memory_no_prior_field(self):
         store = ActiveProductStore()

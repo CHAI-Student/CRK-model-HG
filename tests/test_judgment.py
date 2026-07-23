@@ -679,6 +679,33 @@ class TestIssue16WeightArbitration:
         assert result.status is JudgmentStatus.PARTIAL
         assert [(pc.product.class_id, pc.count) for pc in result.products] == [(5, 1)]
 
+    def test_case_e_margin_saturates_at_conf_ceiling(self):
+        # 5차 ses-10 z1: vt conf 0.855 + margin 0.15 = 1.005 > conf 상한 1.0
+        # — 정답(conf 1.0, 잔차 0)조차 중재가 원리적으로 불가능하던 구조적
+        # 결함. min(0.99, vt+margin) 포화로 천장 압축을 반영한다.
+        result = JudgmentRouter().judge(ctx(
+            -175.0, [self.DUMPLING, self.C175],
+            [cand(13, 0.855, 63), cand(23, 1.0, 32)],
+            profile=FREEZER,
+        ))
+        assert result.status is JudgmentStatus.COMPLETE
+        assert result.reason == "freezer_vision_first_single_arbitrated"
+        assert [(pc.product.class_id, pc.count) for pc in result.products] == [(23, 1)]
+
+    def test_margin_disable_sentinel_skips_saturation(self):
+        # margin ≥ 1.0은 비활성 센티널("2.0=비활성", env 롤백 계약) — 포화를
+        # 적용하면 conf ≥ 0.99 후보가 비활성 설정에서도 중재를 발동해 버린다.
+        from crk_model.judgment.strategies import FreezerVisionFirstStrategy
+        legacy = FreezerVisionFirstStrategy(conf_margin=2.0)
+        result = legacy.solve(ctx(
+            -175.0, [self.DUMPLING, self.C175],
+            [cand(13, 0.855, 63), cand(23, 1.0, 32)],
+            profile=FREEZER,
+        ))
+        assert result is not None
+        assert result.reason == "freezer_vision_first_single"  # 득표 서열 유지
+        assert [(pc.product.class_id, pc.count) for pc in result.products] == [(13, 1)]
+
     def test_rollback_knobs_restore_legacy_first_fit(self):
         # env 롤백 스토리 (설계 §6): slack=0 + override/margin 비활성 →
         # 구 동작(1위 적합 실패 → 2위 우연 적합 채택)이 재현된다.

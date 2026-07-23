@@ -22,6 +22,7 @@ import json
 from dataclasses import replace as dc_replace
 
 import pytest
+from conftest import cand
 
 from crk_model.core.config import Settings
 from crk_model.core.profiles import REFRIGERATOR
@@ -31,7 +32,10 @@ from crk_model.ledger.events import TriggerEvent
 from crk_model.ledger.journal import event_from_dict, event_to_dict
 from crk_model.perception.detector import Detection
 from crk_model.service import ModelService
-from tests.conftest import cand
+
+# `from tests.conftest import ...`는 site-packages에 서드파티 `tests` 패키지가
+# 있는 환경(로컬 anaconda)에서 PEP 420 규칙상 정규 패키지에 가려져 깨진다 —
+# 다른 테스트 전부와 같은 top-level conftest 임포트로 통일.
 
 
 class FakeClock:
