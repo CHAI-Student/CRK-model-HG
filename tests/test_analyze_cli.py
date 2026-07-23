@@ -194,6 +194,40 @@ class TestCli:
     def test_empty_dir_returns_error(self, tmp_path, capsys):
         assert main(["--dir", str(tmp_path)]) == 1
 
+    def test_session_detail_dump(self, tmp_path, capsys):
+        day = tmp_path / "2026-07-23"
+        day.mkdir()
+        doc = _doc(
+            "ses-bad",
+            ground_truth=_gt({"zone": 1, "class_id": 46, "count": 1}),
+            triggers=[_trigger(
+                zone=1, delta=-67.5,
+                judgment={"status": "partial",
+                          "strategy": "vision_first_identity_partial",
+                          "reason": "vision_first_identity_partial",
+                          "confidence": 0.4,
+                          "products": [{"product_id": "P13", "class_id": 13,
+                                        "unit_weight": 185.0, "count": 1}]},
+                vision_candidates=[
+                    {"class_id": 13, "confidence": 0.8, "vote_count": 60,
+                     "vote_ratio": 0.3},
+                    {"class_id": 46, "confidence": 1.0, "vote_count": 12,
+                     "vote_ratio": 0.06},
+                ],
+            )],
+        )
+        (day / "ses-bad.json").write_text(json.dumps(doc), encoding="utf-8")
+        assert main(["--dir", str(tmp_path), "--session", "ses-bad"]) == 0
+        out = capsys.readouterr().out
+        assert "vision_first_identity_partial" in out
+        assert "GT: z1:46x1" in out and "c13:60표" in out
+
+    def test_session_detail_not_found(self, tmp_path, capsys):
+        day = tmp_path / "2026-07-23"
+        day.mkdir()
+        (day / "ses-1.json").write_text(json.dumps(_doc()), encoding="utf-8")
+        assert main(["--dir", str(tmp_path), "--session", "nope"]) == 1
+
     def test_load_documents_reports_broken_file(self, tmp_path):
         day = tmp_path / "2026-07-23"
         day.mkdir()

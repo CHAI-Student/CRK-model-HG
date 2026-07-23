@@ -386,6 +386,72 @@ def render(report: dict) -> str:
     return "\n".join(lines)
 
 
+def _fmt_products(products: list[dict]) -> str:
+    if not products:
+        return "-"
+    return ", ".join(
+        f"{p.get('class_id', p.get('name'))}x{p.get('count')}" for p in products
+    )
+
+
+def render_session(doc: dict) -> str:
+    """세션 1건의 오판정 사후 분석 덤프 — YAML을 직접 뒤지지 않아도 판정
+    전략·득표·탈락 사유·shadow까지 한 화면으로 재구성한다 (--session)."""
+    lines = [f"=== {doc.get('session_id')} ({doc.get('status')}) ==="]
+    gt = doc.get("ground_truth")
+    if gt:
+        items = ", ".join(
+            f"z{i.get('zone')}:{i.get('class_id', i.get('name'))}x{i.get('count')}"
+            for i in gt.get("items") or []
+        )
+        lines.append(f"GT: {items}  note={gt.get('note', '')}")
+    if doc.get("notes"):
+        lines.append(f"정산 notes: {doc['notes']}")
+    for z in doc.get("zones") or []:
+        lines.append(
+            f"zone{z.get('zone')} 확정: {_fmt_products(z.get('products') or [])} "
+            f"(Δ{z.get('weight_delta')}g, notes={z.get('notes')})"
+        )
+    for t in doc.get("triggers") or []:
+        j = t.get("judgment") or {}
+        lines.append(f"-- trigger zone{t.get('zone')} Δ{t.get('delta_weight')}g")
+        segs = t.get("segments") or []
+        if segs:
+            lines.append(
+                "   segments: "
+                + ", ".join(f"{s.get('delta_grams')}g" for s in segs)
+            )
+        lines.append(
+            f"   judgment: {j.get('status')} strategy={j.get('strategy')} "
+            f"reason={j.get('reason')} conf={round(j.get('confidence') or 0, 3)}"
+        )
+        lines.append(f"   billed: {_fmt_products(j.get('products') or [])}")
+        cands = t.get("vision_candidates") or []
+        if cands:
+            top = sorted(cands, key=lambda c: -(c.get("vote_count") or 0))[:8]
+            lines.append(
+                "   candidates: "
+                + ", ".join(
+                    f"c{c.get('class_id')}:{c.get('vote_count')}표"
+                    f"/conf{round(c.get('confidence') or 0, 2)}"
+                    for c in top
+                )
+            )
+        trace = t.get("trace") or {}
+        if trace.get("reason_codes"):
+            lines.append(f"   reason_codes: {trace['reason_codes']}")
+        vs = trace.get("vote_summary") or {}
+        if vs.get("classes"):
+            lines.append(f"   vote_summary.classes: {vs['classes']}")
+        for key in ("filter_drops_by_stage", "entry_dropped_by_camera"):
+            if vs.get(key):
+                lines.append(f"   vote_summary.{key}: {vs[key]}")
+        for key in ("loadcell_shadow", "likelihood_shadow"):
+            if trace.get(key):
+                lines.append(f"   {key}: {trace[key]}")
+    return "\n".join(lines)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="analyze-sessions",
@@ -395,6 +461,12 @@ def main(argv: list[str] | None = None) -> int:
         "--dir", default="data/sessions", help="아카이브 루트 (기본: data/sessions)"
     )
     parser.add_argument("--json", action="store_true", help="JSON으로 출력")
+    parser.add_argument(
+        "--session",
+        default=None,
+        metavar="SESSION_ID",
+        help="세션 1건 상세 덤프 (판정 전략·득표·탈락 사유·shadow)",
+    )
     args = parser.parse_args(argv)
 
     archive = SessionArchive(args.dir)
@@ -405,6 +477,16 @@ def main(argv: list[str] | None = None) -> int:
     if not docs:
         print(f"아카이브가 비어 있습니다: {args.dir}", file=sys.stderr)
         return 1
+    if args.session:
+        matches = [d for d in docs if d.get("session_id") == args.session]
+        if not matches:
+            print(f"세션을 찾을 수 없습니다: {args.session}", file=sys.stderr)
+            return 1
+        if args.json:
+            print(json.dumps(matches[0], ensure_ascii=False, indent=2, default=str))
+        else:
+            print(render_session(matches[0]))
+        return 0
     report = analyze(docs)
     if args.json:
         print(json.dumps(report, ensure_ascii=False, indent=2))
