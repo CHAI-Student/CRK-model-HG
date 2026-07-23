@@ -82,28 +82,32 @@ def _penalty_sources(
     e: TriggerEvent,
     events: Sequence[TriggerEvent],
     cfg: CrossZonePenaltyConfig,
-) -> dict[int, tuple[str, int, float]]:
+) -> tuple[dict[int, tuple[str, int, float]], list[str]]:
     """③ 페널티 소스 P(E): W(E)와 겹치는 타 존 서브이벤트의 귀속 상품 집합.
 
-    반환: {class_id: (product_id, source_zone, source_anchor)} — notes 기록용
-    메타 포함. 소스 이벤트가 무판정이거나 confidence < θ면 제외 (R1)."""
+    반환: ({class_id: (product_id, source_zone, source_anchor)}, 침묵 진단)
+    — 소스 이벤트가 무판정이거나 confidence < θ면 제외 (R1). 창이 겹쳤는데
+    θ에서 탈락한 소스는 진단 목록으로 보고한다 (9차 ses-8: 전 경로가 조용히
+    비면 페널티 미발동 원인을 아카이브만으로 알 수 없었다)."""
     lo, hi = contamination_window(e, cfg)
     sources: dict[int, tuple[str, int, float]] = {}
+    low_conf: list[str] = []
     for other in events:
         if other.zone == e.zone or other.status != "ok":
             continue
         j = other.judgment
-        if not j.products or j.confidence < cfg.source_conf_min:
-            continue
         overlapping = [t for t in sub_event_anchors(other) if lo <= t <= hi]
         if not overlapping:
+            continue
+        if not j.products or j.confidence < cfg.source_conf_min:
+            low_conf.append(f"zone{other.zone}@{j.confidence:.2f}")
             continue
         for pc in j.products:
             if pc.product.class_id > 0 and pc.product.class_id not in sources:
                 sources[pc.product.class_id] = (
                     pc.product.product_id, other.zone, overlapping[0]
                 )
-    return sources
+    return sources, low_conf
 
 
 def _judgment_residual(e: TriggerEvent) -> float | None:
@@ -266,7 +270,13 @@ def _repass_event(
         or e.judgment.status is JudgmentStatus.ERROR
     ):
         return None
-    sources = _penalty_sources(e, events, cfg)
+    sources, low_conf = _penalty_sources(e, events, cfg)
+    if not sources and low_conf:
+        # 침묵 진단 (9차 ses-8): 오염 창은 겹쳤지만 소스 판정 conf가 θ 미만
+        # — 페널티 미발동 사유를 아카이브에 남긴다 (동작 무변경).
+        notes.append(
+            f"zone{e.zone}:cross_zone_source_low_conf:" + ",".join(low_conf)
+        )
     penalized = {c.class_id for c in e.vision_candidates if c.class_id in sources}
     guarded = {cid for cid in penalized if (e.zone, cid) in exempt}
     if guarded:

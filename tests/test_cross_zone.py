@@ -8,7 +8,12 @@ import pytest
 from conftest import cand
 
 from crk_model.core.profiles import FREEZER, REFRIGERATOR
-from crk_model.core.types import JudgmentResult, JudgmentStatus, ProductCount
+from crk_model.core.types import (
+    ActiveProduct,
+    JudgmentResult,
+    JudgmentStatus,
+    ProductCount,
+)
 from crk_model.ledger import CloseSettler, CrossZonePenaltyConfig, TriggerEvent
 from crk_model.ledger.cross_zone import (
     apply_cross_zone_penalty,
@@ -139,6 +144,47 @@ class TestCrossZonePenalty:
         ]
         assert any("zone1:cross_zone_mutual_exempt:class4" in n for n in notes)
 
+    def test_ses8_mutual_topology_field_fixture(self):
+        # 9차 ses-8 실기 재구성 (GT z1:40, z2:46 — 동시 취출, 유사 복장으로
+        # 13이 vision top 오염, 전 후보 3~9표 저득표·저conf): 가드는 잔차가
+        # 정확한 z2(46, 잔차 1)를 면제하고, z1 재판정은 오염 top 13에 막혀
+        # gate 실패 → 원 판정 유지 + note. 과금은 어느 쪽이든 46×2로 같지만
+        # (구제는 Phase 2 likelihood/tray prior 소관) 관측 note가 남아야 한다.
+        p46 = ActiveProduct("P46", "46", class_id=46, unit_weight=71.0,
+                            unit_price=1000, stock_qty=20)
+        p40 = ActiveProduct("P40", "40", class_id=40, unit_weight=131.0,
+                            unit_price=2000, stock_qty=20)
+        p13 = ActiveProduct("P13c", "13", class_id=13, unit_weight=185.0,
+                            unit_price=2100, stock_qty=20)
+        cands = [
+            cand(13, conf=0.75, votes=9), cand(46, conf=0.39, votes=8),
+            cand(40, conf=0.31, votes=3),
+        ]
+        z2 = event(
+            "s", 2, 1784805686.0,
+            JudgmentResult(
+                JudgmentStatus.COMPLETE, (ProductCount(p46, 1),), 0.393,
+                "freezer_vision_first_single",
+            ),
+            -70.0, candidates=cands, change_ts=(1784805686.629,),
+        )
+        z1 = event(
+            "s", 1, 1784805688.0,
+            JudgmentResult(
+                JudgmentStatus.COMPLETE, (ProductCount(p46, 2),), 0.393,
+                "freezer_vision_first_single",
+            ),
+            -135.0, candidates=cands,
+            change_ts=(1784805686.629, 1784805688.230),
+        )
+        notes: list[str] = []
+        out = apply_cross_zone_penalty(
+            [z2, z1], PROFILES, (p46, p40, p13), CFG, notes
+        )
+        assert any("zone2:cross_zone_mutual_exempt:class46" in n for n in notes)
+        assert any("zone1:cross_zone_penalty_gate_failed" in n for n in notes)
+        assert out[0] is z2 and out[1] is z1  # 과금 무변경 — 관측만
+
     def test_mutual_demotion_tie_keeps_both(self, bar170, bar178):
         # 잔차 동률이면 무게가 판별하지 못하는 것 — 양쪽 다 면제(원 판정
         # 유지), ④ 무게 모호성 게이트와 같은 "개입하지 않는" 방향.
@@ -198,7 +244,9 @@ class TestCrossZonePenalty:
         assert out[1] is z2 and not notes
 
     def test_low_confidence_source_excluded(self, bar170, bar178):
-        # ③ 소스 신뢰도 게이트 (R1): confidence < θ 소스는 오판 전파 차단
+        # ③ 소스 신뢰도 게이트 (R1): confidence < θ 소스는 오판 전파 차단.
+        # 9차 ses-8 후속: 완전 침묵이던 이 경로가 "창은 겹쳤는데 conf 탈락"
+        # 진단 note를 남긴다 — 동작(재판정 없음)은 그대로.
         z1, z2 = self.zone_events(bar170, bar178)
         z1_low = event(
             "s", 1, 100.0,
@@ -213,7 +261,8 @@ class TestCrossZonePenalty:
         out = apply_cross_zone_penalty(
             [z1_low, z2], PROFILES, (bar170, bar178), CFG, notes
         )
-        assert out[1] is z2 and not notes
+        assert out[1] is z2  # 재판정 없음 — 게이트 동작 유지
+        assert any("zone2:cross_zone_source_low_conf:zone1@0.20" in n for n in notes)
 
     def test_rejudge_gate_failure_keeps_original(self, bar170, bar178):
         # ⑥ 게이트 (R2): 재판정이 COMPLETE가 아니면 원 판정 유지 + 사유 기록
