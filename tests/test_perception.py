@@ -420,3 +420,176 @@ class TestMotionEvidence:
     def test_held_invalid_mode_rejected(self):
         with pytest.raises(ValueError):
             VotingEnsemble(held_demotion="activ")
+
+
+class TestTrackletGaps:
+    """트랙릿 잔여 갭 4종 (0723 문서 §2 — 사용자 승인 구현, shadow-first):
+    T2' 튜브 정체성 다수결(갭 4), 저신뢰 표 회수(갭 2), probation·트랙
+    소멸(갭 1), 튜브 conf 계측(갭 3). 전 갭 기본 off(라이브러리)/shadow
+    (Settings) — active는 env 승격 후에만 판정에 개입한다."""
+
+    @staticmethod
+    def _moving(i, cid=1, conf=0.9, lane=0.0):
+        off = 12.0 * i
+        return Detection(
+            cid, conf, bbox=(50.0 + off, 50.0 + lane, 100.0 + off, 100.0 + lane)
+        )
+
+    @staticmethod
+    def _wire(**voting_kwargs):
+        ev = MotionEvidence(floor_px=10.0)
+        v = VotingEnsemble(min_vote_count=1, conf_floor=0.0, **voting_kwargs)
+        v.attach_motion_evidence(ev)
+        return ev, v
+
+    def _flicker_scene(self, mode):
+        # 의류 산탄 시그니처: 한 궤적 위에서 주 클래스 1, 5프레임에 1번
+        # 클래스 2로 깜빡임 — 튜브 히스토그램 {1:10, 2:2}, 2는 결정적 소수.
+        ev, v = self._wire(tube_identity=mode)
+        for i in range(12):
+            cid = 2 if i % 5 == 4 else 1
+            dets = [self._moving(i, cid=cid)]
+            tids = ev.observe("top", dets)
+            v.add_frame("top", dets, track_ids=tids)
+        return ev, v
+
+    def test_tube_minority_vetoed_when_active(self):
+        _, v = self._flicker_scene("active")
+        assert {c.class_id for c in v.combine()} == {1}
+
+    def test_tube_minority_shadow_keeps_votes_and_measures(self):
+        _, v = self._flicker_scene("shadow")
+        assert {c.class_id for c in v.combine()} == {1, 2}  # 판정 무변경
+        s = v.tube_summary()
+        assert s["by_class"][2]["minority"] == 2
+        assert s["by_class"][2]["shadow"] == 0
+        assert s["top_current"] == 1 and s["changed"] is False
+
+    def test_tube_near_tie_not_minority(self):
+        # 48:52류 근소 열세는 소수가 아니다 — G1의 fail-closed 역전 방지
+        ev, v = self._wire(tube_identity="active")
+        for i in range(12):
+            cid = 2 if i % 2 else 1  # 6:6
+            dets = [self._moving(i, cid=cid)]
+            tids = ev.observe("top", dets)
+            v.add_frame("top", dets, track_ids=tids)
+        assert {c.class_id for c in v.combine()} == {1, 2}
+
+    def test_separate_objects_keep_separate_tubes(self):
+        # 인접한 별개 상품(다른 궤적)은 튜브가 갈라져 서로 소수가 아니다
+        ev, v = self._wire(tube_identity="active")
+        for i in range(10):
+            dets = [self._moving(i, cid=1), self._moving(i, cid=2, lane=300.0)]
+            tids = ev.observe("top", dets)
+            v.add_frame("top", dets, track_ids=tids)
+        assert {c.class_id for c in v.combine()} == {1, 2}
+
+    def test_same_frame_dual_box_absorbed_into_one_tube(self):
+        # 한 물체에 같은 프레임 두 클래스 박스 — 중심 근접이면 같은 튜브
+        ev = MotionEvidence(floor_px=10.0)
+        for i in range(6):
+            ev.observe(
+                "top", [self._moving(i, cid=1), self._moving(i, cid=2, lane=4.0)]
+            )
+        (tube,) = ev.tube_detail()["top"]
+        assert tube["classes"] == {1: 6, 2: 6}
+
+    def _recovery_scene(self, mode):
+        # 빠른 취출 표 기아 (5차 23이 1표): 진입 표 2 + 저신뢰(0.5) 8프레임
+        ev, v = self._wire(entry_conf_top=0.7, vote_recovery=mode)
+        for i in range(10):
+            conf = 0.9 if i < 2 else 0.5
+            dets = [self._moving(i, conf=conf)]
+            tids = ev.observe("top", dets)
+            v.add_frame("top", dets, track_ids=tids)
+        return ev, v
+
+    def test_vote_recovery_active_rescues_starved_votes(self):
+        _, v = self._recovery_scene("active")
+        (c,) = v.combine()
+        assert c.vote_count == 10  # 진입 2 + 회수 8
+        assert v.entry_dropped["top"] == 8  # 진단 카운터는 원 의미 유지
+
+    def test_vote_recovery_shadow_measures_only(self):
+        _, v = self._recovery_scene("shadow")
+        (c,) = v.combine()
+        assert c.vote_count == 2  # 판정 무변경
+        s = v.tube_summary()
+        assert s["by_class"][1]["recovered"] == 8
+        assert s["by_class"][1]["shadow"] == 10
+
+    def test_vote_recovery_requires_entry_anchor(self):
+        # 진입 표가 하나도 없는 순저신뢰 궤적(의류 산탄)은 회수 불가
+        ev, v = self._wire(entry_conf_top=0.7, vote_recovery="active")
+        for i in range(10):
+            dets = [self._moving(i, conf=0.5)]
+            tids = ev.observe("top", dets)
+            v.add_frame("top", dets, track_ids=tids)
+        assert v.combine() == ()
+
+    def test_min_hits_active_drops_short_track_votes(self):
+        # 갭 1 probation: 2관측 단명 트랙(변위는 통과)의 표 몰수
+        ev, v = self._wire(track_min_hits=3)
+        for i in range(10):
+            dets = [self._moving(i, cid=1)]
+            if i < 2:
+                dets.append(self._moving(i, cid=2, lane=300.0))
+            tids = ev.observe("top", dets)
+            v.add_frame("top", dets, track_ids=tids)
+        assert {c.class_id for c in v.combine()} == {1}
+
+    def test_short_track_probe_measured_in_shadow(self):
+        ev, v = self._wire(tube_identity="shadow")  # min_hits off — probe 3
+        for i in range(10):
+            dets = [self._moving(i, cid=1)]
+            if i < 2:
+                dets.append(self._moving(i, cid=2, lane=300.0))
+            tids = ev.observe("top", dets)
+            v.add_frame("top", dets, track_ids=tids)
+        s = v.tube_summary()
+        assert s["by_class"][2]["short"] == 2
+        assert s["by_class"][2]["shadow"] == 0
+
+    def test_track_max_gap_kills_stale_track(self):
+        ev = MotionEvidence(floor_px=10.0, track_max_gap=3)
+        t0 = ev.observe("top", [self._moving(0)])[0]
+        for _ in range(5):
+            ev.observe("top", [])
+        tid = ev.observe("top", [self._moving(1)])[0]
+        assert tid != t0  # 공백 5 > 3 — 사망, 새 트랙
+        ev2 = MotionEvidence(floor_px=10.0)  # 기본 무소멸
+        t0 = ev2.observe("top", [self._moving(0)])[0]
+        for _ in range(5):
+            ev2.observe("top", [])
+        assert ev2.observe("top", [self._moving(1)])[0] == t0
+
+    def test_tube_summary_top_flip_for_promotion_eval(self):
+        # 승격 게이트 시나리오: 옷 튜브(저신뢰 cls3 바닥 + 고신뢰 cls2 산탄)가
+        # 현행 1위, shadow에서는 소수 몰수로 진짜 상품(cls1)이 1위로 복귀
+        ev, v = self._wire(
+            entry_conf_top=0.7, tube_identity="shadow", vote_recovery="shadow"
+        )
+        for i in range(30):
+            dets = [self._moving(i, cid=3, conf=0.5)]  # 옷 바닥 (진입 미달)
+            if i % 4 == 0:
+                dets.append(self._moving(i, cid=2, conf=0.9, lane=4.0))  # 산탄
+            if i < 4:
+                dets.append(self._moving(i, cid=1, conf=0.9, lane=300.0))  # 진짜
+            tids = ev.observe("top", dets)
+            v.add_frame("top", dets, track_ids=tids)
+        s = v.tube_summary()
+        assert s["top_current"] == 2  # 산탄 8표 > 진짜 4표
+        assert s["top_shadow"] == 1 and s["changed"] is True
+
+    def test_tube_summary_none_when_all_modes_off(self):
+        ev, v = self._wire()
+        dets = [self._moving(0)]
+        tids = ev.observe("top", dets)
+        v.add_frame("top", dets, track_ids=tids)
+        assert v.tube_summary() is None
+
+    def test_invalid_modes_rejected(self):
+        with pytest.raises(ValueError):
+            VotingEnsemble(tube_identity="shadw")
+        with pytest.raises(ValueError):
+            VotingEnsemble(vote_recovery="on")

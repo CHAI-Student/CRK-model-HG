@@ -58,6 +58,17 @@ def _vision_top_not_billed(candidates, judgment) -> str | None:
     return f"vision_top_not_billed:class{top.class_id}"
 
 
+def _with_tubes(tube_summary: dict | None, evidence) -> dict | None:
+    """tube_shadow에 튜브 구성 진단(tube_detail)을 동봉 — 의류 산탄의
+    "한 궤적, 여러 클래스" 실측 근거. summary가 None(전 모드 off)이면 그대로."""
+    if tube_summary is None or evidence is None:
+        return tube_summary
+    tubes = evidence.tube_detail()
+    if tubes:
+        tube_summary["tubes"] = tubes
+    return tube_summary
+
+
 @dataclass(frozen=True)
 class TriggerRequest:
     zone: int
@@ -138,6 +149,9 @@ class TriggerPipeline:
         # T2 held 트랙 판정의 head 임계 (MotionEvidence.held_min_head 주입,
         # MODEL__VISION__HELD_TRACK_MIN_HEAD). 강등 모드 자체는 voting_params
         # 의 held_demotion으로 들어간다 — 판정은 증거층, 몰수는 투표층 소관.
+        track_max_gap: int = 0,
+        # 갭 1 트랙 소멸 (MotionEvidence.track_max_gap 주입, MODEL__VISION__
+        # TRACK_MAX_GAP): 공백 > N 추론프레임 트랙은 사망. 0 = 무소멸(현행).
         bocpd_shadow_enabled: bool = False,
         # BOCPD shadow 분석기 (research §2): 라이브러리 기본 False(하위호환),
         # 운영값은 Settings가 주입 (MODEL__LOADCELL__BOCPD_SHADOW).
@@ -166,6 +180,7 @@ class TriggerPipeline:
         self._motion_evidence_enabled = motion_evidence_enabled
         self._motion_evidence_floor = motion_evidence_floor_px
         self._held_min_head = held_track_min_head
+        self._track_max_gap = track_max_gap
         self._bocpd_shadow = bocpd_shadow_enabled
         self._likelihood: WeightLikelihoodScorer | None = (
             WeightLikelihoodScorer(**dict(likelihood_params or {}))
@@ -599,7 +614,9 @@ class TriggerPipeline:
                 else profile.motion_evidence_floor_px
             )
             evidence = MotionEvidence(
-                floor_px=floor, held_min_head=self._held_min_head
+                floor_px=floor,
+                held_min_head=self._held_min_head,
+                track_max_gap=self._track_max_gap,
             )
             voting.attach_motion_evidence(evidence)
         terminator = EarlyTerminator(profile, enabled=self._et_enabled)
@@ -699,6 +716,10 @@ class TriggerPipeline:
             # [held 표, 전체 표] — 승격 게이트는 analyze-sessions가 라벨과
             # 대조한다 (정답 클래스 held 플래그 = 승격 보류 신호).
             "held_shadow": voting.held_summary(),
+            # 트랙릿 갭 4종 shadow (0723 문서 §2 잔여): 클래스별 현행/가상
+            # 유효표 병기 + 튜브 구성(tubes) — analyze-sessions tube_eval이
+            # 라벨과 대조해 갭별 승격/폐기를 판정한다.
+            "tube_shadow": _with_tubes(voting.tube_summary(), evidence),
         }
         return voting.combine()
 

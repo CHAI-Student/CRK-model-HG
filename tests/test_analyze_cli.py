@@ -282,6 +282,39 @@ class TestAnalyze:
         out = render(report)
         assert "held 강등 관측" in out and "active 승격 보류" in out
 
+    def test_tube_shadow_eval_labeled_flip(self):
+        # 트랙릿 갭 shadow 승격 게이트: shadow 1위가 GT와 일치하고 현행
+        # 1위가 오답이면 shadow_correct — TUBE_IDENTITY/VOTE_RECOVERY
+        # active 승격 근거로 집계된다 (likelihood labeled_eval 동일 패턴).
+        doc = _doc(
+            ground_truth=_gt({"zone": 2, "class_id": 23, "count": 1}),
+            triggers=[
+                _trigger(zone=2, trace={"vote_summary": {"tube_shadow": {
+                    "by_class": {
+                        "13": {"votes": 8, "shadow": 0, "minority": 8,
+                               "short": 0, "recovered": 0, "tube_conf": 0.71},
+                        "23": {"votes": 2, "shadow": 9, "minority": 0,
+                               "short": 0, "recovered": 7, "tube_conf": 0.88},
+                    },
+                    "top_current": 13, "top_shadow": 23, "changed": True,
+                }}}),
+                _trigger(zone=2, trace={"vote_summary": {"tube_shadow": {
+                    "by_class": {"23": {"votes": 5, "shadow": 5, "minority": 0,
+                                        "short": 0, "recovered": 0,
+                                        "tube_conf": 0.9}},
+                    "top_current": 23, "top_shadow": 23, "changed": False,
+                }}}),
+            ],
+        )
+        report = analyze([doc])
+        te = report["tracklet"]["tube_eval"]
+        assert te["observed"] == 2 and len(te["changed"]) == 1
+        assert te["labeled_eval"] == {
+            "shadow_correct": 1, "current_correct": 0, "both_wrong": 0,
+        }
+        out = render(report)
+        assert "튜브 shadow" in out and "✓shadow" in out
+
     def test_old_archive_without_class_id_skipped_quietly(self):
         doc = _doc(
             ground_truth=_gt({"zone": 2, "class_id": 27, "count": 1}),

@@ -271,8 +271,15 @@ class ModelService:
                 "conf_floor": self.settings.vote_conf_floor,
                 # T2 held 트랙 강등 (MODEL__VISION__HELD_TRACK_DEMOTION)
                 "held_demotion": self.settings.held_track_demotion,
+                # 트랙릿 갭 4종 (0723 문서 §2 잔여, shadow-first — MODEL__
+                # VISION__TUBE_IDENTITY / VOTE_RECOVERY(_FLOOR) / TRACK_MIN_HITS)
+                "tube_identity": self.settings.tube_identity,
+                "vote_recovery": self.settings.vote_recovery,
+                "recovery_floor": self.settings.vote_recovery_floor,
+                "track_min_hits": self.settings.track_min_hits,
             },
             held_track_min_head=self.settings.held_track_min_head,
+            track_max_gap=self.settings.track_max_gap,
             segment_retry_gap_grams=self.settings.segment_retry_gap_grams,
         )
         # 동시성: FastAPI sync 엔드포인트(threadpool)와 워커 스레드가 게이트웨이·

@@ -300,7 +300,29 @@ research §3 원안은 "후보 = 트랙"까지 열어뒀지만, 이번 분석의
 |---|---|---|---|
 | **T1 계측** | `_Track`에 first/last/head pos + summary 확장 → vote_summary/아카이브. 트리거당 트랙 수(단절 지표) 포함 | 0 | **구현 완료** — `motion_evidence.py` track_detail(관측 상위 8트랙: first/last/obs/head_obs/passed). head_obs는 표가 아닌 관측 수 기준(저신뢰 검출도 트랙은 이으므로 held의 프리롤 존재를 더 빠짐없이 셈) |
 | **T2 held 트랙 강등** | 0713 A-2를 트랙 단위로 — `_effective_votes` 합류, shadow 계수 → active | shadow 후 | **shadow 구현 완료** — `MotionEvidence.track_held`(head_obs ≥ 5 + 프리롤 60프레임 가드) + `HELD_TRACK_DEMOTION=shadow` 기본. vote_summary.held_shadow와 analyze-sessions "held 강등 관측"(정답 플래그 = 승격 보류 신호)으로 실측 후 active |
-| **T2' 클래스 히스토그램** | 클래스 무관 연관 + 다수결 접기, 통합 전/후 순위 shadow | shadow 후 | **모델 개선 이후로 연기** — 현 모델의 혼동 수준(8차: 23↔13, 의류→24)에서 다수결 통합은 fail-closed 역전 위험 |
+| **T2' 클래스 히스토그램** | 클래스 무관 연관 + 다수결 접기, 통합 전/후 순위 shadow | shadow 후 | **shadow 구현 완료** (§9 — 사용자 지시로 "연기"를 shadow-first로 재조정): 튜브 층 병행 연관 + `TUBE_IDENTITY=shadow` 기본. active는 표 **이전이 아니라 결정적 소수(30% 문턱) 몰수**로 좁혀 G1 역전 위험을 증거 제거 방향으로 한정 |
 | **G2 재연관 창** | T1 계측에서 단절률이 유의하면 T2에 동봉 | 낮음 (fail-open 방향) | **구현 완료** — 공백 ≤ 12추론프레임 트랙에 1.5×max_jump 완화 반경 (7차 실측: 단절 의심이 지표를 지배) |
 | **T3 은퇴·완화** | static_track·baseline 제거, min_vote_share 완화 검토 | 정리 | **부분 완료** — static_track 은퇴(.env.example 0; 트래커의 진열 관측 사각도 함께 해소), baseline은 기 off. **min_vote_share 완화는 보류**: 8차 의류 산탄(움직이는 오검출)이 share floor의 잔존 가치를 실증 — 산탄 억제(G1/G4 계열) 선행 필요 |
-| 보류 | G4 품질 가중, G5 개수 항, tray-side 기하 힌트, share 완화 | — | 각각 잔존 편향 실측 / #15류 트랙 수 실측 / 사용자 판단 / 의류 산탄 억제 선행 |
+| 보류 | G5 개수 항, tray-side 기하 힌트, share 완화 | — | #15류 트랙 수 실측 / 사용자 판단 / 의류 산탄 억제 선행 |
+
+---
+
+## 9. 잔여 갭 4종 shadow 구현 (2026-07-23 저녁, 사용자 승인)
+
+사용자 지시("갭 4→2→1→3 순서 구현")에 따라 §2의 잔여 격차를 전부 구현하되,
+이 문서의 위험 분석(G1 역전·fragmentation)을 존중해 **전 갭 shadow-first**로
+반영했다. 관측은 `vote_summary.tube_shadow`(클래스별 현행/가상 유효표 병기 +
+튜브 히스토그램), 승격 게이트는 analyze-sessions "튜브 shadow" 라벨 정오 대조.
+
+| 갭 | 구현 | 기본 모드 | active 시맨틱과 위험 한정 |
+|---|---|---|---|
+| 갭 4 (T2'/G1) | 클래스 무관 튜브 층을 기존 트랙과 **병행** 연관 (`_Tube`, 같은 반경·재연관 규칙 + 같은 프레임 이중 박스는 중심 근접시 흡수). `tube_minority()` = 자기 클래스 관측 < 최다 클래스의 30% | `TUBE_IDENTITY=shadow` | 표 **몰수**(이전 아님) — 오통합 시 표가 틀린 쪽으로 이동하는 G1 역전을 증거 제거로 한정. 30% 문턱이 근소 열세(48:52) 오몰수 차단 |
+| 갭 2 (표 회수) | entry 미달·`FLOOR`(0.35) 이상·트랙 귀속 검출을 회수 풀에 보관, combine에서 "변위 통과 + 같은 (클래스,트랙) 진입 표 앵커 ≥1" 검증 후 회수 | `VOTE_RECOVERY=shadow` | 앵커가 방어의 핵심: 진입 표 0의 순저신뢰 궤적(의류 바닥)은 회수 불가. active 강등층(held/tube/probation)을 회수 표도 동일 통과 — 우회 구멍 없음 |
+| 갭 1 (probation·소멸) | `TRACK_MIN_HITS`(관측 < N 표 몰수) + `TRACK_MAX_GAP`(공백 > N 트랙 사망) | **둘 다 0=off** | §4-3 최대 리스크(단절 → 진짜 상품 표 몰수)와 정면 충돌하는 fail-closed 방향 — tube_shadow의 short 계측(고정 probe 3) 실측 후에만 env로 |
+| 갭 3 (G4 축소판) | 자격 트랙별 평균 conf의 최대(`tube_conf`)를 계측만 — Seq-NMS avg-rescore를 했다면의 클래스 conf. 순위 동률의 tie-break에도 사용 | 계측 상시 (env 없음) | 판정 미개입 — G4 보류 결론(튜닝 파라미터 비용) 유지, 실측 데이터만 축적 |
+
+의류 산탄과의 매핑: 산탄의 시그니처는 "① 한 궤적 위에서 클래스가 깜빡이고
+② 고신뢰 스파이크가 드물게 섞이며 ③ 궤적 자체는 (사람이 움직여) 변위를
+통과"다. ③ 때문에 변위 몰수가 무력했던 것이고, ①은 갭 4가, ②의 저신뢰
+바닥은 갭 2 앵커 조건이 역이용을 차단하며, 단명 산탄은 갭 1이 잡는다 —
+`test_tube_summary_top_flip_for_promotion_eval`이 이 시나리오의 재현 테스트다.

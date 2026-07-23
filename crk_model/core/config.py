@@ -239,6 +239,24 @@ class Settings:
     # analyze-sessions에서 정답 클래스 held 플래그가 없음을 확인한 뒤.
     held_track_demotion: str = "shadow"
     held_track_min_head: int = 5
+    # ---- 트랙릿 갭 4종 (0723 문서 §2의 잔여 격차 — shadow-first) ----
+    # 갭 4/T2' 튜브 정체성: 클래스 무관 튜브의 다수결에서 결정적 소수인
+    # 클래스 표 몰수(의류 산탄의 "한 궤적, 깜빡이는 클래스" 시그니처).
+    # active는 표 이전이 아니라 몰수라 fail-safe 방향 — 그래도 문서 G1의
+    # 역전 위험 때문에 shadow 실측(tube_shadow eval) 후에만 승격.
+    tube_identity: str = "shadow"
+    # 갭 2 저신뢰 표 회수 (ByteTrack 2단계의 표 버전): 변위 통과 트랙 +
+    # 같은 (클래스, 트랙) 진입 표 앵커가 있는 저신뢰 검출의 표를 회수 —
+    # 빠른 취출 표 기아(5차 23이 1표) 대응. floor 미만은 회수 후보도 아님.
+    vote_recovery: str = "shadow"
+    vote_recovery_floor: float = 0.35
+    # 갭 1 probation: 총 관측 < N 트랙의 표 몰수(0=off). 단명 산탄 억제용
+    # 이나 실패 방향이 fail-closed(단절된 진짜 상품 트랙도 단명) — tube_
+    # shadow의 short 계측(고정 probe 3) 실측 후 env로만 켠다.
+    track_min_hits: int = 0
+    # 갭 1 트랙 소멸: 공백 > N 추론프레임 트랙은 사망(0=무소멸). 같은
+    # fail-closed 방향이라 기본 off — G2 재연관 창과 함께 튜닝.
+    track_max_gap: int = 0
     # ---- 로드셀 안정 판정 (0.8s 캐던스 기준값, 이슈 #14) ----
     loadcell_stable_window: int = 3
     loadcell_stability_threshold_grams: float = 2.5
@@ -368,6 +386,21 @@ class Settings:
                 ("off", "shadow", "active"),
             ),
             held_track_min_head=_env_int("MODEL__VISION__HELD_TRACK_MIN_HEAD", 5),
+            tube_identity=_env_choice(
+                "MODEL__VISION__TUBE_IDENTITY",
+                "shadow",
+                ("off", "shadow", "active"),
+            ),
+            vote_recovery=_env_choice(
+                "MODEL__VISION__VOTE_RECOVERY",
+                "shadow",
+                ("off", "shadow", "active"),
+            ),
+            vote_recovery_floor=_env_float(
+                "MODEL__VISION__VOTE_RECOVERY_FLOOR", 0.35
+            ),
+            track_min_hits=_env_int("MODEL__VISION__TRACK_MIN_HITS", 0),
+            track_max_gap=_env_int("MODEL__VISION__TRACK_MAX_GAP", 0),
             bocpd_shadow=_env_bool("MODEL__LOADCELL__BOCPD_SHADOW", True),
             motion_gate_keepalive=_env_opt_int("MODEL__VISION__MOTION_GATE_KEEPALIVE"),
             loadcell_analyzer=_env_choice(

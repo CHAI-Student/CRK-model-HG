@@ -194,6 +194,19 @@ def analyze(docs: list[dict]) -> dict:
             # 뻔한 사례 — 0713 S1 계열), 비정답 건수는 강등의 기대 효과.
             "held_gt_flags": [],
             "held_non_gt": 0,
+            # 트랙릿 갭 shadow (vote_summary.tube_shadow — T2' 다수결·표
+            # 회수·probation·튜브 conf): 1위 변경 트리거의 라벨 정오 대조가
+            # TUBE_IDENTITY/VOTE_RECOVERY active 승격 게이트다 (likelihood
+            # labeled_eval과 동일 패턴).
+            "tube_eval": {
+                "observed": 0,
+                "changed": [],
+                "labeled_eval": {
+                    "shadow_correct": 0,
+                    "current_correct": 0,
+                    "both_wrong": 0,
+                },
+            },
         },
     }
     tracklet_seen: set = set()  # 공유 영상 중복 제거 키
@@ -418,6 +431,35 @@ def analyze(docs: list[dict]) -> dict:
                         else:
                             tk["held_non_gt"] += 1
 
+            # 트랙릿 갭 shadow (report 키 주석 참조) — 1위 변경 트리거만
+            # 케이스로 남기고, 라벨이 있으면 정오를 대조한다
+            tube = (trace.get("vote_summary") or {}).get("tube_shadow") or {}
+            if isinstance(tube, dict) and tube.get("by_class"):
+                te = report["tracklet"]["tube_eval"]
+                te["observed"] += 1
+                if tube.get("changed"):
+                    rec = {
+                        "session": sid,
+                        "zone": zone,
+                        "top_current": tube.get("top_current"),
+                        "top_shadow": tube.get("top_shadow"),
+                    }
+                    if gt_zone:
+                        gt_ids = {cid for cid, _ in gt_zone}
+                        cur, shw = rec["top_current"], rec["top_shadow"]
+                        cc = cur is not None and int(cur) in gt_ids
+                        sc = shw is not None and int(shw) in gt_ids
+                        rec["current_correct"] = cc
+                        rec["shadow_correct"] = sc
+                        lv = te["labeled_eval"]
+                        if sc and not cc:
+                            lv["shadow_correct"] += 1
+                        elif cc and not sc:
+                            lv["current_correct"] += 1
+                        elif not sc and not cc:
+                            lv["both_wrong"] += 1
+                    te["changed"].append(rec)
+
             if not gt_zone:
                 continue
 
@@ -583,7 +625,8 @@ def render(report: dict) -> str:
             )
 
     tk = report["tracklet"]
-    if tk["triggers"] or tk["held_non_gt"] or tk["held_gt_flags"]:
+    tube_observed = (tk.get("tube_eval") or {}).get("observed", 0)
+    if tk["triggers"] or tk["held_non_gt"] or tk["held_gt_flags"] or tube_observed:
         lines.append("")
         lines.append(
             f"--- 트랙릿 T1 (track_detail 관측 트리거 {tk['triggers']}개) ---"
@@ -638,6 +681,34 @@ def render(report: dict) -> str:
             if not tk["held_gt_flags"]:
                 lines.append(
                     "  → 정답 플래그 0 지속 시 HELD_TRACK_DEMOTION=active 승격 가능"
+                )
+        te = tk.get("tube_eval") or {}
+        if te.get("observed"):
+            lines.append(
+                f"  튜브 shadow(T2' 다수결·표 회수·probation): "
+                f"관측 {te['observed']}건, 1위 변경 {len(te['changed'])}건"
+            )
+            lv = te["labeled_eval"]
+            if any(lv.values()):
+                lines.append(
+                    f"    라벨 정오: shadow만 정답 {lv['shadow_correct']} / "
+                    f"현행만 정답 {lv['current_correct']} / "
+                    f"둘 다 오답 {lv['both_wrong']}"
+                )
+                lines.append(
+                    "    → shadow 우세 지속 시 TUBE_IDENTITY/VOTE_RECOVERY="
+                    "active 승격 근거, 현행 우세면 폐기"
+                )
+            for r in te["changed"][:8]:
+                if "shadow_correct" in r:
+                    mark = " ✓shadow" if r["shadow_correct"] else (
+                        " ✓현행" if r["current_correct"] else " 둘 다 ✗"
+                    )
+                else:
+                    mark = ""
+                lines.append(
+                    f"    {r['session']}/z{r['zone']}: "
+                    f"현행 c{r['top_current']} → shadow c{r['top_shadow']}{mark}"
                 )
 
     lines.append("")

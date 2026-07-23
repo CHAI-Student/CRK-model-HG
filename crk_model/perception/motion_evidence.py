@@ -31,6 +31,12 @@ baseline은 손 신호에 의존해 top(프리롤에 이미 손)에서는 무력
   판단 근거). pos는 voting.add_frame과 동일한 "게이트 스킵 포함 디코드
   위치" — head_obs는 표가 아니라 관측 수 기준이다 (entry_conf 미달 저신뢰
   검출도 트랙은 이으므로, held 트랙의 프리롤 존재를 표보다 빠짐없이 센다).
+- T2' 튜브 층 (0723 문서 §2 G1, shadow-first): 클래스-조건 트랙과 **병행**으로
+  클래스 무관 튜브(_Tube)를 연관해 관측 클래스 히스토그램을 쌓는다.
+  tube_minority()가 "한 궤적 위에서 깜빡인 결정적 소수 클래스"(8차 의류
+  산탄의 시그니처)를 판정하고, 표 몰수 여부는 투표층 모드(MODEL__VISION__
+  TUBE_IDENTITY)가 정한다. track_max_gap(갭 1)·track_obs(probation 입력)도
+  여기 소재 — 트랙 상태의 단일 소유자는 이 모듈이다.
 """
 from __future__ import annotations
 
@@ -51,6 +57,7 @@ class _Track:
     first_cy: float
     tid: int = -1  # 트랙 id — 투표의 트랙 귀속(트랙릿 투표)용
     camera: str = ""  # held 판정의 스트림 길이 가드(_max_pos) 참조용
+    class_id: int = -1  # 튜브 다수결(tube_minority)에서 자기 클래스 참조용
     path: float = 0.0  # 누적 이동 경로
     max_disp: float = 0.0  # 시점 대비 최대 변위
     size_sum: float = 0.0  # max(w,h) 누적 (임계 스케일용)
@@ -77,6 +84,25 @@ class _Track:
 
 
 @dataclass
+class _Tube:
+    """클래스 무관 튜브 (T2'/G1, 0723 문서 §2) — 한 물리 궤적 = 튜브 1개.
+
+    class_counts(관측 클래스 히스토그램)가 다수결 정체성의 근거다. 클래스-
+    조건 트랙과 **병행** 유지한다: 판정·변위 몰수 경로는 기존 트랙 그대로,
+    튜브는 정체성 다수결 전용 — 튜브 연관 오류가 검증된 변위 몰수 경로를
+    오염시키지 않는다. 의류 산탄의 시그니처("한 궤적 위에서 깜빡이는 소수
+    클래스")를 궤적 단위로 본다."""
+
+    last_cx: float
+    last_cy: float
+    aid: int
+    size_sum: float = 0.0
+    n: int = 0
+    matched_frame: int = -1
+    class_counts: dict[int, int] = field(default_factory=dict)
+
+
+@dataclass
 class MotionEvidence:
     """추론된 프레임의 (필터 통과) 검출을 관찰해 카메라×클래스 변위 증거를 쌓는다."""
 
@@ -98,6 +124,16 @@ class MotionEvidence:
     # 프리롤 부족 가드 (0713 §6): 관측 스트림이 공칭 프리롤 120프레임의
     # 절반 미만이면 위치 의미가 왜곡 — 카메라 단위로 held 판정 전체 비활성.
     held_min_stream: int = 60
+    # 갭 1 probation: 이 공백(추론 프레임)을 넘긴 트랙은 사망 — 새 검출은
+    # 새 트랙이 된다(first 리셋 = 변위 리셋). 0 = 무소멸(현행). 실패 방향이
+    # fail-closed(단명화 → 표 몰수)라 기본 off, env로만 켠다
+    # (MODEL__VISION__TRACK_MAX_GAP).
+    track_max_gap: int = 0
+    # T2' 다수결 문턱: 튜브 내 자기 클래스 관측 수가 최다 클래스의 이 비율
+    # 미만이면 "결정적 소수" — 근소 열세(48:52류)는 소수로 치지 않는다.
+    # 문서 G1의 fail-closed 역전 위험(진짜 ambiguous를 확신 오판으로)을
+    # 다수결 문턱으로 차단한다.
+    tube_minority_ratio: float = 0.3
     _tracks: dict[tuple[str, int], list[_Track]] = field(
         default_factory=lambda: defaultdict(list)
     )
@@ -110,6 +146,13 @@ class MotionEvidence:
     _max_pos: dict[str, int] = field(
         default_factory=lambda: defaultdict(lambda: -1)
     )
+    # T2' 튜브 상태 — 카메라별 튜브 목록 + 트랙→튜브 귀속 (마지막 관측 기준)
+    _tubes: dict[str, list[_Tube]] = field(
+        default_factory=lambda: defaultdict(list)
+    )
+    _tube_by_id: dict[int, _Tube] = field(default_factory=dict)
+    _tube_of_tid: dict[int, int] = field(default_factory=dict)
+    _next_aid: int = 0
 
     def observe(
         self, camera: str, detections: Sequence[Detection], pos: int | None = None
@@ -144,6 +187,8 @@ class MotionEvidence:
                 # 이상 끊겼던 트랙은 reassoc_window 안에서 완화 반경으로 잇는다
                 # (같은 클래스 버킷 한정 — 승계 오염 방지는 클래스 조건이 담당).
                 gap = idx - t.matched_frame
+                if self.track_max_gap and gap > self.track_max_gap:
+                    continue  # 갭 1: 공백 초과 트랙 사망 — 재연관 창의 상한
                 radius = self.max_jump_px
                 if 1 < gap <= self.reassoc_window:
                     radius *= self.reassoc_factor
@@ -153,12 +198,16 @@ class MotionEvidence:
             if best is None:
                 best = _Track(
                     last_cx=cx, last_cy=cy, first_cx=cx, first_cy=cy,
-                    tid=self._next_tid, camera=camera,
+                    tid=self._next_tid, camera=camera, class_id=d.class_id,
                 )
                 self._track_by_id[self._next_tid] = best
                 self._next_tid += 1
                 tracks.append(best)
             best.observe(cx, cy, size, idx)
+            # T2' 튜브 귀속 (클래스 무관) — 트랙과 병행. 귀속은 마지막 관측
+            # 기준(한 트랙이 튜브를 갈아타는 드문 경우 최신이 이긴다).
+            tube = self._observe_tube(camera, cx, cy, size, idx, d.class_id)
+            self._tube_of_tid[best.tid] = tube.aid
             if pos is not None:
                 if best.first_pos < 0:
                     best.first_pos = pos
@@ -169,6 +218,95 @@ class MotionEvidence:
                     self._max_pos[camera] = pos
             ids.append(best.tid)
         return ids
+
+    def _observe_tube(
+        self, camera: str, cx: float, cy: float, size: float, idx: int,
+        class_id: int,
+    ) -> _Tube:
+        """검출을 클래스 무관 튜브에 귀속 — 트랙과 동일한 반경·재연관 규칙.
+
+        같은 프레임 이중 박스(한 물체에 두 클래스 박스가 동시에 뜨는 경우)는
+        중심 거리 ≤ 평균 bbox 크기의 절반이면 같은 튜브로 흡수한다 — 인접한
+        별개 상품(중심 거리 ≈ bbox 폭)은 흡수되지 않는 판별 기준. 흡수 시
+        위치는 갱신하지 않는다(이중 계상 방지, 히스토그램만 누적)."""
+        tubes = self._tubes[camera]
+        for t in tubes:
+            if t.matched_frame != idx:
+                continue
+            avg = t.size_sum / t.n if t.n else size
+            dist = ((cx - t.last_cx) ** 2 + (cy - t.last_cy) ** 2) ** 0.5
+            if dist <= 0.5 * avg:
+                t.n += 1
+                t.size_sum += size
+                t.class_counts[class_id] = t.class_counts.get(class_id, 0) + 1
+                return t
+        best, best_dist = None, float("inf")
+        for t in tubes:
+            if t.matched_frame == idx:
+                continue
+            gap = idx - t.matched_frame
+            if self.track_max_gap and gap > self.track_max_gap:
+                continue
+            radius = self.max_jump_px
+            if 1 < gap <= self.reassoc_window:
+                radius *= self.reassoc_factor
+            dist = ((cx - t.last_cx) ** 2 + (cy - t.last_cy) ** 2) ** 0.5
+            if dist <= radius and dist < best_dist:
+                best, best_dist = t, dist
+        if best is None:
+            best = _Tube(last_cx=cx, last_cy=cy, aid=self._next_aid)
+            self._tube_by_id[self._next_aid] = best
+            self._next_aid += 1
+            tubes.append(best)
+        best.last_cx, best.last_cy = cx, cy
+        best.size_sum += size
+        best.n += 1
+        best.matched_frame = idx
+        best.class_counts[class_id] = best.class_counts.get(class_id, 0) + 1
+        return best
+
+    def tube_minority(self, tid: int) -> bool:
+        """T2' 다수결: 이 트랙(의 클래스)이 소속 튜브에서 결정적 소수인가.
+
+        결정적 기준: 자기 클래스 관측 < tube_minority_ratio × 최다 클래스
+        관측. 튜브 미귀속·단일 클래스 튜브는 False (fail-open — 판단 근거가
+        없으면 표를 건드리지 않는다)."""
+        t = self._track_by_id.get(tid)
+        if t is None:
+            return False
+        aid = self._tube_of_tid.get(tid)
+        if aid is None:
+            return False
+        tube = self._tube_by_id.get(aid)
+        if tube is None or len(tube.class_counts) < 2:
+            return False
+        top = max(tube.class_counts.values())
+        return tube.class_counts.get(t.class_id, 0) < self.tube_minority_ratio * top
+
+    def track_obs(self, tid: int) -> int:
+        """갭 1 probation 입력: 트랙의 총 관측 수 (미존재 트랙은 0)."""
+        t = self._track_by_id.get(tid)
+        return t.n if t is not None else 0
+
+    def tube_detail(self, limit: int = 6) -> dict[str, list[dict]]:
+        """튜브 구성 진단 (vote_summary.tube_shadow.tubes) — 카메라별 관측
+        상위 튜브의 클래스 히스토그램. 의류 산탄("한 궤적, 여러 클래스")의
+        실측 근거. 1관측 잔튜브는 제외 (아카이브 범람 방지)."""
+        out: dict[str, list[dict]] = {}
+        for camera, tubes in self._tubes.items():
+            top = [
+                {
+                    "obs": t.n,
+                    "classes": dict(
+                        sorted(t.class_counts.items(), key=lambda kv: -kv[1])
+                    ),
+                }
+                for t in sorted(tubes, key=lambda t: -t.n)[:limit]
+                if t.n >= 2
+            ]
+            if top:
+                out[camera] = top
+        return out
 
     def track_qualifies(self, tid: int) -> bool:
         """트랙릿 투표: 이 트랙의 표가 유효한가 — 트랙 자신의 변위 증거.

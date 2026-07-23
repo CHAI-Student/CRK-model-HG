@@ -78,11 +78,36 @@ class VotingEnsemble:
         # 취출 트랙 표는 유지된다, S2 해소). 운영값은 Settings 주입
         # (MODEL__VISION__HELD_TRACK_DEMOTION). held 판정 자체는
         # MotionEvidence.track_held (head_obs 임계 + 프리롤 가드).
+        tube_identity: str = "off",
+        # T2' 튜브 정체성 다수결 (0723 문서 §2 G1): "off" | "shadow"(tube_
+        # summary 계측만) | "active"(튜브 다수결에서 결정적 소수인 클래스의
+        # 표를 combine에서 몰수 — 표 이전이 아니라 몰수: 오통합 시 표가 틀린
+        # 쪽으로 전량 이동하는 G1 역전 위험을 증거 제거 방향으로 좁힌다).
+        # 운영값은 Settings 주입 (MODEL__VISION__TUBE_IDENTITY).
+        vote_recovery: str = "off",
+        # 갭 2 저신뢰 표 회수 (ByteTrack 2단계 연관의 표 버전): entry_conf
+        # 미달 검출도 트랙은 잇는 현행 구조에서, "변위 통과 트랙 + 같은
+        # (클래스, 트랙)의 진입 표 앵커"가 있는 저신뢰 검출의 표를 회수한다
+        # — 빠른 취출의 표 기아(5차 23이 1표) 대응. 앵커가 핵심 방어:
+        # 진입 표가 하나도 없는 순저신뢰 궤적(의류 산탄)은 회수 불가.
+        # (MODEL__VISION__VOTE_RECOVERY)
+        recovery_floor: float = 0.35,
+        recovery_anchor: int = 1,
+        track_min_hits: int = 0,
+        # 갭 1 probation (active): 총 관측 < N 트랙의 표 몰수. 0 = off.
+        # 단명 산탄 억제용이나 실패 방향이 fail-closed(단절된 진짜 상품
+        # 트랙도 단명)라 기본 off — tube_summary의 short 계측(고정 probe 3)
+        # 실측 후 env로만 켠다 (MODEL__VISION__TRACK_MIN_HITS).
     ):
-        if held_demotion not in ("off", "shadow", "active"):
-            # baseline_suppress_mode와 동일한 fail-closed — 오타가 조용히
-            # off가 되면 강등 없이 운영 중임을 알 수 없다.
-            raise ValueError(f"Invalid held_demotion: {held_demotion}")
+        for mode, name in (
+            (held_demotion, "held_demotion"),
+            (tube_identity, "tube_identity"),
+            (vote_recovery, "vote_recovery"),
+        ):
+            if mode not in ("off", "shadow", "active"):
+                # baseline_suppress_mode와 동일한 fail-closed — 오타가 조용히
+                # off가 되면 강등 없이 운영 중임을 알 수 없다.
+                raise ValueError(f"Invalid {name}: {mode}")
         self._conf_floor = conf_floor
         self._min_ratio = min_vote_ratio
         self._min_count = min_vote_count
@@ -93,6 +118,17 @@ class VotingEnsemble:
         self._side_only_weight = side_only_weight
         self._min_share = min_vote_share
         self._held_mode = held_demotion
+        self._tube_mode = tube_identity
+        self._recovery_mode = vote_recovery
+        self._recovery_floor = recovery_floor
+        self._recovery_anchor = recovery_anchor
+        self._min_hits = track_min_hits
+        # 갭 2 회수 풀: entry 미달이지만 recovery_floor 이상 + 트랙 귀속인
+        # 검출의 (conf, tid) — 자격 검증(_recovered)은 combine 시점.
+        self._low: dict[str, dict[int, list[tuple[float, int]]]] = {
+            "top": defaultdict(list),
+            "side": defaultdict(list),
+        }
         self._entry_conf = {"top": entry_conf_top, "side": entry_conf_side}
         # (conf, track_id|None) — 트랙 귀속 표 (트랙릿 투표, motion_evidence 참조)
         self._votes: dict[str, dict[int, list[tuple[float, int | None]]]] = {
@@ -140,6 +176,15 @@ class VotingEnsemble:
                 continue
             if d.confidence < entry:
                 self.entry_dropped[camera] += 1  # 진단용 — 어디서 죽었는지 추적
+                if (
+                    self._recovery_mode != "off"
+                    and tid is not None
+                    and d.confidence >= self._recovery_floor
+                ):
+                    # 갭 2: 트랙 귀속 저신뢰 검출은 회수 후보로 보관 —
+                    # A-1 pos 계측(_pos_stats)에는 넣지 않는다 (0713 §10
+                    # 실측 임계의 모집단을 진입 표 기준으로 유지).
+                    self._low[camera][d.class_id].append((d.confidence, tid))
                 continue
             self._votes[camera][d.class_id].append((d.confidence, tid))
             if pos is not None:
@@ -177,12 +222,48 @@ class VotingEnsemble:
                     # 트랙(별개 tid, head 0)은 유지된다. share 분모(_top_votes)
                     # 도 이 경로를 지나므로 자동 정화 (0713 §10 ses-8 문제).
                     continue
+                if self._tube_mode == "active" and ev.tube_minority(tid):
+                    # T2' active: 튜브 다수결에서 결정적 소수인 클래스 표 몰수
+                    # — 한 궤적 위에서 깜빡인 소수 클래스(의류 산탄의 시그니처).
+                    continue
+                if self._min_hits and ev.track_obs(tid) < self._min_hits:
+                    continue  # 갭 1 probation: 확인 관측 수 미달 단명 트랙
                 out.append(conf)
                 continue
             if class_ok is None:
                 class_ok = ev.class_motion(camera, cid)
             if class_ok:
                 out.append(conf)
+        if self._recovery_mode == "active":
+            out.extend(conf for conf, _ in self._recovered(camera, cid))
+        return out
+
+    def _recovered(self, camera: str, cid: int) -> list[tuple[float, int]]:
+        """갭 2 회수 자격 표: 변위 통과 트랙 + 같은 (클래스, 트랙)의 진입 표
+        앵커 ≥ recovery_anchor. active 강등층(held/tube/probation)이 켜져
+        있으면 회수 표도 동일하게 통과해야 한다 — 회수가 강등을 우회하는
+        구멍을 막는다."""
+        lows = self._low[camera].get(cid)
+        if not lows or self._motion_evidence is None:
+            return []
+        ev = self._motion_evidence
+        anchor: dict[int, int] = {}
+        for _, tid in self._votes[camera].get(cid, []):
+            if tid is not None:
+                anchor[tid] = anchor.get(tid, 0) + 1
+        out = []
+        for conf, tid in lows:
+            if anchor.get(tid, 0) < self._recovery_anchor:
+                continue
+            if not ev.track_qualifies(tid):
+                continue
+            if self._held_mode == "active" and ev.track_held(tid):
+                continue
+            if self._tube_mode == "active" and ev.tube_minority(tid):
+                continue
+            if self._min_hits and ev.track_obs(tid) < self._min_hits:
+                continue
+            out.append((conf, tid))
         return out
 
     def held_summary(self) -> dict | None:
@@ -202,6 +283,93 @@ class VotingEnsemble:
                 if held:
                     out.setdefault(camera, {})[cid] = [held, len(votes)]
         return out
+
+    def tube_summary(self) -> dict | None:
+        """트랙릿 갭 shadow 계측 (T2' 다수결 · 갭 2 회수 · 갭 1 probation ·
+        갭 3 튜브 conf) — BOCPD/likelihood shadow와 동일 패턴.
+
+        combine()과 별개로 "갭들을 전부 적용했다면"의 가상 유효표(shadow)를
+        클래스별로 산출해 현행 유효표와 병기한다. 어떤 갭이 이미 active면 그
+        효과는 현행에 흡수돼 해당 delta가 0이 된다 — 모드와 무관하게 식이
+        일관. analyze-sessions가 라벨과 대조해 갭별 승격/폐기를 판정한다.
+        None = 증거 미부착 또는 세 모드 전부 off."""
+        ev = self._motion_evidence
+        if ev is None or (
+            self._tube_mode == "off"
+            and self._recovery_mode == "off"
+            and not self._min_hits
+        ):
+            return None
+        probe = self._min_hits or 3  # 갭 1 shadow probe (계측 고정값)
+        by_class: dict[int, dict] = {}
+        for camera in ("top", "side"):
+            for cid, votes in self._votes[camera].items():
+                rec = by_class.setdefault(
+                    cid,
+                    {"votes": 0, "shadow": 0, "minority": 0, "short": 0,
+                     "recovered": 0, "tube_conf": 0.0},
+                )
+                rec["votes"] += len(self._effective_votes(camera, cid))
+                by_tid: dict[int, list[float]] = {}
+                class_ok: bool | None = None
+                survivors = minority = short = 0
+                for conf, tid in votes:
+                    if tid is None:
+                        if class_ok is None:
+                            class_ok = ev.class_motion(camera, cid)
+                        if class_ok:
+                            survivors += 1
+                        continue
+                    if not ev.track_qualifies(tid):
+                        continue
+                    if self._held_mode == "active" and ev.track_held(tid):
+                        continue
+                    survivors += 1
+                    by_tid.setdefault(tid, []).append(conf)
+                    if ev.tube_minority(tid):
+                        minority += 1
+                    elif ev.track_obs(tid) < probe:
+                        # elif: 소수 몰수와 중복 계상 방지 — shadow 산식에서
+                        # 두 delta를 모두 빼기 때문
+                        short += 1
+                rec["minority"] += minority
+                rec["short"] += short
+                # recovered는 모드 무관 계측 — active면 votes에도 이미 포함돼
+                # 있어 아래 shadow 합산과 대칭이 유지된다 (delta = 타 갭만).
+                rec["recovered"] += len(self._recovered(camera, cid))
+                rec["shadow"] += (
+                    survivors
+                    - (minority if self._tube_mode != "active" else 0)
+                    - (short if not self._min_hits else 0)
+                )
+                if by_tid:
+                    # 갭 3 계측: 자격 트랙별 평균 conf의 최대 — 튜브 재점수화
+                    # (Seq-NMS avg-rescore)를 했다면의 클래스 conf. 판정 미사용.
+                    tc = max(sum(v) / len(v) for v in by_tid.values())
+                    rec["tube_conf"] = max(rec["tube_conf"], round(tc, 3))
+        for rec in by_class.values():
+            rec["shadow"] += rec["recovered"]
+        by_class = {
+            cid: rec
+            for cid, rec in by_class.items()
+            if rec["votes"] or rec["shadow"]
+        }
+
+        def _rank(key: str) -> int | None:
+            return max(
+                by_class.items(),
+                key=lambda kv: (kv[1][key], kv[1]["tube_conf"]),
+                default=(None, None),
+            )[0]
+
+        top_current = _rank("votes")
+        top_shadow = _rank("shadow")
+        return {
+            "by_class": by_class,
+            "top_current": top_current,
+            "top_shadow": top_shadow,
+            "changed": top_current != top_shadow,
+        }
 
     def _weighted_confidence(self, top: list[float], side: list[float]) -> float:
         """원본 voting_ensemble.py combine() 427-458행과 동형 산식.
