@@ -188,6 +188,7 @@ class ModelService:
                     conf_override=self.settings.judgment_conf_override,
                     conf_margin=self.settings.judgment_conf_margin,
                 ),
+                partial_min_confidence=self.settings.judgment_partial_min_confidence,
             ), count_unit_slack=self.settings.judgment_count_unit_slack),
             early_termination_enabled=self.settings.early_termination_enabled,
             motion_evidence_enabled=self.settings.motion_evidence_enabled,

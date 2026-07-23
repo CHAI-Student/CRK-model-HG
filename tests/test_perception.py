@@ -23,6 +23,30 @@ class TestVoting:
         assert v.gate_passed_frames == 10
         assert c.vote_ratio == 2 / 10  # 분모 = 게이트 통과 프레임 수
 
+    def test_held_object_position_signals(self):
+        # held-object A-1 계측 (0713 §3): carried-in 후보(프리롤부터 전 구간
+        # 등장)는 head_votes↑·span_ratio≈1, 진짜 취출 후보(후반 국소 등장)는
+        # head=0·span 낮음 — 판정은 무변경, 신호만 후보에 실린다.
+        v = VotingEnsemble(min_vote_count=1, conf_floor=0.0, head_frames=30)
+        for pos in range(100):
+            dets = [Detection(40, 0.9)]  # carried-in: 매 프레임
+            if 60 <= pos < 75:
+                dets.append(Detection(13, 0.9))  # 진짜 취출: 후반 15프레임
+            v.add_frame("top", dets, pos=pos)
+        by_id = {c.class_id: c for c in v.combine()}
+        held, real = by_id[40], by_id[13]
+        assert held.head_votes == 30 and held.span_ratio == 1.0
+        assert held.first_pos_ratio == 0.0
+        assert real.head_votes == 0 and real.span_ratio == 0.15
+        assert abs(real.first_pos_ratio - 0.6) < 1e-6
+
+    def test_position_signals_default_zero_without_pos(self):
+        # pos 미제공(직접 생성 하위호환) — 계측 필드는 기본값 0 유지
+        v = VotingEnsemble(min_vote_count=1, conf_floor=0.0)
+        v.add_frame("top", [Detection(1, 0.9)])
+        (c,) = v.combine()
+        assert c.head_votes == 0 and c.span_ratio == 0.0
+
     def test_low_conf_votes_preserved_until_combine(self):
         # 진입 컷 0(라이브러리 기본)이면 conf 0.05 감지도 투표 누적 —
         # 결합 후 weighted_conf로만 필터 (conf_floor 안전판 경로)

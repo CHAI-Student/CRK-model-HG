@@ -433,6 +433,36 @@ class TestVisionFirstIdentityPartial:
         assert result.products[0].count == 1
         assert result.status is JudgmentStatus.COMPLETE
 
+    def test_low_confidence_partial_billing_blocked(self, bar170):
+        # 실기 ses-3-1784788285 재현: 5표/conf 0.31(청구 conf 0.157)짜리
+        # identity partial이 잔차 65g 오상품을 과금 — 청구 conf 하한(0.18,
+        # 원본 multi_kind_min_confidence 동형) 미달은 청구하지 않는다.
+        router = JudgmentRouter()
+        result = router.judge(
+            ctx(-100.0, [bar170], [cand(3, votes=5, conf=0.31)], profile=FREEZER)
+        )
+        assert result.status is JudgmentStatus.NO_DETECTION
+        assert not result.products
+
+    def test_partial_floor_zero_restores_old_behavior(self, bar170):
+        # 하한 0 = 구 동작 롤백 스토리 (env로 즉시 복원 가능)
+        from crk_model.judgment.router import default_pipeline
+
+        router = JudgmentRouter(default_pipeline(partial_min_confidence=0.0))
+        result = router.judge(
+            ctx(-100.0, [bar170], [cand(3, votes=5, conf=0.31)], profile=FREEZER)
+        )
+        assert result.strategy == "vision_first_identity_partial"
+        assert result.status is JudgmentStatus.PARTIAL
+
+    def test_weight_validated_complete_unaffected_by_floor(self, bar170):
+        # COMPLETE(무게 검증) 경로는 하한과 무관 — 저conf여도 무게가 검증하면 청구
+        router = JudgmentRouter()
+        result = router.judge(
+            ctx(-170.0, [bar170], [cand(3, votes=5, conf=0.3)], profile=FREEZER)
+        )
+        assert result.status is JudgmentStatus.COMPLETE
+
 
 class TestIssue10MelonaFiller:
     """이슈 #10 세션 3(ses-1-1783926841) 트리거 1 재현 — 무게 filler 채택.

@@ -68,6 +68,9 @@ class VotingEnsemble:
         # 판정에 진입해 "무게 filler"(예: 메로나 79g×n)로 채택되는 사고의
         # 원인. votes < top_votes×share 후보를 제거한다. 0.0 = 비활성
         # (하위호환) — 운영값은 Settings(MODEL__VISION__MIN_VOTE_SHARE) 주입.
+        head_frames: int = 30,
+        # held-object A-1 계측 (0713 §3): 스트림 첫 head_frames(프리롤 첫
+        # 1초)의 득표를 head_votes로 센다. pos 미제공 호출(하위호환)은 계측 0.
     ):
         self._conf_floor = conf_floor
         self._min_ratio = min_vote_ratio
@@ -86,6 +89,14 @@ class VotingEnsemble:
         }
         self.gate_passed_frames = 0  # 분모 (단일 정의)
         self.entry_dropped = {"top": 0, "side": 0}  # 진단: 진입 컷 탈락 수
+        # held-object A-1 계측: (camera, class)별 [first_pos, last_pos,
+        # head_votes] + 카메라별 관측 프레임 수(게이트 스킵 포함 디코드 위치).
+        self._head_frames = head_frames
+        self._pos_stats: dict[str, dict[int, list[int]]] = {
+            "top": defaultdict(lambda: [-1, -1, 0]),
+            "side": defaultdict(lambda: [-1, -1, 0]),
+        }
+        self._frames_seen = {"top": 0, "side": 0}
         # 모션 변위 증거 (perception/motion_evidence.py): attach되면 combine
         # 시점에 "변위 없는 카메라×클래스"의 표를 몰수한다 — 진열/배경 검출이
         # 득표 순위를 오염시키는 것을 투표 진입 전이 아니라 결합 시점에
@@ -94,17 +105,24 @@ class VotingEnsemble:
         self._motion_evidence = None
 
     def add_frame(
-        self, camera: str, detections: Sequence[Detection], track_ids=None
+        self, camera: str, detections: Sequence[Detection], track_ids=None,
+        pos: int | None = None,
     ) -> None:
         """게이트 통과(=추론된) 프레임에서만 호출.
 
         track_ids: MotionEvidence.observe()가 반환한 검출별 트랙 귀속
         (detections와 정렬 동일). 주어지면 트랙릿 투표 — 표가 트랙에
         귀속되어 combine 시점에 트랙 단위로 변위 검증된다. None이면
-        표는 클래스 단위 변위 판정으로 폴백 (하위호환)."""
+        표는 클래스 단위 변위 판정으로 폴백 (하위호환).
+
+        pos: 이 프레임의 디코드 스트림 내 위치 (게이트 스킵 **포함** 카운트,
+        0-기반) — held-object A-1 계측 입력 (0713 §3, F6 비저촉: 벽시계
+        환산 없이 스트림 상대 위치만 쓴다). None이면 계측 생략 (하위호환)."""
         self.gate_passed_frames += 1
         entry = self._entry_conf.get(camera, 0.0)
         tids = track_ids if track_ids is not None else [None] * len(detections)
+        if pos is not None:
+            self._frames_seen[camera] = max(self._frames_seen[camera], pos + 1)
         for d, tid in zip(detections, tids, strict=True):
             if d.is_hand:
                 continue
@@ -112,6 +130,13 @@ class VotingEnsemble:
                 self.entry_dropped[camera] += 1  # 진단용 — 어디서 죽었는지 추적
                 continue
             self._votes[camera][d.class_id].append((d.confidence, tid))
+            if pos is not None:
+                st = self._pos_stats[camera][d.class_id]
+                if st[0] < 0:
+                    st[0] = pos
+                st[1] = pos
+                if pos < self._head_frames:
+                    st[2] += 1
 
     def attach_motion_evidence(self, evidence) -> None:
         self._motion_evidence = evidence
@@ -193,9 +218,33 @@ class VotingEnsemble:
                 continue  # 이슈 #10: 1위 대비 미미한 득표 = 노이즈/오염 잔재
             if weighted < self._conf_floor:
                 continue
-            out.append(VisionCandidate(cid, weighted, votes, ratio))
+            head, span, first = self._position_signals(cid)
+            out.append(
+                VisionCandidate(
+                    cid, weighted, votes, ratio,
+                    head_votes=head, span_ratio=span, first_pos_ratio=first,
+                )
+            )
         out.sort(key=lambda c: (-c.vote_count, -c.confidence))
         return tuple(out)
+
+    def _position_signals(self, cid: int) -> tuple[int, float, float]:
+        """held-object A-1 계측 (0713 §3) — 카메라 결합: head는 합, span은
+        최대(한쪽 카메라라도 전 구간 등장이면 carried-in 후보), first는 최소."""
+        head = 0
+        span = 0.0
+        first = 1.0
+        seen_any = False
+        for camera in ("top", "side"):
+            st = self._pos_stats[camera].get(cid)
+            frames = self._frames_seen[camera]
+            if st is None or st[0] < 0 or frames <= 0:
+                continue
+            seen_any = True
+            head += st[2]
+            span = max(span, (st[1] - st[0] + 1) / frames)
+            first = min(first, st[0] / frames)
+        return (head, round(span, 4), round(first, 4)) if seen_any else (0, 0.0, 0.0)
 
     def debug_summary(self) -> dict:
         """issue #6 진단: combine()이 왜 특정 class_id를 버렸는지(vote_ratio

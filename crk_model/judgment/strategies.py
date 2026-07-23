@@ -745,6 +745,13 @@ class RelaxedIdentityPartialStrategy:
 
     name = "relaxed_partial"
 
+    def __init__(self, min_confidence: float = 0.18):
+        # 청구 conf 하한 (원본 multi_kind_min_confidence=0.18 동형) — 실기
+        # ses-3-1784788285: 5표/청구 conf 0.157짜리 identity partial이 잔차
+        # 65g 오상품을 과금했다. 무게 미검증 count=1 청구는 최소한의 vision
+        # 증거를 요구한다. 0 = 비활성 (구 동작).
+        self._min_conf = min_confidence
+
     def precondition(self, ctx: JudgmentContext) -> bool:
         return bool(ctx.vision_candidates) and ctx.profile.weight_is_discriminative
 
@@ -752,14 +759,21 @@ class RelaxedIdentityPartialStrategy:
         by_class = _product_by_class(ctx)
         ranked = sorted(ctx.vision_candidates, key=lambda c: (-c.vote_count, -c.confidence))
         for cand in ranked:
-            if cand.class_id in by_class:
-                p = by_class[cand.class_id]
-                return JudgmentResult(
-                    JudgmentStatus.PARTIAL,
-                    (ProductCount(p, 1),),
-                    confidence=cand.confidence * 0.5,
-                    reason="relaxed_partial",
-                )
+            if cand.class_id not in by_class:
+                continue
+            confidence = cand.confidence * 0.5
+            if confidence < self._min_conf:
+                # 저증거 청구 금지 (I13 fail-closed). 다음 순위로 넘어가지
+                # 않는다 — 하위 후보를 뒤지는 것은 "청구되는 후보"를 증거
+                # 순위가 아니라 하한 통과 여부가 고르게 만드는 후보 쇼핑이다.
+                return None
+            p = by_class[cand.class_id]
+            return JudgmentResult(
+                JudgmentStatus.PARTIAL,
+                (ProductCount(p, 1),),
+                confidence=confidence,
+                reason="relaxed_partial",
+            )
         return None
 
 
@@ -777,6 +791,14 @@ class VisionFirstIdentityPartialStrategy:
     """
 
     name = "vision_first_identity_partial"
+
+    def __init__(self, min_confidence: float = 0.18):
+        # 청구 conf 하한 (원본 multi_kind_min_confidence=0.18 동형, 실기
+        # ses-3-1784788285 오과금 대응): 무게 미검증 count=1 partial은 최소한의
+        # vision 증거(청구 conf ≥ 하한)를 요구한다 — 5표/conf 0.31(청구 0.157)
+        # 후보가 잔차 65g인데도 과금되던 구멍. COMPLETE(무게 검증) 경로는
+        # 무관. 0 = 비활성 (구 동작).
+        self._min_conf = min_confidence
 
     def precondition(self, ctx: JudgmentContext) -> bool:
         return (
@@ -804,10 +826,16 @@ class VisionFirstIdentityPartialStrategy:
                     reason="vision_identity_weight_validated",
                 )
             # 개수 확정 실패 → 정체성만 보존 (count=1), 신뢰도 보수적으로 강등
+            confidence = cand.confidence * 0.5
+            if confidence < self._min_conf:
+                # 저증거 청구 금지 (I13). 다음 순위로 넘어가지 않는다 —
+                # 하위 후보로의 폴스루는 무게/하한이 정체성을 고르는
+                # 후보 쇼핑이 된다 (I-V의 원본 계열 보존 의도 유지).
+                return None
             return JudgmentResult(
                 JudgmentStatus.PARTIAL,
                 (ProductCount(p, 1),),
-                confidence=cand.confidence * 0.5,
+                confidence=confidence,
                 reason="vision_first_identity_partial",
             )
         return None

@@ -113,6 +113,10 @@ def _event_to_dict(
                 "confidence": c.confidence,
                 "vote_count": c.vote_count,
                 "vote_ratio": c.vote_ratio,
+                # held-object A-1 계측 (0713 §3) — carried-in 시간 구조 신호
+                "head_votes": c.head_votes,
+                "span_ratio": c.span_ratio,
+                "first_pos_ratio": c.first_pos_ratio,
             }
             for c in event.vision_candidates
         ],

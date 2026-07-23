@@ -552,8 +552,10 @@ class TriggerPipeline:
             gate = MotionGate(profile, latch)
             frame_iter = iter(frames)
             camera_filtered_out = 0
+            pos = -1  # held-object A-1 계측: 게이트 스킵 포함 디코드 위치
             try:
                 for frame in frame_iter:
+                    pos += 1
                     if stopped:
                         break  # L2: 추론만 중단 (프레임 공급은 이미 완료 상태)
                     # FrameBundle이면 게이트는 다운스케일 뷰, 검출기는 풀 프레임
@@ -576,7 +578,7 @@ class TriggerPipeline:
                         if evidence is not None
                         else None
                     )
-                    voting.add_frame(camera, detections, track_ids=tids)
+                    voting.add_frame(camera, detections, track_ids=tids, pos=pos)
                     latch.update_after_inference(any(d.is_hand for d in detections))
                     if terminator.should_stop(
                         delta_weight=delta,

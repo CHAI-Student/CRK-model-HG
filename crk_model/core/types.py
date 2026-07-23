@@ -36,12 +36,20 @@ class VisionCandidate:
 
     vote_ratio의 분모는 항상 "게이트 통과 프레임 수"다 (단일 정의 — 함정 #4).
     L1 모션 게이트·L2 조기 종료 어느 조합에서도 분모 의미가 바뀌지 않는다.
+
+    head_votes/span_ratio/first_pos_ratio: held-object A-1 계측
+    (docs/0713_held_object_demotion.md §3) — "프리롤 첫 프레임부터 영상 전
+    구간 등장"이라는 carried-in 시간 구조의 신호. 판정에는 미사용(계측 전용,
+    기본값 하위호환), 아카이브로 임계 확정 후 A-2(soft 강등)에서 소비한다.
     """
 
     class_id: int
     confidence: float
     vote_count: int
     vote_ratio: float
+    head_votes: int = 0  # 스트림 첫 head_frames 내 득표 수
+    span_ratio: float = 0.0  # (last_pos − first_pos + 1) / 디코드 프레임 수
+    first_pos_ratio: float = 0.0  # 최초 등장 위치 / 디코드 프레임 수
 
 
 @dataclass(frozen=True)
