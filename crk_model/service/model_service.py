@@ -38,6 +38,7 @@ from crk_model.ledger.events import EventLog
 from crk_model.ledger.journal import EventJournal
 from crk_model.ledger.settler import CloseSettler
 from crk_model.ledger.shadow import ShadowSettlerRunner
+from crk_model.ledger.tray_memory import SessionTrayMemory
 from crk_model.perception.detector import Detector
 from crk_model.perception.filters import DetectionFilterChain
 from crk_model.service.pipeline import TriggerPipeline, TriggerRequest
@@ -174,6 +175,16 @@ class ModelService:
             on_finalize=self._on_session_finalize,
             default_profile=self._default_profile,
         )
+        # 세션 트레이 메모리 — 운영 입력 없는 세션-학습 배치 증거 (정적
+        # planogram 금지 제약의 대체). 세션 OPEN마다 reset.
+        self._tray_memory = (
+            SessionTrayMemory(
+                boost=self.settings.tray_prior_boost,
+                penalty=self.settings.tray_prior_penalty,
+            )
+            if self.settings.tray_prior
+            else None
+        )
         self.pipeline = TriggerPipeline(
             detector, self._profiles, self.snapshots, default_profile=self._default_profile,
             # I-V 판정 노브 (MODEL__JUDGMENT__*, 이슈 #15) — env로 주입된
@@ -202,6 +213,9 @@ class ModelService:
                 "k": self.settings.likelihood_k,
                 "sigma_db": self.settings.likelihood_sigma_db,
             },
+            # 세션 트레이 메모리 (MODEL__JUDGMENT__TRAY_PRIOR*): 세션 수명은
+            # ModelService가 관리 — OPEN 새 세션마다 reset (아래 handle_multi_zone).
+            tray_memory=self._tray_memory,
             # 로드셀 안정 판정 (MODEL__WEIGHT__STABLE_WINDOW 등, 이슈 #14):
             # post-roll 샘플 수와 함께 최종 plateau 성립 조건을 결정한다.
             # MODEL__LOADCELL__ANALYZER=bocpd면 primary를 BOCPD 어댑터로 교체
@@ -333,6 +347,10 @@ class ModelService:
                         "[MULTI-ZONE OPEN] new session %s (prev_state=%s, products=%d)",
                         session_id, self.gateway.state.value, len(products),
                     )
+                    if self._tray_memory is not None:
+                        # 트레이 증거는 세션 경계를 넘지 않는다 (cold-start
+                        # = prior 0 = 현행 동작, ledger/tray_memory.py)
+                        self._tray_memory.reset()
                     # issue #6: class_id==-1(미매핑, http_app._active_product_fields
                     # 참고)인 상품이 있으면 vision_candidates가 비어 weight_only 오청구
                     # 재발 위험 — OPEN마다 매핑 성공률을 즉시 로그로 남긴다.

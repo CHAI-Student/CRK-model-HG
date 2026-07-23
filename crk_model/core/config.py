@@ -211,6 +211,15 @@ class Settings:
     likelihood_shadow: bool = True
     likelihood_k: float = 20.0
     likelihood_sigma_db: float = 5.0
+    # ---- 세션 트레이 메모리 (ledger/tray_memory.py, Phase 1: shadow 소비) ----
+    # 세션 안에서 확정 판정으로 학습하는 (zone, channel)×상품 증거 맵 —
+    # 정적 planogram(금지)과 달리 운영 입력 없음, OPEN마다 리셋(cold-start
+    # = 현행 동작). likelihood shadow의 log_p_tray 항으로만 소비된다.
+    # boost/penalty는 로그 단위 — penalty 2.5는 이슈 #17 ses-5의 순위 격차
+    # (2.43)를 뒤집는 최소값 근방, 아카이브 라벨 실측으로 보정할 것.
+    tray_prior: bool = True
+    tray_prior_boost: float = 0.7
+    tray_prior_penalty: float = 2.5
     # ---- 조기 종료 (D7) — removal & 비freezer에서만 유효 ----
     early_termination_enabled: bool = True
     # ---- 모션 게이트 오버라이드 (None = SensorProfile 기본값 유지) ----
@@ -331,6 +340,11 @@ class Settings:
             likelihood_shadow=_env_bool("MODEL__JUDGMENT__LIKELIHOOD_SHADOW", True),
             likelihood_k=_env_float("MODEL__JUDGMENT__LIKELIHOOD_K", 20.0),
             likelihood_sigma_db=_env_float("MODEL__JUDGMENT__LIKELIHOOD_SIGMA_DB", 5.0),
+            tray_prior=_env_bool("MODEL__JUDGMENT__TRAY_PRIOR", True),
+            tray_prior_boost=_env_float("MODEL__JUDGMENT__TRAY_PRIOR_BOOST", 0.7),
+            tray_prior_penalty=_env_float(
+                "MODEL__JUDGMENT__TRAY_PRIOR_PENALTY", 2.5
+            ),
             early_termination_enabled=_env_bool(
                 "MODEL__VISION__EARLY_TERMINATION", True
             ),

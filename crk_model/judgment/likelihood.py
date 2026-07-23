@@ -81,8 +81,14 @@ class WeightLikelihoodScorer:
         judgment: JudgmentResult,
         *,
         sigma_d: float | None = None,
+        tray_prior: dict[int, float] | None = None,
     ) -> dict | None:
-        """현행 판정과 score 순위의 diff 기록. 비적용 컨텍스트면 None."""
+        """현행 판정과 score 순위의 diff 기록. 비적용 컨텍스트면 None.
+
+        tray_prior: 세션 트레이 메모리(ledger/tray_memory.py)가 산출한
+        class_id별 로그 prior — 같은 트레이 확정 이력이면 +, 같은 세션의
+        다른 트레이에서 이미 설명된 정체성이면 −. score의 세 번째 항
+        (log_p_tray)으로 들어간다. None/빈 dict이면 중립(현행과 동일)."""
         if not self.applicable(ctx):
             return None
         sd = sigma_d if sigma_d is not None and sigma_d > 0 else self._sigma_d_default
@@ -121,7 +127,10 @@ class WeightLikelihoodScorer:
             return None
 
         scored = [
-            self._score(items, target, sd, by_class, cand_by_class, top_votes)
+            self._score(
+                items, target, sd, by_class, cand_by_class, top_votes,
+                tray_prior or {},
+            )
             for items in assignments
         ]
         scored.sort(key=lambda e: -e["score"])
@@ -135,6 +144,7 @@ class WeightLikelihoodScorer:
             "k": self._k,
             "sigma_d": round(sd, 2),
             "sigma_db": self._sigma_db,
+            **({"tray_prior": dict(tray_prior)} if tray_prior else {}),
             "current": {
                 "items": [list(it) for it in current_items],
                 "score": current_entry["score"] if current_entry else None,
@@ -152,8 +162,11 @@ class WeightLikelihoodScorer:
         by_class: dict,
         cand_by_class: dict[int, VisionCandidate],
         top_votes: int,
+        tray_prior: dict[int, float] | None = None,
     ) -> dict:
+        tray_prior = tray_prior or {}
         log_p_vision = 0.0
+        log_p_tray = 0.0
         expected = 0.0
         total_count = 0
         for class_id, count in items:
@@ -165,15 +178,21 @@ class WeightLikelihoodScorer:
             conf = max(cand.confidence if cand else 0.0, _CONF_FLOOR)
             log_p_vision += self._alpha * math.log(votes / top_votes)
             log_p_vision += self._beta * math.log(conf)
+            # 정체성당 1회 (개수 비례 아님) — prior는 "이 상품이 이 트레이
+            # 사건의 설명에 등장하는가"에 대한 증거이지 개수 증거가 아니다.
+            log_p_tray += tray_prior.get(class_id, 0.0)
         sigma_eff_sq = sigma_d**2 + total_count * self._sigma_db**2
         residual = target - expected
         log_l_weight = -(residual**2) / (2.0 * sigma_eff_sq)
         clamped_l = max(-self._log_k, min(self._log_k, log_l_weight))
-        return {
+        entry = {
             "items": [list(it) for it in items],
-            "score": round(log_p_vision + clamped_l, 3),
+            "score": round(log_p_vision + log_p_tray + clamped_l, 3),
             "log_p_vision": round(log_p_vision, 3),
             "log_l_weight": round(log_l_weight, 3),
             "clamped": clamped_l != log_l_weight,
             "residual": round(residual, 1),
         }
+        if log_p_tray != 0.0:
+            entry["log_p_tray"] = round(log_p_tray, 3)
+        return entry

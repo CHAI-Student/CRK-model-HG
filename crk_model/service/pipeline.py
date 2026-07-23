@@ -143,6 +143,11 @@ class TriggerPipeline:
         # (MODEL__JUDGMENT__LIKELIHOOD_SHADOW). 판정·정산 무변경 — trace 기록만.
         likelihood_params: Mapping | None = None,
         # WeightLikelihoodScorer 생성 인자 (k/sigma_db 등, MODEL__JUDGMENT__* env).
+        tray_memory=None,
+        # 세션 트레이 메모리 (ledger/tray_memory.py) — ModelService가 세션
+        # 수명(OPEN 리셋)을 관리하며 주입. None이면 기록·prior 모두 비활성
+        # (라이브러리 기본, 하위호환). Phase 1: likelihood shadow의
+        # log_p_tray 항으로만 소비 — 판정·정산 무변경.
     ):
         self._detector = detector
         self._profiles = dict(profiles)
@@ -162,6 +167,7 @@ class TriggerPipeline:
             if likelihood_shadow_enabled
             else None
         )
+        self._tray_memory = tray_memory
 
     def process(self, session_id: str, req: TriggerRequest) -> TriggerOutcome:
         try:
@@ -275,9 +281,15 @@ class TriggerPipeline:
         if len(analysis.events) >= 2:
             judgment = self._judge_tray_events(ctx, analysis, trace)
         else:
+            # 단일 이벤트라도 게이트를 넘은 채널이 정확히 하나면 트레이가
+            # 특정된다 — 트레이 메모리의 키/prior 해상도로 쓴다.
+            channel = (
+                analysis.events[0].channel if len(analysis.events) == 1 else None
+            )
             judgment = self._router.judge(ctx)
             judgment = self._segment_target_retry(ctx, judgment, analysis, trace)
-            self._likelihood_shadow(ctx, judgment, trace)
+            self._likelihood_shadow(ctx, judgment, trace, channel=channel)
+            self._record_tray_evidence(ctx, judgment, channel)
         top_code = _vision_top_not_billed(candidates, judgment)
         if top_code:
             trace.reason_codes.append(top_code)
@@ -313,6 +325,13 @@ class TriggerPipeline:
                 j,
                 trace,
                 channel=ev.channel,
+            )
+        # 등록은 shadow 계산이 전부 끝난 뒤 — 같은 트리거의 형제 이벤트가
+        # 서로의 prior에 영향을 주지 않는다 (트리거 시작 시점의 메모리로만
+        # shadow 산출, 등록은 트리거 단위 원자적).
+        for ev, j in results:
+            self._record_tray_evidence(
+                replace(ctx, delta_weight=ev.delta_grams), j, ev.channel
             )
 
         complete = [
@@ -403,7 +422,14 @@ class TriggerPipeline:
             sh = trace.loadcell_shadow
             if sh and isinstance(sh.get("delta_std"), (int, float)):
                 sigma_d = float(sh["delta_std"])
-            entry = self._likelihood.shadow(ctx, judgment, sigma_d=sigma_d)
+            tray_prior = None
+            if self._tray_memory is not None and ctx.vision_candidates:
+                tray_prior = self._tray_memory.priors_for(
+                    ctx.zone, channel, [c.class_id for c in ctx.vision_candidates]
+                )
+            entry = self._likelihood.shadow(
+                ctx, judgment, sigma_d=sigma_d, tray_prior=tray_prior
+            )
         except Exception as exc:  # noqa: BLE001 — shadow 격리
             entry = {"scorer": "weight_likelihood", "error": type(exc).__name__}
         if entry is None:
@@ -416,6 +442,32 @@ class TriggerPipeline:
         if entry.get("mismatch"):
             suffix = f":ch{channel}" if channel is not None else ""
             trace.reason_codes.append(f"likelihood_shadow_mismatch{suffix}")
+
+    def _record_tray_evidence(
+        self,
+        ctx: JudgmentContext,
+        judgment: JudgmentResult,
+        channel: int | None,
+    ) -> None:
+        """세션 트레이 메모리 등록 (ledger/tray_memory.py 등록 게이트).
+
+        오판 전파 차단: COMPLETE + 무게 뒷받침(vision_only 아님 — I6 통과
+        COMPLETE는 delta 전량 설명 보장) + 채택된 vision 1위가 과금 목록에
+        포함된 판정만 등록한다. PARTIAL·near_gate와 무게가 정체성을 고른
+        예외 경로(unique_refit)는 등록하지 않는다."""
+        if self._tray_memory is None or ctx.vision_only:
+            return
+        if judgment.status is not JudgmentStatus.COMPLETE or not judgment.products:
+            return
+        if "refit" in (judgment.reason or ""):
+            return
+        if _vision_top_not_billed(ctx.vision_candidates, judgment) is not None:
+            return
+        for pc in judgment.products:
+            if pc.product.class_id > 0:
+                self._tray_memory.record(
+                    ctx.zone, channel, pc.product.class_id, pc.count
+                )
 
     def _pool_exhaustion_retry(
         self,
