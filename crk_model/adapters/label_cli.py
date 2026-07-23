@@ -66,10 +66,18 @@ def main(argv: list[str] | None = None) -> int:
         help="실제 취출 항목 (반복 지정)",
     )
     parser.add_argument("--note", default="", help="실험 메모 (선택)")
+    parser.add_argument(
+        "--none",
+        action="store_true",
+        dest="none_taken",
+        help="무취출 세션 (제스처만 등) — 청구 0이어야 정답인 GT를 기입",
+    )
     args = parser.parse_args(argv)
 
-    if not args.take:
-        parser.error("--take를 1개 이상 지정해야 합니다")
+    if args.none_taken and args.take:
+        parser.error("--none과 --take는 함께 쓸 수 없습니다")
+    if not args.take and not args.none_taken:
+        parser.error("--take를 1개 이상 지정하거나 --none을 사용해야 합니다")
     if bool(args.session_id) == args.latest:
         parser.error("session_id 또는 --latest 중 정확히 하나를 지정해야 합니다")
 
@@ -99,6 +107,8 @@ def main(argv: list[str] | None = None) -> int:
         print(str(exc), file=sys.stderr)
         return 1
     print(f"라벨 기입 완료: {path}")
+    if not items:
+        print("  무취출 (청구 0이어야 정답)")
     for it in items:
         ident = it.get("class_id", it.get("name"))
         print(f"  zone {it['zone']}: {ident} x{it['count']}")

@@ -58,8 +58,17 @@ def _quantiles(values: list[float]) -> dict:
 
 
 def _gt_items(doc: dict) -> list[dict]:
+    """GT 항목 — class_id 0은 "무취출" 마커로 간주해 제외한다 (10차 ses-12:
+    --take가 필수라 제스처-온리 세션을 0x1로 우회 기입 → 과금 []가 오답으로
+    집계됐다. label-session --none이 정식 경로, 0 필터는 기존 라벨 호환)."""
     gt = doc.get("ground_truth") or {}
-    return list(gt.get("items") or [])
+    return [it for it in (gt.get("items") or []) if it.get("class_id") != 0]
+
+
+def _labeled(doc: dict) -> bool:
+    """라벨 여부 — 항목이 비어도(무취출 GT) ground_truth 블록이 있으면 라벨.
+    무취출 세션은 "청구 0이어야 정답"으로 과금 정오에 그대로 참여한다."""
+    return doc.get("ground_truth") is not None
 
 
 def _gt_multiset(items: list[dict], zone: int | None = None) -> list[tuple[int, int]]:
@@ -220,11 +229,12 @@ def analyze(docs: list[dict]) -> dict:
         status = doc.get("status", "?")
         report["by_status"][status] = report["by_status"].get(status, 0) + 1
         gt_items = _gt_items(doc)
-        if gt_items:
+        labeled = _labeled(doc)
+        if labeled:
             report["labeled"] += 1
         sid = doc.get("session_id", "?")
 
-        if gt_items:
+        if labeled:
             self_billing = report["billing"]
             gt_zones = sorted(
                 {it["zone"] for it in gt_items if it.get("zone") is not None}
@@ -816,6 +826,26 @@ def render_session(doc: dict) -> str:
         ):
             if vs.get(key):
                 lines.append(f"   vote_summary.{key}: {vs[key]}")
+        tube = vs.get("tube_shadow")
+        if isinstance(tube, dict) and tube.get("by_class"):
+            # 트랙릿 갭 shadow 분해 (10차 후속 — 집계 리포트의 "1위 변경"이
+            # 어느 갭(minority/short/recovered) 때문인지 세션 단위로 재구성)
+            parts = ", ".join(
+                f"c{cid}:{r['votes']}→{r['shadow']}"
+                f"(소수{r['minority']}/단명{r['short']}/회수{r['recovered']}"
+                f"/tconf{r['tube_conf']})"
+                for cid, r in sorted(
+                    tube["by_class"].items(),
+                    key=lambda kv: -(kv[1].get("votes") or 0),
+                )
+            )
+            flag = " [1위 변경]" if tube.get("changed") else ""
+            lines.append(
+                f"   tube_shadow: 현행 c{tube.get('top_current')} → "
+                f"shadow c{tube.get('top_shadow')}{flag} | {parts}"
+            )
+            if tube.get("tubes"):
+                lines.append(f"   tube_shadow.tubes: {tube['tubes']}")
         for key in ("loadcell_shadow", "likelihood_shadow"):
             if trace.get(key):
                 lines.append(f"   {key}: {trace[key]}")

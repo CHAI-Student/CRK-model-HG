@@ -593,3 +593,28 @@ class TestTrackletGaps:
             VotingEnsemble(tube_identity="shadw")
         with pytest.raises(ValueError):
             VotingEnsemble(vote_recovery="on")
+
+    def test_display_then_taken_track_not_held(self):
+        # 10차 정정 (ses-6 z1 c40 held 60/61 오플래그): 진열 상품은 프리롤
+        # 0프레임부터 관측되지만 head 구간에는 정지 — 취출로 움직여도
+        # carried-in이 아니다. head 구간 내 이동 요건이 이를 가른다.
+        ev = MotionEvidence(
+            floor_px=10.0, head_frames=5, held_min_head=3, held_min_stream=8
+        )
+        tids = []
+        for pos in range(12):
+            if pos < 7:  # 진열: head 구간 포함 정지
+                det = Detection(1, 0.9, bbox=(50.0, 50.0, 100.0, 100.0))
+            else:  # 취출: 이후 큰 이동
+                off = 30.0 * (pos - 6)
+                det = Detection(1, 0.9, bbox=(50.0 + off, 50.0, 100.0 + off, 100.0))
+            tids = ev.observe("top", [det], pos=pos)
+        assert ev.track_qualifies(tids[0]) is True  # 변위는 통과 (취출)
+        assert ev.track_held(tids[0]) is False  # head 정지 — carried-in 아님
+        # 대조: head 구간부터 움직이는 carried-in 트랙은 여전히 held
+        ev2 = MotionEvidence(
+            floor_px=10.0, head_frames=5, held_min_head=3, held_min_stream=8
+        )
+        for pos in range(12):
+            tids = ev2.observe("top", [self._moving(pos)], pos=pos)
+        assert ev2.track_held(tids[0]) is True

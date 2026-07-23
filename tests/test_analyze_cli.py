@@ -315,6 +315,40 @@ class TestAnalyze:
         out = render(report)
         assert "튜브 shadow" in out and "✓shadow" in out
 
+    def test_none_take_label_counts_as_labeled(self):
+        # label-session --none (10차 ses-12): 무취출 GT — 청구 0이면 정답,
+        # 청구가 있으면 오답. 구 0x1 우회 라벨도 class 0 필터로 동일 취급.
+        clean = _doc("ses-none", ground_truth=_gt(note="gesture only"))
+        legacy = _doc(
+            "ses-zero",
+            ground_truth=_gt({"zone": 2, "class_id": 0, "count": 1}),
+        )
+        overbilled = _doc(
+            "ses-ghost",
+            ground_truth=_gt(note="gesture only"),
+            zones=[{"zone": 2, "products": [
+                {"product_id": "P13", "class_id": 13, "unit_weight": 185.0,
+                 "count": 1}]}],
+        )
+        report = analyze([clean, legacy, overbilled])
+        bill = report["billing"]
+        assert report["labeled"] == 3
+        assert bill["labeled"] == 3 and bill["correct"] == 2
+        assert bill["wrong"][0]["session"] == "ses-ghost"
+
+    def test_session_dump_renders_tube_shadow(self):
+        from crk_model.adapters.analyze_cli import render_session
+
+        doc = _doc(triggers=[_trigger(trace={"vote_summary": {"tube_shadow": {
+            "by_class": {"13": {"votes": 8, "shadow": 0, "minority": 8,
+                                "short": 0, "recovered": 0, "tube_conf": 0.7}},
+            "top_current": 13, "top_shadow": None, "changed": True,
+            "tubes": {"top": [{"obs": 30, "classes": {"13": 22, "24": 8}}]},
+        }}})])
+        out = render_session(doc)
+        assert "tube_shadow: 현행 c13" in out and "[1위 변경]" in out
+        assert "소수8" in out and "tube_shadow.tubes" in out
+
     def test_old_archive_without_class_id_skipped_quietly(self):
         doc = _doc(
             ground_truth=_gt({"zone": 2, "class_id": 27, "count": 1}),

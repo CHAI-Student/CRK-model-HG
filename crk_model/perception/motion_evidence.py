@@ -67,8 +67,9 @@ class _Track:
     first_pos: int = -1
     last_pos: int = -1
     head_obs: int = 0  # pos < head_frames 관측 수
+    head_path: float = 0.0  # head 구간 내 누적 이동 (held 오인 방지 — 10차)
 
-    def observe(self, cx: float, cy: float, size: float, frame_idx: int) -> None:
+    def observe(self, cx: float, cy: float, size: float, frame_idx: int) -> float:
         step = ((cx - self.last_cx) ** 2 + (cy - self.last_cy) ** 2) ** 0.5
         self.path += step
         disp = ((cx - self.first_cx) ** 2 + (cy - self.first_cy) ** 2) ** 0.5
@@ -77,6 +78,7 @@ class _Track:
         self.size_sum += size
         self.n += 1
         self.matched_frame = frame_idx
+        return step
 
     def passes(self, floor_px: float, size_scale: float) -> bool:
         thr = max(floor_px, size_scale * (self.size_sum / self.n)) if self.n else floor_px
@@ -203,7 +205,7 @@ class MotionEvidence:
                 self._track_by_id[self._next_tid] = best
                 self._next_tid += 1
                 tracks.append(best)
-            best.observe(cx, cy, size, idx)
+            step = best.observe(cx, cy, size, idx)
             # T2' 튜브 귀속 (클래스 무관) — 트랙과 병행. 귀속은 마지막 관측
             # 기준(한 트랙이 튜브를 갈아타는 드문 경우 최신이 이긴다).
             tube = self._observe_tube(camera, cx, cy, size, idx, d.class_id)
@@ -214,6 +216,7 @@ class MotionEvidence:
                 best.last_pos = pos
                 if pos < self.head_frames:
                     best.head_obs += 1
+                    best.head_path += step
                 if pos > self._max_pos[camera]:
                     self._max_pos[camera] = pos
             ids.append(best.tid)
@@ -322,10 +325,18 @@ class MotionEvidence:
 
         head_obs ≥ held_min_head (지속 등장 — 1프레임 오검출 방어, 0713 §3)
         + 스트림 길이 가드(관측 최대 pos < held_min_stream이면 프리롤 부족 —
-        카메라 단위 전체 비활성, 0713 §6 S3). pos 미계측 호출은 head_obs가
-        0이라 항상 False (하위호환 = 무영향)."""
+        카메라 단위 전체 비활성, 0713 §6 S3)
+        + **head 구간 내 이동 ≥ floor_px** (10차 정정): 진열 상품도 프리롤
+        0프레임부터 관측되므로 "진열→취출 전환" 트랙이 head_obs만으로는
+        carried-in과 구분되지 않는다 — 10차 ses-6 z1 c40이 자기 취출
+        트리거에서 held 60/61표로 오플래그된 원인. carried-in은 손에 들려
+        head 구간에도 움직이고, 진열은 head 구간에 정지해 있다. 실패
+        방향은 fail-open(정지 hold를 놓침 — 강등 안 함 = 증거 보존).
+        pos 미계측 호출은 head_obs가 0이라 항상 False (하위호환 = 무영향)."""
         t = self._track_by_id.get(tid)
         if t is None or t.head_obs < self.held_min_head:
+            return False
+        if t.head_path < self.floor_px:
             return False
         return self._max_pos.get(t.camera, -1) + 1 >= self.held_min_stream
 
@@ -358,6 +369,7 @@ class MotionEvidence:
                     "last": t.last_pos,
                     "obs": t.n,
                     "head_obs": t.head_obs,
+                    "head_path": round(t.head_path, 1),  # 진열↔carried 판별 근거
                     "passed": t.passes(self.floor_px, self.size_scale),
                     "held": self.track_held(t.tid),  # T2 판정 결과 (shadow 관측)
                 }
