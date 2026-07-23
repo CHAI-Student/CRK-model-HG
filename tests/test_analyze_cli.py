@@ -336,6 +336,52 @@ class TestAnalyze:
         assert bill["labeled"] == 3 and bill["correct"] == 2
         assert bill["wrong"][0]["session"] == "ses-ghost"
 
+    def test_session_dump_compact_vs_full(self):
+        # 11차 정리: 승격(BOCPD 일치)·은퇴(0 드랍)·중복(생존 클래스) 필드는
+        # 압축 덤프에서 접힌다 — 예외(mismatch·탈락·held)만 남는다.
+        from crk_model.adapters.analyze_cli import render_session
+
+        doc = _doc(triggers=[_trigger(
+            vision_candidates=[
+                {"class_id": 27, "confidence": 0.9, "vote_count": 30,
+                 "vote_ratio": 0.3},
+            ],
+            trace={
+                "vote_summary": {
+                    "classes": {
+                        27: {"votes": 30, "ratio": 0.3, "weighted_conf": 0.9,
+                             "rejected_by": None},
+                        3: {"votes": 4, "ratio": 0.01, "weighted_conf": 0.2,
+                            "rejected_by": "share"},
+                    },
+                    "filter_drops_by_stage": {
+                        "baseline": {"top": 0, "side": 0},  # 은퇴 — 숨김
+                        "hand_path": {"top": 66, "side": 0},
+                    },
+                },
+                "loadcell_shadow": {"analyzer": "plateau", "delta": -155.0,
+                                    "primary_delta": -155.0, "mismatch": False},
+                "likelihood_shadow": [
+                    {"channel": 0, "mismatch": False,
+                     "current": {"items": [[27, 1]], "score": -0.2},
+                     "top": {"items": [[27, 1]], "score": -0.2}},
+                    {"channel": 1, "mismatch": True,
+                     "current": {"items": [[27, 1]], "score": -5.6},
+                     "top": {"items": [[13, 1]], "score": -0.6},
+                     "ranking": [{"items": [[13, 1]], "score": -0.6,
+                                  "residual": -0.2}]},
+                ],
+            },
+        )])
+        out = render_session(doc)
+        assert "rejected: c3:4표(share)" in out
+        assert "baseline" not in out and "hand_path" in out
+        assert "loadcell_shadow" not in out  # 일치 — 접힘
+        assert "likelihood ch0: 일치" in out
+        assert "likelihood ch1 MISMATCH" in out
+        full = render_session(doc, full=True)
+        assert "vote_summary.classes" in full and "loadcell_shadow" in full
+
     def test_session_dump_renders_tube_shadow(self):
         from crk_model.adapters.analyze_cli import render_session
 

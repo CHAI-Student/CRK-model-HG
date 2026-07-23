@@ -766,9 +766,14 @@ def _fmt_products(products: list[dict]) -> str:
     )
 
 
-def render_session(doc: dict) -> str:
+def render_session(doc: dict, *, full: bool = False) -> str:
     """세션 1건의 오판정 사후 분석 덤프 — YAML을 직접 뒤지지 않아도 판정
-    전략·득표·탈락 사유·shadow까지 한 화면으로 재구성한다 (--session)."""
+    전략·득표·탈락 사유·shadow까지 한 화면으로 재구성한다 (--session).
+
+    기본은 압축 출력 (11차 정리): 승격·은퇴로 "일치가 기본값"이 된 필드
+    (BOCPD 일치, 은퇴 스테이지 0 드랍, candidates와 중복인 생존 클래스,
+    motion 전체 트랙 덤프)를 접고 예외(mismatch·몰수·held)만 보여준다.
+    원자료 전체는 --full."""
     lines = [f"=== {doc.get('session_id')} ({doc.get('status')}) ==="]
     gt = doc.get("ground_truth")
     if gt:
@@ -817,15 +822,66 @@ def render_session(doc: dict) -> str:
         if trace.get("reason_codes"):
             lines.append(f"   reason_codes: {trace['reason_codes']}")
         vs = trace.get("vote_summary") or {}
-        if vs.get("classes"):
-            lines.append(f"   vote_summary.classes: {vs['classes']}")
-        for key in (
-            "filter_drops_by_stage",
-            "entry_dropped_by_camera",
-            "motion_evidence",  # T1: track_detail 포함 — held/단절 사후 분석
-        ):
-            if vs.get(key):
-                lines.append(f"   vote_summary.{key}: {vs[key]}")
+        if full:
+            if vs.get("classes"):
+                lines.append(f"   vote_summary.classes: {vs['classes']}")
+            for key in (
+                "filter_drops_by_stage",
+                "entry_dropped_by_camera",
+                "motion_evidence",
+            ):
+                if vs.get(key):
+                    lines.append(f"   vote_summary.{key}: {vs[key]}")
+        else:
+            # 압축 덤프 (11차 정리): 생존 클래스는 candidates 줄이 이미
+            # 보여준다 — 여기서는 탈락 클래스(+사유)만. 전체 원자료는 --full.
+            rejected = {
+                cid: r
+                for cid, r in (vs.get("classes") or {}).items()
+                if r.get("rejected_by")
+            }
+            if rejected:
+                lines.append(
+                    "   rejected: "
+                    + ", ".join(
+                        f"c{cid}:{r.get('votes')}표({r['rejected_by']})"
+                        for cid, r in sorted(
+                            rejected.items(), key=lambda kv: -(kv[1].get("votes") or 0)
+                        )
+                    )
+                )
+            drops = {
+                stage: by_cam
+                for stage, by_cam in (vs.get("filter_drops_by_stage") or {}).items()
+                if any(by_cam.values())
+            }  # 은퇴 스테이지(baseline/static_track 등)의 0 행 숨김
+            if drops:
+                lines.append(f"   filter_drops: {drops}")
+            if vs.get("entry_dropped_by_camera"):
+                lines.append(
+                    f"   entry_dropped: {vs['entry_dropped_by_camera']}"
+                )
+            me = vs.get("motion_evidence") or {}
+            vetoed, held_tracks = [], []
+            for camera, classes in me.items():
+                if not isinstance(classes, dict):
+                    continue
+                for cid, info in classes.items():
+                    if not isinstance(info, dict):
+                        continue
+                    if info.get("passed") is False:
+                        vetoed.append(f"{camera}/c{cid}")
+                    for tr in info.get("track_detail") or []:
+                        if tr.get("held"):
+                            held_tracks.append(
+                                f"{camera}/c{cid} first{tr.get('first')}"
+                                f" obs{tr.get('obs')} head{tr.get('head_obs')}"
+                                f" hp{tr.get('head_path', '?')}"
+                            )
+            if vetoed:
+                lines.append("   motion 몰수: " + ", ".join(vetoed))
+            if held_tracks:
+                lines.append("   held 트랙: " + "; ".join(held_tracks[:6]))
         tube = vs.get("tube_shadow")
         if isinstance(tube, dict) and tube.get("by_class"):
             # 트랙릿 갭 shadow 분해 (10차 후속 — 집계 리포트의 "1위 변경"이
@@ -846,9 +902,34 @@ def render_session(doc: dict) -> str:
             )
             if tube.get("tubes"):
                 lines.append(f"   tube_shadow.tubes: {tube['tubes']}")
-        for key in ("loadcell_shadow", "likelihood_shadow"):
-            if trace.get(key):
-                lines.append(f"   {key}: {trace[key]}")
+        lc = trace.get("loadcell_shadow")
+        if lc:
+            if full or lc.get("mismatch"):
+                # BOCPD primary 승격(2026-07-23) 후 일치가 기본값 — 압축
+                # 덤프는 회귀 방향 mismatch만 보여준다.
+                lines.append(f"   loadcell_shadow: {lc}")
+        for entry in trace.get("likelihood_shadow") or []:
+            if not isinstance(entry, dict):
+                continue
+            ch = f"ch{entry['channel']}" if entry.get("channel") is not None else ""
+            cur = entry.get("current") or {}
+            top_e = entry.get("top") or {}
+            if full:
+                lines.append(f"   likelihood_shadow: {entry}")
+            elif entry.get("mismatch"):
+                rank = ", ".join(
+                    f"{e.get('items')}={e.get('score')}(res{e.get('residual')})"
+                    for e in (entry.get("ranking") or [])[:3]
+                )
+                lines.append(
+                    f"   likelihood {ch} MISMATCH: 현행 {cur.get('items')}="
+                    f"{cur.get('score')} vs top {top_e.get('items')}="
+                    f"{top_e.get('score')} | {rank}"
+                )
+            else:
+                lines.append(
+                    f"   likelihood {ch}: 일치 {cur.get('items')}={cur.get('score')}"
+                )
     return "\n".join(lines)
 
 
@@ -866,6 +947,11 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         metavar="SESSION_ID",
         help="세션 1건 상세 덤프 (판정 전략·득표·탈락 사유·shadow)",
+    )
+    parser.add_argument(
+        "--full",
+        action="store_true",
+        help="--session 덤프를 원자료 전체로 (기본은 압축 — 일치/0/중복 필드 접힘)",
     )
     parser.add_argument(
         "--since",
@@ -909,7 +995,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.json:
             print(json.dumps(matches[0], ensure_ascii=False, indent=2, default=str))
         else:
-            print(render_session(matches[0]))
+            print(render_session(matches[0], full=args.full))
         return 0
     report = analyze(docs)
     if args.json:
