@@ -80,6 +80,36 @@ def _billed_multiset(products: list[dict]) -> list[tuple[int, int]] | None:
     return sorted(out.items())
 
 
+def _session_epoch(doc: dict) -> float | None:
+    """세션 발생 시각 추정 — session_id 말미의 epoch(ses-1-1784790155),
+    실패 시 파일 mtime. 코드 버전이 섞인 아카이브에서 '이 배포 이후'만
+    골라내는 --since 필터의 기준이다 (finalized_at은 monotonic clock이라
+    벽시계 비교에 못 쓴다)."""
+    sid = str(doc.get("session_id") or "")
+    tail = sid.rsplit("-", 1)[-1]
+    if tail.isdigit() and len(tail) >= 9:  # epoch초(10자리대)만 신뢰
+        return float(tail)
+    path = doc.get("_path")
+    if path:
+        try:
+            return Path(path).stat().st_mtime
+        except OSError:
+            return None
+    return None
+
+
+def parse_since(raw: str) -> float:
+    """--since 값 파싱: epoch 초 또는 ISO 날짜/일시("2026-07-23",
+    "2026-07-23T21:00" — 로컬 시간)."""
+    try:
+        return float(raw)
+    except ValueError:
+        pass
+    import datetime
+
+    return datetime.datetime.fromisoformat(raw).timestamp()
+
+
 def load_documents(archive_dir: str | Path) -> list[dict]:
     root = Path(archive_dir)
     if not root.exists():
@@ -471,6 +501,15 @@ def main(argv: list[str] | None = None) -> int:
         metavar="SESSION_ID",
         help="세션 1건 상세 덤프 (판정 전략·득표·탈락 사유·shadow)",
     )
+    parser.add_argument(
+        "--since",
+        default=None,
+        metavar="EPOCH|ISO일시",
+        help=(
+            "이 시각 이후 세션만 집계 (예: --since 2026-07-23T21:00 — 배포/"
+            "튜닝 변경 이후만 평가할 때. 세션 id 말미 epoch 기준, 없으면 mtime)"
+        ),
+    )
     args = parser.parse_args(argv)
 
     archive = SessionArchive(args.dir)
@@ -481,6 +520,21 @@ def main(argv: list[str] | None = None) -> int:
     if not docs:
         print(f"아카이브가 비어 있습니다: {args.dir}", file=sys.stderr)
         return 1
+    if args.since:
+        try:
+            cutoff = parse_since(args.since)
+        except ValueError:
+            print(f"--since 형식 오류: {args.since}", file=sys.stderr)
+            return 1
+        total = len(docs)
+        docs = [
+            d for d in docs
+            if (ep := _session_epoch(d)) is not None and ep >= cutoff
+        ]
+        if not docs:
+            print(f"--since {args.since} 이후 세션이 없습니다", file=sys.stderr)
+            return 1
+        print(f"(대상: --since {args.since} 이후 {len(docs)}/{total} 세션)")
     if args.session:
         matches = [d for d in docs if d.get("session_id") == args.session]
         if not matches:

@@ -228,6 +228,34 @@ class TestCli:
         (day / "ses-1.json").write_text(json.dumps(_doc()), encoding="utf-8")
         assert main(["--dir", str(tmp_path), "--session", "nope"]) == 1
 
+    def test_since_filters_older_sessions(self, tmp_path, capsys):
+        # 코드 버전이 섞인 아카이브에서 배포 이후만 집계 — 세션 id 말미
+        # epoch 기준 필터 (구 세션이 최신 코드 평가를 오염시키지 않게)
+        day = tmp_path / "2026-07-23"
+        day.mkdir()
+        old = _doc("ses-1-1784700000", triggers=[_trigger(trace={
+            "loadcell_shadow": {"analyzer": "bocpd", "delta": -1.0,
+                                "delta_std": 1.0, "primary_delta": 0.0,
+                                "primary_reason": "x", "mismatch": True}})])
+        new = _doc("ses-2-1784800000", triggers=[_trigger()])
+        (day / "ses-1-1784700000.json").write_text(json.dumps(old), encoding="utf-8")
+        (day / "ses-2-1784800000.json").write_text(json.dumps(new), encoding="utf-8")
+        assert main(["--dir", str(tmp_path), "--since", "1784750000"]) == 0
+        out = capsys.readouterr().out
+        assert "1/2 세션" in out
+        assert "ses-1-1784700000" not in out  # 구 세션 mismatch가 안 섞임
+
+    def test_since_accepts_iso_datetime(self, tmp_path, capsys):
+        import datetime
+
+        day = tmp_path / "2026-07-23"
+        day.mkdir()
+        epoch = datetime.datetime.fromisoformat("2026-07-23T12:00").timestamp()
+        doc = _doc(f"ses-1-{int(epoch) + 100}", triggers=[_trigger()])
+        (day / "a.json").write_text(json.dumps(doc), encoding="utf-8")
+        assert main(["--dir", str(tmp_path), "--since", "2026-07-23T12:00"]) == 0
+        assert main(["--dir", str(tmp_path), "--since", "2099-01-01"]) == 1
+
     def test_load_documents_reports_broken_file(self, tmp_path):
         day = tmp_path / "2026-07-23"
         day.mkdir()
