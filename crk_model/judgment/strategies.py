@@ -126,6 +126,8 @@ class FreezerVisionFirstStrategy:
        margin 비교는 conf 상한 1.0에서 포화시킨다(min(0.99, vt+margin)) —
        vt conf > 0.85면 어떤 후보도 margin 우세가 원리적으로 불가능해지는
        구조적 결함 (실기 ses-10 z1: 정답 conf 1.0이 0.855+0.15=1.005에 패배).
+       단 vt conf가 conf_override(0.9) 이상이면 포화하지 않는다 — 둘 다
+       천장권이면 conf 차이는 압축 노이즈, 득표 서열 유지 (8차 ses-4 실사고).
     ② top 근접 실패 (gate_n < 잔차 ≤ near_factor×gate_n): 접촉 하중 오염이
        실측 8~18g(segment_retry_gap 주석) — "delta가 오염됐다"가 "정체성이
        틀렸다"보다 우세. top 정체성·개수를 보존한 PARTIAL 반환
@@ -195,9 +197,17 @@ class FreezerVisionFirstStrategy:
 
         margin ≥ 1.0은 비활성 센티널(env 롤백 계약 "2.0=비활성")이라 포화를
         적용하지 않는다 — 포화하면 conf ≥ 0.99 후보가 비활성 설정에서도
-        중재를 발동해 버린다."""
+        중재를 발동해 버린다.
+
+        rival 자신이 결정적 conf(conf_override) 이상이면 포화를 적용하지
+        않는다 — 둘 다 천장 압축 구간이면 conf 차이는 정보가 없고, 득표가
+        판별자다 (8차 ses-4: vt 0.96/126표의 정답 24를 bc 1.0/66표의 반납
+        상품 27이 포화 중재로 뒤집은 실사고. 포화가 이득이었던 7차 ses-10은
+        vt 0.855로 이 문턱 아래라 유지된다)."""
         raw = rival_conf + self._conf_margin
-        return raw if self._conf_margin >= 1.0 else min(0.99, raw)
+        if self._conf_margin >= 1.0 or rival_conf >= self._conf_override:
+            return raw
+        return min(0.99, raw)
 
     def precondition(self, ctx: JudgmentContext) -> bool:
         return (

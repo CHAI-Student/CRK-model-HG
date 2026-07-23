@@ -106,6 +106,70 @@ def _penalty_sources(
     return sources
 
 
+def _judgment_residual(e: TriggerEvent) -> float | None:
+    """원 판정의 자기 delta 설명 잔차 |abs(delta) − Σ n·w| — 상호 강등 가드의
+    비교 키. unit_weight 미기록(구 스키마)이면 None (비교 불가)."""
+    if not e.judgment.products:
+        return None
+    expected = 0.0
+    for pc in e.judgment.products:
+        if pc.product.unit_weight <= 0:
+            return None
+        expected += pc.count * pc.product.unit_weight
+    return abs(abs(e.delta_weight) - expected)
+
+
+def _mutual_exemptions(
+    events: Sequence[TriggerEvent], cfg: CrossZonePenaltyConfig
+) -> set[tuple[int, int]]:
+    """상호 강등 가드 (8차 ses-3): 두 존이 같은 정체성 X를 판정했고 오염
+    창이 **양방향**으로 겹치면, 각자가 상대를 소스로 X를 강등해 X가 정산에서
+    통째로 소멸한다 — 오염 가설("X는 상대 존 취출이 비쳐서 잡혔다")은 소스
+    존이 X를 유지해야 성립하므로 자기모순이다 (실사고: z2 46 잔차 1 ·
+    z3 46 잔차 14가 서로를 강등해 둘 다 30 채택 → 맞던 z2까지 오답).
+
+    해소: 무게 잔차가 더 정확한 쪽이 X의 진짜 소스 — 그 존은 X 페널티를
+    면제한다(원 판정 유지). 잔차 동률·비교 불가면 양쪽 다 면제 — 무게가
+    판별하지 못하면 개입하지 않는다는 ④와 같은 태도.
+
+    반환: {(zone, class_id)} — _repass_event가 penalized에서 제외한다.
+    단방향 오염(한쪽만 X 판정)은 집합에 들어가지 않아 기존 동작 그대로다."""
+    exempt: set[tuple[int, int]] = set()
+    valid = [
+        e for e in events
+        if e.status == "ok"
+        and e.judgment.products
+        and e.judgment.confidence >= cfg.source_conf_min
+    ]
+    for i, e1 in enumerate(valid):
+        for e2 in valid[i + 1:]:
+            if e1.zone == e2.zone:
+                continue
+            shared = {
+                pc.product.class_id for pc in e1.judgment.products
+            } & {pc.product.class_id for pc in e2.judgment.products}
+            shared = {cid for cid in shared if cid > 0}
+            if not shared:
+                continue
+            lo1, hi1 = contamination_window(e1, cfg)
+            lo2, hi2 = contamination_window(e2, cfg)
+            if not (
+                any(lo1 <= t <= hi1 for t in sub_event_anchors(e2))
+                and any(lo2 <= t <= hi2 for t in sub_event_anchors(e1))
+            ):
+                continue  # 양방향 겹침이 아니면 상호 강등이 성립하지 않는다
+            r1, r2 = _judgment_residual(e1), _judgment_residual(e2)
+            for cid in shared:
+                if r1 is None or r2 is None or r1 == r2:
+                    exempt.add((e1.zone, cid))
+                    exempt.add((e2.zone, cid))
+                elif r1 < r2:
+                    exempt.add((e1.zone, cid))
+                else:
+                    exempt.add((e2.zone, cid))
+    return exempt
+
+
 def _weight_ambiguous(
     e: TriggerEvent,
     active_products: Sequence[ActiveProduct],
@@ -172,10 +236,12 @@ def apply_cross_zone_penalty(
     if not cfg.enabled or not active_products:
         return list(events)
     router = router or JudgmentRouter()
+    exempt = _mutual_exemptions(events, cfg)
     out: list[TriggerEvent] = []
     for e in events:
         replaced = _repass_event(
-            e, events, profiles, active_products, cfg, notes, default_profile, router
+            e, events, profiles, active_products, cfg, notes, default_profile,
+            router, exempt,
         )
         out.append(replaced if replaced is not None else e)
     return out
@@ -190,6 +256,7 @@ def _repass_event(
     notes: list[str],
     default_profile: SensorProfile,
     router: JudgmentRouter,
+    exempt: set[tuple[int, int]] = frozenset(),
 ) -> TriggerEvent | None:
     # 대상: 정상 removal 판정 + vision 후보 보유 (반품·에러·무후보는 무관)
     if (
@@ -201,6 +268,15 @@ def _repass_event(
         return None
     sources = _penalty_sources(e, events, cfg)
     penalized = {c.class_id for c in e.vision_candidates if c.class_id in sources}
+    guarded = {cid for cid in penalized if (e.zone, cid) in exempt}
+    if guarded:
+        # 상호 강등 가드 (_mutual_exemptions) — 이 존이 X의 진짜 소스로
+        # 판별됐거나 무게가 판별 불가한 경우. 사유는 notes로 관측 가능.
+        penalized -= guarded
+        notes.append(
+            f"zone{e.zone}:cross_zone_mutual_exempt:"
+            + ",".join(f"class{cid}" for cid in sorted(guarded))
+        )
     if not penalized:
         return None  # 오염 창 겹침 없음 또는 후보와 무관 — 기존 동작과 동일
     profile = profiles.get(e.zone, default_profile)

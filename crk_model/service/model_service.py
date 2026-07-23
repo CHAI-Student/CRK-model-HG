@@ -269,7 +269,10 @@ class ModelService:
                 "min_vote_count": self.settings.min_vote_count,
                 "min_vote_share": self.settings.min_vote_share,
                 "conf_floor": self.settings.vote_conf_floor,
+                # T2 held 트랙 강등 (MODEL__VISION__HELD_TRACK_DEMOTION)
+                "held_demotion": self.settings.held_track_demotion,
             },
+            held_track_min_head=self.settings.held_track_min_head,
             segment_retry_gap_grams=self.settings.segment_retry_gap_grams,
         )
         # 동시성: FastAPI sync 엔드포인트(threadpool)와 워커 스레드가 게이트웨이·

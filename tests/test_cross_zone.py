@@ -113,6 +113,51 @@ class TestCrossZonePenalty:
         assert by_zone[1].products[0].product.product_id == "P178"
         assert any("cross_zone_vision_penalty" in n for n in result.notes)
 
+    def test_mutual_demotion_guard_keeps_better_residual_zone(self, bar170, bar178):
+        # 8차 ses-3 실사고: 동시 멀티존 취출이 영상을 공유해 두 존 모두 X를
+        # 판정 → 서로를 소스로 X를 강등 → X가 정산에서 통째로 소멸 (잔차 1로
+        # 맞던 존까지 오답). 가드: 잔차가 정확한 존은 X의 진짜 소스로 보고
+        # 페널티 면제, 잔차가 나쁜 존만 재판정된다.
+        za = event(
+            "s", 1, 100.0, judged(bar178), -178.0,  # 잔차 0 — 진짜 소스
+            candidates=[cand(4, conf=0.9, votes=50), cand(3, conf=0.7, votes=30)],
+            change_ts=(100.0,),
+        )
+        zb = event(
+            "s", 2, 101.5, judged(bar178, conf=0.85), -170.0,  # 잔차 8 — 오염
+            candidates=[cand(4, conf=0.85, votes=40), cand(3, conf=0.7, votes=30)],
+            change_ts=(101.5,),
+        )
+        notes: list[str] = []
+        out = apply_cross_zone_penalty(
+            [za, zb], PROFILES, (bar170, bar178), CFG, notes
+        )
+        # 잔차 0인 zone1은 X(bar178) 유지 — 상호 강등이었다면 둘 다 P170
+        assert out[0] is za
+        assert [(pc.product.product_id, pc.count) for pc in out[1].judgment.products] == [
+            ("P170", 1)
+        ]
+        assert any("zone1:cross_zone_mutual_exempt:class4" in n for n in notes)
+
+    def test_mutual_demotion_tie_keeps_both(self, bar170, bar178):
+        # 잔차 동률이면 무게가 판별하지 못하는 것 — 양쪽 다 면제(원 판정
+        # 유지), ④ 무게 모호성 게이트와 같은 "개입하지 않는" 방향.
+        za = event(
+            "s", 1, 100.0, judged(bar178), -178.0,
+            candidates=[cand(4, conf=0.9, votes=50), cand(3, conf=0.7, votes=30)],
+            change_ts=(100.0,),
+        )
+        zb = event(
+            "s", 2, 101.5, judged(bar178, conf=0.85), -178.0,
+            candidates=[cand(4, conf=0.85, votes=40), cand(3, conf=0.7, votes=30)],
+            change_ts=(101.5,),
+        )
+        notes: list[str] = []
+        out = apply_cross_zone_penalty(
+            [za, zb], PROFILES, (bar170, bar178), CFG, notes
+        )
+        assert out[0] is za and out[1] is zb  # 둘 다 원 판정 유지
+
     def test_disabled_is_noop(self, bar170, bar178):
         z1, z2 = self.zone_events(bar170, bar178)
         notes: list[str] = []

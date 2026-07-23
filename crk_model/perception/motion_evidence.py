@@ -50,6 +50,7 @@ class _Track:
     first_cx: float
     first_cy: float
     tid: int = -1  # 트랙 id — 투표의 트랙 귀속(트랙릿 투표)용
+    camera: str = ""  # held 판정의 스트림 길이 가드(_max_pos) 참조용
     path: float = 0.0  # 누적 이동 경로
     max_disp: float = 0.0  # 시점 대비 최대 변위
     size_sum: float = 0.0  # max(w,h) 누적 (임계 스케일용)
@@ -83,6 +84,20 @@ class MotionEvidence:
     size_scale: float = 0.10  # 원본 bbox_size×0.10 (스케일 적응 임계)
     max_jump_px: float = 150.0  # 원본 max_distance_px 계열 — 트랙 연결 점프 상한
     head_frames: int = 30  # T1: head 구간 길이 — voting head_frames와 동일 규약
+    # G2 재연관 창 (0723 문서 §2): 가림/미검출로 끊긴 트랙을 완화 반경으로
+    # 다시 잇는다 — grab 순간 단절로 새 트랙이 태어나 변위가 부족해지는
+    # 잠재 결함의 보완. 오연결의 실패 방향은 first 승계 → 변위 과대 → 표
+    # 생존(fail-open, 증거 보존)이라 보수적 배율로 충분하다.
+    reassoc_factor: float = 1.5  # 공백 트랙의 완화 반경 배율 (1.5×150=225px)
+    reassoc_window: int = 12  # 완화를 허용하는 최대 공백 (추론 프레임 수, ≈1s)
+    # T2 held 트랙 판정 (0713 A-2의 트랙 단위 재구현): head 구간(head_frames)
+    # 관측이 held_min_head 이상인 트랙 = carried-in 의심. 0713 §10 실측:
+    # 클래스 단위 head가 held 27~33 vs 진짜 취출 0~2로 분리 — 트랙 단위는
+    # S2(동일 상품 들고+취출)에서 취출 트랙을 보존하는 것이 개선점.
+    held_min_head: int = 5
+    # 프리롤 부족 가드 (0713 §6): 관측 스트림이 공칭 프리롤 120프레임의
+    # 절반 미만이면 위치 의미가 왜곡 — 카메라 단위로 held 판정 전체 비활성.
+    held_min_stream: int = 60
     _tracks: dict[tuple[str, int], list[_Track]] = field(
         default_factory=lambda: defaultdict(list)
     )
@@ -92,6 +107,9 @@ class MotionEvidence:
     )
     _track_by_id: dict[int, _Track] = field(default_factory=dict)
     _next_tid: int = 0
+    _max_pos: dict[str, int] = field(
+        default_factory=lambda: defaultdict(lambda: -1)
+    )
 
     def observe(
         self, camera: str, detections: Sequence[Detection], pos: int | None = None
@@ -118,17 +136,24 @@ class MotionEvidence:
             cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
             size = max(x2 - x1, y2 - y1)
             tracks = self._tracks[(camera, d.class_id)]
-            best, best_dist = None, self.max_jump_px
+            best, best_dist = None, float("inf")
             for t in tracks:
                 if t.matched_frame == idx:
                     continue  # 이 프레임에서 이미 소비된 트랙
+                # G2 재연관 창: 직전 프레임에 이어진 트랙은 기본 반경, 1프레임
+                # 이상 끊겼던 트랙은 reassoc_window 안에서 완화 반경으로 잇는다
+                # (같은 클래스 버킷 한정 — 승계 오염 방지는 클래스 조건이 담당).
+                gap = idx - t.matched_frame
+                radius = self.max_jump_px
+                if 1 < gap <= self.reassoc_window:
+                    radius *= self.reassoc_factor
                 dist = ((cx - t.last_cx) ** 2 + (cy - t.last_cy) ** 2) ** 0.5
-                if dist <= best_dist:
+                if dist <= radius and dist < best_dist:
                     best, best_dist = t, dist
             if best is None:
                 best = _Track(
                     last_cx=cx, last_cy=cy, first_cx=cx, first_cy=cy,
-                    tid=self._next_tid,
+                    tid=self._next_tid, camera=camera,
                 )
                 self._track_by_id[self._next_tid] = best
                 self._next_tid += 1
@@ -140,6 +165,8 @@ class MotionEvidence:
                 best.last_pos = pos
                 if pos < self.head_frames:
                     best.head_obs += 1
+                if pos > self._max_pos[camera]:
+                    self._max_pos[camera] = pos
             ids.append(best.tid)
         return ids
 
@@ -151,6 +178,18 @@ class MotionEvidence:
         표만 남는다 — "오래 보이는 것 = 표 많은 것" 편향의 종결."""
         t = self._track_by_id.get(tid)
         return t is not None and t.passes(self.floor_px, self.size_scale)
+
+    def track_held(self, tid: int) -> bool:
+        """T2 held 판정: 프리롤 head 구간부터 지속 관측된(carried-in) 트랙인가.
+
+        head_obs ≥ held_min_head (지속 등장 — 1프레임 오검출 방어, 0713 §3)
+        + 스트림 길이 가드(관측 최대 pos < held_min_stream이면 프리롤 부족 —
+        카메라 단위 전체 비활성, 0713 §6 S3). pos 미계측 호출은 head_obs가
+        0이라 항상 False (하위호환 = 무영향)."""
+        t = self._track_by_id.get(tid)
+        if t is None or t.head_obs < self.held_min_head:
+            return False
+        return self._max_pos.get(t.camera, -1) + 1 >= self.held_min_stream
 
     def class_motion(self, camera: str, class_id: int) -> bool:
         """이 카메라의 이 클래스 표가 유효한가 — 변위 증거 or 면제."""
@@ -182,6 +221,7 @@ class MotionEvidence:
                     "obs": t.n,
                     "head_obs": t.head_obs,
                     "passed": t.passes(self.floor_px, self.size_scale),
+                    "held": self.track_held(t.tid),  # T2 판정 결과 (shadow 관측)
                 }
                 for t in sorted(tracks, key=lambda t: -t.n)[:8]
             ]

@@ -265,6 +265,23 @@ class TestAnalyze:
         out = render(report)
         assert "트랙릿 T1" in out and "단절 의심" in out
 
+    def test_tracklet_held_shadow_gt_flag_and_non_gt(self):
+        # T2 승격 게이트 입력: 정답 클래스에 held 플래그가 서면 active 보류
+        # 신호(진짜 취출 표를 깎을 뻔한 사례), 비정답 건수는 기대 효과.
+        doc = _doc(
+            ground_truth=_gt({"zone": 2, "class_id": 30, "count": 1}),
+            triggers=[_trigger(zone=2, trace={"vote_summary": {"held_shadow": {
+                "top": {27: [28, 60], 30: [6, 20]},
+            }}})],
+        )
+        report = analyze([doc])
+        tk = report["tracklet"]
+        assert tk["held_non_gt"] == 1
+        (flag,) = tk["held_gt_flags"]
+        assert flag["class_id"] == 30 and flag["held_votes"] == 6
+        out = render(report)
+        assert "held 강등 관측" in out and "active 승격 보류" in out
+
     def test_old_archive_without_class_id_skipped_quietly(self):
         doc = _doc(
             ground_truth=_gt({"zone": 2, "class_id": 27, "count": 1}),

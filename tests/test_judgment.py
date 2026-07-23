@@ -692,6 +692,25 @@ class TestIssue16WeightArbitration:
         assert result.reason == "freezer_vision_first_single_arbitrated"
         assert [(pc.product.class_id, pc.count) for pc in result.products] == [(23, 1)]
 
+    def test_case_f_no_saturation_when_rival_also_at_ceiling(self):
+        # 8차 ses-4 실사고: vt 24(0.96, 126표, 잔차 10)와 bc 27(1.0, 66표,
+        # 잔차 0 — 반납으로 계속 손에 들려 conf 만점) 모두 적합. 포화가
+        # 1.0 ≥ min(0.99, 1.11)로 발동해 126표 정답 24를 뒤집었다. vt conf가
+        # conf_override(0.9) 이상이면 둘 다 천장 압축 구간 — conf 차이는
+        # 정보가 없으므로 포화 없이 득표 서열 유지.
+        p24 = ActiveProduct("P24", "P24", class_id=24, unit_weight=165.0,
+                            unit_price=2000, stock_qty=30)
+        p27 = ActiveProduct("P27b", "P27", class_id=27, unit_weight=155.0,
+                            unit_price=2800, stock_qty=30)
+        result = JudgmentRouter().judge(ctx(
+            -155.0, [p24, p27],
+            [cand(24, 0.96, 126), cand(27, 1.0, 66)],
+            profile=FREEZER,
+        ))
+        assert result.status is JudgmentStatus.COMPLETE
+        assert result.reason == "freezer_vision_first_single"  # 중재 미발동
+        assert [(pc.product.class_id, pc.count) for pc in result.products] == [(24, 1)]
+
     def test_margin_disable_sentinel_skips_saturation(self):
         # margin ≥ 1.0은 비활성 센티널("2.0=비활성", env 롤백 계약) — 포화를
         # 적용하면 conf ≥ 0.99 후보가 비활성 설정에서도 중재를 발동해 버린다.

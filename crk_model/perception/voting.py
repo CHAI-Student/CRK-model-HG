@@ -71,7 +71,18 @@ class VotingEnsemble:
         head_frames: int = 30,
         # held-object A-1 계측 (0713 §3): 스트림 첫 head_frames(프리롤 첫
         # 1초)의 득표를 head_votes로 센다. pos 미제공 호출(하위호환)은 계측 0.
+        held_demotion: str = "off",
+        # T2 held 트랙 강등 (0713 A-2의 트랙 단위 재구현, 0723 문서 §8):
+        # "off"(라이브러리 기본, 하위호환) | "shadow"(held_summary 관측만) |
+        # "active"(carried-in 트랙의 표를 combine에서 몰수 — 같은 클래스의
+        # 취출 트랙 표는 유지된다, S2 해소). 운영값은 Settings 주입
+        # (MODEL__VISION__HELD_TRACK_DEMOTION). held 판정 자체는
+        # MotionEvidence.track_held (head_obs 임계 + 프리롤 가드).
     ):
+        if held_demotion not in ("off", "shadow", "active"):
+            # baseline_suppress_mode와 동일한 fail-closed — 오타가 조용히
+            # off가 되면 강등 없이 운영 중임을 알 수 없다.
+            raise ValueError(f"Invalid held_demotion: {held_demotion}")
         self._conf_floor = conf_floor
         self._min_ratio = min_vote_ratio
         self._min_count = min_vote_count
@@ -81,6 +92,7 @@ class VotingEnsemble:
         self._top_only_weight = top_only_weight
         self._side_only_weight = side_only_weight
         self._min_share = min_vote_share
+        self._held_mode = held_demotion
         self._entry_conf = {"top": entry_conf_top, "side": entry_conf_side}
         # (conf, track_id|None) — 트랙 귀속 표 (트랙릿 투표, motion_evidence 참조)
         self._votes: dict[str, dict[int, list[tuple[float, int | None]]]] = {
@@ -158,13 +170,37 @@ class VotingEnsemble:
         class_ok: bool | None = None  # lazy — tid 없는 표가 있을 때만 평가
         for conf, tid in votes:
             if tid is not None:
-                if ev.track_qualifies(tid):
-                    out.append(conf)
+                if not ev.track_qualifies(tid):
+                    continue
+                if self._held_mode == "active" and ev.track_held(tid):
+                    # T2 active: carried-in 트랙 표 몰수 — 같은 클래스의 취출
+                    # 트랙(별개 tid, head 0)은 유지된다. share 분모(_top_votes)
+                    # 도 이 경로를 지나므로 자동 정화 (0713 §10 ses-8 문제).
+                    continue
+                out.append(conf)
                 continue
             if class_ok is None:
                 class_ok = ev.class_motion(camera, cid)
             if class_ok:
                 out.append(conf)
+        return out
+
+    def held_summary(self) -> dict | None:
+        """T2 관측 (shadow/active 공통): 카메라×클래스별 [held 트랙 표, 전체
+        표]. held 표가 없는 클래스는 생략 — 빈 dict = "측정했고 held 없음".
+        None = off/증거 미부착. active에서도 원 득표(_votes)가 남아 있어
+        몰수 영향의 사후 재구성이 가능하다."""
+        if self._motion_evidence is None or self._held_mode == "off":
+            return None
+        ev = self._motion_evidence
+        out: dict[str, dict[int, list[int]]] = {}
+        for camera, by_class in self._votes.items():
+            for cid, votes in by_class.items():
+                held = sum(
+                    1 for _, tid in votes if tid is not None and ev.track_held(tid)
+                )
+                if held:
+                    out.setdefault(camera, {})[cid] = [held, len(votes)]
         return out
 
     def _weighted_confidence(self, top: list[float], side: list[float]) -> float:

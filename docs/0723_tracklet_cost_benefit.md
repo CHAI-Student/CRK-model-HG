@@ -299,8 +299,8 @@ research §3 원안은 "후보 = 트랙"까지 열어뒀지만, 이번 분석의
 | 단계 | 내용 | 판정 영향 | 착수 조건 |
 |---|---|---|---|
 | **T1 계측** | `_Track`에 first/last/head pos + summary 확장 → vote_summary/아카이브. 트리거당 트랙 수(단절 지표) 포함 | 0 | **구현 완료** — `motion_evidence.py` track_detail(관측 상위 8트랙: first/last/obs/head_obs/passed). head_obs는 표가 아닌 관측 수 기준(저신뢰 검출도 트랙은 이으므로 held의 프리롤 존재를 더 빠짐없이 셈) |
-| **T2 held 트랙 강등** | 0713 A-2를 트랙 단위로 — `_effective_votes` 합류, shadow 계수 → active | shadow 후 | T1에서 held 트랙의 pos 분포 분리 확인 (0713 §10과 동일 절차) |
-| **T2' 클래스 히스토그램** | 클래스 무관 연관 + 다수결 접기, 통합 전/후 순위 shadow | shadow 후 | T2와 분리 배포 (G1 역전 위험 격리) |
-| **G2 재연관 창** | T1 계측에서 단절률이 유의하면 T2에 동봉 | 낮음 (fail-open 방향) | T1 실측 |
-| **T3 은퇴·완화** | static_track·baseline 제거, min_vote_share 완화 검토 | 정리 | T2 안착 + N주 실측 |
-| 보류 | G4 품질 가중, G5 개수 항, tray-side 기하 힌트 | — | 각각 잔존 편향 실측 / #15류 트랙 수 실측 / 사용자 판단 |
+| **T2 held 트랙 강등** | 0713 A-2를 트랙 단위로 — `_effective_votes` 합류, shadow 계수 → active | shadow 후 | **shadow 구현 완료** — `MotionEvidence.track_held`(head_obs ≥ 5 + 프리롤 60프레임 가드) + `HELD_TRACK_DEMOTION=shadow` 기본. vote_summary.held_shadow와 analyze-sessions "held 강등 관측"(정답 플래그 = 승격 보류 신호)으로 실측 후 active |
+| **T2' 클래스 히스토그램** | 클래스 무관 연관 + 다수결 접기, 통합 전/후 순위 shadow | shadow 후 | **모델 개선 이후로 연기** — 현 모델의 혼동 수준(8차: 23↔13, 의류→24)에서 다수결 통합은 fail-closed 역전 위험 |
+| **G2 재연관 창** | T1 계측에서 단절률이 유의하면 T2에 동봉 | 낮음 (fail-open 방향) | **구현 완료** — 공백 ≤ 12추론프레임 트랙에 1.5×max_jump 완화 반경 (7차 실측: 단절 의심이 지표를 지배) |
+| **T3 은퇴·완화** | static_track·baseline 제거, min_vote_share 완화 검토 | 정리 | **부분 완료** — static_track 은퇴(.env.example 0; 트래커의 진열 관측 사각도 함께 해소), baseline은 기 off. **min_vote_share 완화는 보류**: 8차 의류 산탄(움직이는 오검출)이 share floor의 잔존 가치를 실증 — 산탄 억제(G1/G4 계열) 선행 필요 |
+| 보류 | G4 품질 가중, G5 개수 항, tray-side 기하 힌트, share 완화 | — | 각각 잔존 편향 실측 / #15류 트랙 수 실측 / 사용자 판단 / 의류 산탄 억제 선행 |

@@ -189,6 +189,11 @@ def analyze(docs: list[dict]) -> dict:
             "gt_head_obs": [],  # 이동 트랙 한정
             "non_gt_head_obs": [],
             "fragmented": [],  # 실질 트랙 ≥ 4 — 단절 의심 (상위만 렌더)
+            # T2 held 강등 관측 (vote_summary.held_shadow): 정답 클래스에
+            # held 플래그가 서면 active 승격 보류 신호 (진짜 취출 표를 깎을
+            # 뻔한 사례 — 0713 S1 계열), 비정답 건수는 강등의 기대 효과.
+            "held_gt_flags": [],
+            "held_non_gt": 0,
         },
     }
     tracklet_seen: set = set()  # 공유 영상 중복 제거 키
@@ -390,6 +395,29 @@ def analyze(docs: list[dict]) -> dict:
                 if saw_detail:
                     tk["triggers"] += 1
 
+            # T2 held 강등 관측 (report 키 주석 참조) — 라벨 없는 트리거의
+            # held는 정오를 가릴 수 없어 비정답 쪽으로 세지 않고 건너뛴다
+            held = (trace.get("vote_summary") or {}).get("held_shadow") or {}
+            if isinstance(held, dict) and gt_zone:
+                tk = report["tracklet"]
+                gt_ids = {cid for cid, _ in gt_zone}
+                for camera, by_class in held.items():
+                    if not isinstance(by_class, dict):
+                        continue
+                    for cid, pair in by_class.items():
+                        rec = {
+                            "session": sid,
+                            "zone": zone,
+                            "camera": camera,
+                            "class_id": int(cid),
+                            "held_votes": pair[0],
+                            "total_votes": pair[1],
+                        }
+                        if int(cid) in gt_ids:
+                            tk["held_gt_flags"].append(rec)
+                        else:
+                            tk["held_non_gt"] += 1
+
             if not gt_zone:
                 continue
 
@@ -555,7 +583,7 @@ def render(report: dict) -> str:
             )
 
     tk = report["tracklet"]
-    if tk["triggers"]:
+    if tk["triggers"] or tk["held_non_gt"] or tk["held_gt_flags"]:
         lines.append("")
         lines.append(
             f"--- 트랙릿 T1 (track_detail 관측 트리거 {tk['triggers']}개) ---"
@@ -596,6 +624,21 @@ def render(report: dict) -> str:
                 "  → 두 분포가 분리되면 held 트랙 강등(T2) 임계 확정 가능 "
                 "(0713 §10의 트랙 단위 재실측)"
             )
+        if tk["held_non_gt"] or tk["held_gt_flags"]:
+            lines.append(
+                f"  held 강등 관측: 비정답 {tk['held_non_gt']}건 / "
+                f"정답 클래스 플래그 {len(tk['held_gt_flags'])}건"
+            )
+            for r in tk["held_gt_flags"][:8]:
+                lines.append(
+                    f"    ⚠ {r['session']}/z{r['zone']}/{r['camera']}/"
+                    f"c{r['class_id']} held {r['held_votes']}/{r['total_votes']}표"
+                    " — 진짜 취출일 수 있음, active 승격 보류 신호"
+                )
+            if not tk["held_gt_flags"]:
+                lines.append(
+                    "  → 정답 플래그 0 지속 시 HELD_TRACK_DEMOTION=active 승격 가능"
+                )
 
     lines.append("")
     lines.append("--- conformal 보정 (라벨된 정답 상품의 후보 통계) ---")

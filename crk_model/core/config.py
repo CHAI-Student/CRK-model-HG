@@ -232,6 +232,13 @@ class Settings:
     # floor None = 프로파일 기본(냉장 10px/냉동 12px, left-crop 좌표계).
     motion_evidence_enabled: bool = True
     motion_evidence_floor_px: float | None = None
+    # ---- T2 held 트랙 강등 (0713 A-2의 트랙 단위 재구현, 0723 문서 §8) ----
+    # carried-in(프리롤 head부터 지속 관측) 트랙의 표를 combine에서 몰수.
+    # 같은 클래스의 취출 트랙 표는 유지된다(S2 해소 — 클래스 단위 A-2 설계의
+    # 원리적 구멍). shadow = held_shadow 관측만(판정 무변경), active 승격은
+    # analyze-sessions에서 정답 클래스 held 플래그가 없음을 확인한 뒤.
+    held_track_demotion: str = "shadow"
+    held_track_min_head: int = 5
     # ---- 로드셀 안정 판정 (0.8s 캐던스 기준값, 이슈 #14) ----
     loadcell_stable_window: int = 3
     loadcell_stability_threshold_grams: float = 2.5
@@ -355,6 +362,12 @@ class Settings:
             motion_evidence_floor_px=_env_opt_float(
                 "MODEL__VISION__MOTION_EVIDENCE_FLOOR_PX"
             ),
+            held_track_demotion=_env_choice(
+                "MODEL__VISION__HELD_TRACK_DEMOTION",
+                "shadow",
+                ("off", "shadow", "active"),
+            ),
+            held_track_min_head=_env_int("MODEL__VISION__HELD_TRACK_MIN_HEAD", 5),
             bocpd_shadow=_env_bool("MODEL__LOADCELL__BOCPD_SHADOW", True),
             motion_gate_keepalive=_env_opt_int("MODEL__VISION__MOTION_GATE_KEEPALIVE"),
             loadcell_analyzer=_env_choice(

@@ -341,3 +341,82 @@ class TestMotionEvidence:
         ev.observe("top", [self._moving(0)])
         (t,) = ev.summary()["top"][1]["track_detail"]
         assert (t["first"], t["last"], t["head_obs"]) == (-1, -1, 0)
+
+    def test_g2_reassociation_bridges_occlusion_gap(self):
+        # G2 (0723 문서 §2): 손 가림으로 관측이 끊겼다가 기본 반경(150px)
+        # 밖·완화 반경(225px) 안에서 재등장하면 같은 트랙으로 잇는다 —
+        # first 승계로 변위가 이어져 진짜 상품 표가 no_motion으로 죽지 않는다.
+        ev = MotionEvidence(floor_px=10.0)
+        t0 = ev.observe("top", [self._moving(0)])[0]
+        ev.observe("top", [self._moving(1)])
+        for _ in range(3):
+            ev.observe("top", [])  # 가림 — 관측 공백
+        tid = ev.observe(
+            "top", [Detection(1, 0.9, bbox=(262.0, 50.0, 312.0, 100.0))]
+        )[0]
+        assert tid == t0  # 200px 이동 — 완화 반경으로 재연관
+        assert ev.track_qualifies(tid)
+
+    def test_g2_gap_beyond_window_starts_new_track(self):
+        ev = MotionEvidence(floor_px=10.0, reassoc_window=2)
+        t0 = ev.observe("top", [self._moving(0)])[0]
+        for _ in range(5):
+            ev.observe("top", [])
+        tid = ev.observe(
+            "top", [Detection(1, 0.9, bbox=(250.0, 50.0, 300.0, 100.0))]
+        )[0]
+        assert tid != t0  # 창 밖 공백 — 기본 반경(150) 초과라 새 트랙
+
+    def test_track_held_requires_head_and_stream_length(self):
+        # T2 held 판정: head 지속 관측 + 프리롤 길이 가드 (0713 §3·§6)
+        ev = MotionEvidence(floor_px=10.0, held_min_head=3, held_min_stream=10)
+        tids = []
+        for pos in range(5):
+            tids = ev.observe("top", [self._moving(pos)], pos=pos)
+        assert ev.track_held(tids[0]) is False  # 스트림 5 < 10 — 프리롤 부족
+        for pos in range(5, 12):
+            tids = ev.observe("top", [self._moving(pos)], pos=pos)
+        assert ev.track_held(tids[0]) is True  # head 충족 + 스트림 충족
+        late = ev.observe(
+            "top",
+            [self._moving(12), Detection(2, 0.9, bbox=(400.0, 400.0, 450.0, 450.0))],
+            pos=12,
+        )
+        assert ev.track_held(late[1]) is False  # 늦게 등장 — head 없음
+        (d,) = ev.summary()["top"][2]["track_detail"]
+        assert d["held"] is False
+
+    def _held_scene(self, mode):
+        # S2 재현: 같은 클래스가 carried-in(0번 위치부터)과 진짜 취출(5번
+        # 위치부터, 별개 트랙)로 공존 — 트랙 단위 강등의 핵심 개선점.
+        ev = MotionEvidence(
+            floor_px=10.0, head_frames=3, held_min_head=2, held_min_stream=5
+        )
+        v = VotingEnsemble(min_vote_count=1, conf_floor=0.0, held_demotion=mode)
+        v.attach_motion_evidence(ev)
+        for pos in range(8):
+            dets = [self._moving(pos, cid=1)]  # carried-in — head 3표
+            if pos >= 5:
+                off = 12.0 * (pos - 5)
+                dets.append(
+                    Detection(1, 0.95, bbox=(400.0 + off, 400.0, 450.0 + off, 450.0))
+                )
+            tids = ev.observe("top", dets, pos=pos)
+            v.add_frame("top", dets, track_ids=tids, pos=pos)
+        return ev, v
+
+    def test_held_active_confiscates_carried_track_votes_only(self):
+        _, v = self._held_scene("active")
+        (c,) = v.combine()
+        assert c.vote_count == 3  # carried 8표 몰수, 취출 트랙 3표만 생존
+        assert v.held_summary() == {"top": {1: [8, 11]}}  # 원 득표는 관측 보존
+
+    def test_held_shadow_keeps_votes_and_reports(self):
+        _, v = self._held_scene("shadow")
+        (c,) = v.combine()
+        assert c.vote_count == 11  # 판정 무변경
+        assert v.held_summary() == {"top": {1: [8, 11]}}
+
+    def test_held_invalid_mode_rejected(self):
+        with pytest.raises(ValueError):
+            VotingEnsemble(held_demotion="activ")

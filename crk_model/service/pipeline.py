@@ -134,6 +134,10 @@ class TriggerPipeline:
         motion_evidence_floor_px: float | None = None,
         # None = 프로파일 기본 (냉장 10px / 냉동 12px — 원본
         # MOTION_MIN_DISPLACEMENT_PX 동형, left-crop 좌표계 전제).
+        held_track_min_head: int = 5,
+        # T2 held 트랙 판정의 head 임계 (MotionEvidence.held_min_head 주입,
+        # MODEL__VISION__HELD_TRACK_MIN_HEAD). 강등 모드 자체는 voting_params
+        # 의 held_demotion으로 들어간다 — 판정은 증거층, 몰수는 투표층 소관.
         bocpd_shadow_enabled: bool = False,
         # BOCPD shadow 분석기 (research §2): 라이브러리 기본 False(하위호환),
         # 운영값은 Settings가 주입 (MODEL__LOADCELL__BOCPD_SHADOW).
@@ -161,6 +165,7 @@ class TriggerPipeline:
         self._segment_retry_gap = segment_retry_gap_grams
         self._motion_evidence_enabled = motion_evidence_enabled
         self._motion_evidence_floor = motion_evidence_floor_px
+        self._held_min_head = held_track_min_head
         self._bocpd_shadow = bocpd_shadow_enabled
         self._likelihood: WeightLikelihoodScorer | None = (
             WeightLikelihoodScorer(**dict(likelihood_params or {}))
@@ -593,7 +598,9 @@ class TriggerPipeline:
                 if self._motion_evidence_floor is not None
                 else profile.motion_evidence_floor_px
             )
-            evidence = MotionEvidence(floor_px=floor)
+            evidence = MotionEvidence(
+                floor_px=floor, held_min_head=self._held_min_head
+            )
             voting.attach_motion_evidence(evidence)
         terminator = EarlyTerminator(profile, enabled=self._et_enabled)
         stopped = False
@@ -688,6 +695,10 @@ class TriggerPipeline:
             # 변위 증거 진단 (issue #16 후속): 카메라×클래스별 통과/최대경로/
             # 임계 — rejected_by: "no_motion"의 근거를 아카이브에서 재구성.
             "motion_evidence": evidence.summary() if evidence is not None else None,
+            # T2 held 강등 관측 (shadow/active 공통): 카메라×클래스별
+            # [held 표, 전체 표] — 승격 게이트는 analyze-sessions가 라벨과
+            # 대조한다 (정답 클래스 held 플래그 = 승격 보류 신호).
+            "held_shadow": voting.held_summary(),
         }
         return voting.combine()
 

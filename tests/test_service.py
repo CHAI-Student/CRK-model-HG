@@ -527,6 +527,50 @@ class TestMotionEvidencePipeline:
         assert summary["motion_evidence"]["top"][13]["passed"] is False
         assert summary["motion_evidence"]["top"][23]["passed"] is True
 
+    def test_held_shadow_wired_into_vote_summary(self):
+        # T2 배선 (0723 문서 §8): voting_params.held_demotion=shadow →
+        # carried-in 트랙의 표가 vote_summary.held_shadow로 관측된다
+        # (판정 무변경 — 몰수는 active 승격 후).
+        held = ActiveProduct(
+            "P44", "들고있던", class_id=44, unit_weight=79.0, unit_price=800,
+            stock_qty=5,
+        )
+        taken = ActiveProduct(
+            "P23", "취출상품", class_id=23, unit_weight=175.0, unit_price=3000,
+            stock_qty=5,
+        )
+
+        class Scene(FakeDetector):
+            """carried-in(44)은 0번 프레임부터, 취출(23)은 40번부터 — 둘 다 이동."""
+
+            def detect(self, frame, allowed_class_ids=None):
+                self.calls += 1
+                i = self.calls - 1
+                off = 12.0 * (i % 8)
+                dets = [
+                    Detection(44, 0.9, bbox=(200.0 + off, 200.0, 250.0 + off, 250.0))
+                ]
+                if i >= 40:
+                    dets.append(
+                        Detection(23, 0.95, bbox=(50.0 + off, 50.0, 100.0 + off, 100.0))
+                    )
+                return dets
+
+        store = ActiveProductStore()
+        store.update([held, taken])
+        pipe = TriggerPipeline(
+            Scene(), {2: FREEZER}, store, motion_evidence_enabled=True,
+            voting_params={"held_demotion": "shadow"},
+        )
+        outcome = pipe.process(
+            "s1",
+            TriggerRequest(2, {"top": moving_frames(70)}, samples(500, 325), 1.0),
+        )
+        hs = outcome.trace.vote_summary["held_shadow"]
+        assert 44 in hs.get("top", {})  # carried-in 표가 held로 관측
+        held_votes, total = hs["top"][44]
+        assert 0 < held_votes <= total
+
 
 class TestBocpdShadowWiring:
     def test_shadow_recorded_in_trace(self, cola):
