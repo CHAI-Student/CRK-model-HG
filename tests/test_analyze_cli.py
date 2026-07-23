@@ -123,6 +123,48 @@ class TestAnalyze:
         assert report["sigma_db"]["unit_residuals"] == [-6.4]
         assert report["sigma_db"]["suggested_sigma_db"] == 6.4
 
+    def test_billing_accuracy_correct_and_wrong(self):
+        right = _doc(
+            "ses-ok",
+            ground_truth=_gt({"zone": 2, "class_id": 27, "count": 5}),
+            zones=[{"zone": 2, "products": [
+                {"product_id": "P27", "class_id": 27, "unit_weight": 155.0,
+                 "count": 5},
+            ]}],
+        )
+        wrong = _doc(
+            "ses-bad",
+            ground_truth=_gt({"zone": 1, "class_id": 46, "count": 1}),
+            zones=[{"zone": 1, "products": [
+                {"product_id": "P13", "class_id": 13, "unit_weight": 185.0,
+                 "count": 1},
+            ]}],
+        )
+        report = analyze([right, wrong])
+        bill = report["billing"]
+        assert bill["labeled"] == 2 and bill["correct"] == 1
+        diff = bill["wrong"][0]
+        assert diff["session"] == "ses-bad"
+        assert diff["diffs"][0]["ground_truth"] == [(46, 1)]
+        assert diff["diffs"][0]["billed"] == [(13, 1)]
+
+    def test_billing_overbilled_unlabeled_zone_counts_wrong(self):
+        # GT에 없는 존에 과금이 있으면 오답 (전 존 라벨 전제)
+        doc = _doc(
+            ground_truth=_gt({"zone": 2, "class_id": 27, "count": 1}),
+            zones=[
+                {"zone": 2, "products": [
+                    {"product_id": "P27", "class_id": 27, "unit_weight": 155.0,
+                     "count": 1}]},
+                {"zone": 3, "products": [
+                    {"product_id": "P13", "class_id": 13, "unit_weight": 185.0,
+                     "count": 1}]},
+            ],
+        )
+        report = analyze([doc])
+        assert report["billing"]["correct"] == 0
+        assert report["billing"]["wrong"][0]["diffs"][0]["zone"] == 3
+
     def test_old_archive_without_class_id_skipped_quietly(self):
         doc = _doc(
             ground_truth=_gt({"zone": 2, "class_id": 27, "count": 1}),

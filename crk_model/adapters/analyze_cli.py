@@ -119,6 +119,9 @@ def analyze(docs: list[dict]) -> dict:
             "missing_from_candidates": [],
         },
         "sigma_db": {"unit_residuals": []},
+        # 과금 정오 총괄: 라벨된 세션의 최종 확정(zones products) vs GT.
+        # shadow mismatch와 달리 "현행 판정이 결국 맞게 청구했는가"의 헤드라인.
+        "billing": {"labeled": 0, "correct": 0, "unknown_schema": 0, "wrong": []},
     }
     for doc in docs:
         if "_load_error" in doc:
@@ -133,6 +136,35 @@ def analyze(docs: list[dict]) -> dict:
         if gt_items:
             report["labeled"] += 1
         sid = doc.get("session_id", "?")
+
+        if gt_items:
+            self_billing = report["billing"]
+            gt_zones = sorted(
+                {it["zone"] for it in gt_items if it.get("zone") is not None}
+            )
+            billed_by_zone: dict[int, list[tuple[int, int]] | None] = {}
+            for z in doc.get("zones") or []:
+                billed_by_zone[z.get("zone")] = _billed_multiset(
+                    z.get("products") or []
+                )
+            if any(v is None for v in billed_by_zone.values()):
+                self_billing["unknown_schema"] += 1  # 구 아카이브 — 판정 불가
+            else:
+                self_billing["labeled"] += 1
+                diffs = []
+                for zone in sorted(
+                    set(gt_zones) | set(billed_by_zone.keys())
+                ):
+                    gt_z = _gt_multiset(gt_items, zone)
+                    billed_z = billed_by_zone.get(zone) or []
+                    if gt_z != billed_z:
+                        diffs.append(
+                            {"zone": zone, "ground_truth": gt_z, "billed": billed_z}
+                        )
+                if diffs:
+                    self_billing["wrong"].append({"session": sid, "diffs": diffs})
+                else:
+                    self_billing["correct"] += 1
 
         for trig in doc.get("triggers") or []:
             zone = trig.get("zone")
@@ -260,6 +292,25 @@ def render(report: dict) -> str:
     if report["load_errors"]:
         lines.append(f"읽기 실패 {len(report['load_errors'])}건: "
                      + ", ".join(e["path"] for e in report["load_errors"]))
+
+    bill = report["billing"]
+    if bill["labeled"] or bill["unknown_schema"]:
+        lines.append("")
+        lines.append("--- 과금 정오 (라벨 대비 최종 확정) ---")
+        lines.append(
+            f"정답 {bill['correct']}/{bill['labeled']} 세션"
+            + (
+                f" (구 스키마로 판정 불가 {bill['unknown_schema']}건)"
+                if bill["unknown_schema"]
+                else ""
+            )
+        )
+        for w in bill["wrong"]:
+            for d in w["diffs"]:
+                lines.append(
+                    f"  ✗ {w['session']} zone{d['zone']}: "
+                    f"과금 {d['billed']} ← 정답 {d['ground_truth']}"
+                )
 
     b = report["bocpd"]
     lines.append("")
