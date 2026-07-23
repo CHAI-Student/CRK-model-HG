@@ -429,14 +429,18 @@ def render_session(doc: dict) -> str:
         cands = t.get("vision_candidates") or []
         if cands:
             top = sorted(cands, key=lambda c: -(c.get("vote_count") or 0))[:8]
-            lines.append(
-                "   candidates: "
-                + ", ".join(
+
+            def _cand_str(c: dict) -> str:
+                s = (
                     f"c{c.get('class_id')}:{c.get('vote_count')}표"
                     f"/conf{round(c.get('confidence') or 0, 2)}"
-                    for c in top
                 )
-            )
+                # held-object A-1 신호 (0713 §3): head↑·span≈1이면 carried-in
+                if c.get("span_ratio"):
+                    s += f"/head{c.get('head_votes')}/span{c.get('span_ratio')}"
+                return s
+
+            lines.append("   candidates: " + ", ".join(_cand_str(c) for c in top))
         trace = t.get("trace") or {}
         if trace.get("reason_codes"):
             lines.append(f"   reason_codes: {trace['reason_codes']}")

@@ -157,6 +157,50 @@ class TestFreezer:
         assert result.products[0].product.product_id == "P002"
         assert result.products[0].count == 2
 
+    def test_refit_arbitration_resolves_when_vision_agrees(self):
+        # 실기 ses-3-1784790444 ch0 재현: top 24(28표/0.48)는 잔차 31.7로
+        # 반증, 정답 40(5표/0.82, 잔차 2.3)의 유일 적합을 35×2(4표/0.35,
+        # 잔차 −6.7)가 "적합 2개=모호"로 막았다 — 득표·conf 모두 40 우세이므로
+        # vision 중재로 채택돼야 한다.
+        p24 = ActiveProduct("P24", "24", class_id=24, unit_weight=165.0,
+                            unit_price=1000, stock_qty=5)
+        p13 = ActiveProduct("P13", "13", class_id=13, unit_weight=189.0,
+                            unit_price=1000, stock_qty=5)
+        p40 = ActiveProduct("P40", "40", class_id=40, unit_weight=131.0,
+                            unit_price=1000, stock_qty=5)
+        p35 = ActiveProduct("P35", "35", class_id=35, unit_weight=70.0,
+                            unit_price=1000, stock_qty=5)
+        router = JudgmentRouter()
+        result = router.judge(ctx(
+            -133.3, [p24, p13, p40, p35],
+            [cand(24, conf=0.48, votes=28), cand(13, conf=0.83, votes=15),
+             cand(40, conf=0.82, votes=5), cand(35, conf=0.35, votes=4)],
+            profile=FREEZER,
+        ))
+        assert result.reason == "freezer_vision_first_refit_arbitrated"
+        assert result.status is JudgmentStatus.COMPLETE
+        assert [(pc.product.class_id, pc.count) for pc in result.products] == [(40, 1)]
+
+    def test_refit_arbitration_stays_ambiguous_without_decisive_evidence(self):
+        # 실기 ses-6 ch0 재현: 30(5표/0.80, 잔차 3) vs 44(4표/0.87, 잔차 6) —
+        # 득표·conf가 엇갈리고 conf 격차(0.07) < margin(0.15) → 종전대로 불발
+        # (identity partial이 top 정체성만 보존).
+        p13 = ActiveProduct("P13", "13", class_id=13, unit_weight=189.0,
+                            unit_price=1000, stock_qty=5)
+        p30 = ActiveProduct("P30", "30", class_id=30, unit_weight=82.0,
+                            unit_price=1000, stock_qty=5)
+        p44 = ActiveProduct("P44", "44", class_id=44, unit_weight=79.0,
+                            unit_price=1000, stock_qty=5)
+        router = JudgmentRouter()
+        result = router.judge(ctx(
+            -85.0, [p13, p30, p44],
+            [cand(13, conf=0.80, votes=24), cand(30, conf=0.80, votes=5),
+             cand(44, conf=0.87, votes=4)],
+            profile=FREEZER,
+        ))
+        assert result.strategy == "vision_first_identity_partial"
+        assert [(pc.product.class_id, pc.count) for pc in result.products] == [(13, 1)]
+
     def test_ambiguous_refit_refused_and_chain_not_leaked(self):
         # 유일성 조건 + 체인 누수 방어: top(990g)이 결정적 반증(잔차 620)이고
         # near(30g) 내 적합이 2개(185×2=370, 120×3=360)면 무게로는 고를 수

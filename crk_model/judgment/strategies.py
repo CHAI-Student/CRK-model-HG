@@ -311,8 +311,26 @@ class FreezerVisionFirstStrategy:
             elif residual <= self._near_factor * gate_n(count):
                 fits_near.append((p, cand, count))
         chosen: tuple[ActiveProduct, VisionCandidate, int] | None = None
+        refit_arbitrated = False
         if len(fits_gate) == 1:
             chosen = fits_gate[0]
+        elif len(fits_gate) >= 2:
+            # 하드 게이트 복수 적합 — conf 결정 우세 시에만 중재 (실기
+            # ses-3-1784790444 ch0: 정답 40(5표/conf0.82, 잔차 2.3)의 유일
+            # 적합을 35×2(4표/conf0.35, 잔차 −6.7)가 "적합 2개=모호"로 막아
+            # 오염 top의 identity partial이 과금됐다). I-V 유지: 무게는 이미
+            # 거부권을 행사했고(전원 게이트 통과) 선택은 vision 증거인데,
+            # refit 풀은 구조상 전부 저득표라 득표 차(1~2표)는 증거 자격이
+            # 없다 — 최고 conf 적합이 **다른 모든 적합**보다 conf_margin 이상
+            # 우세할 때만 채택하고, 아니면 종전대로 모호·불발 (실기 ses-6
+            # ch0: 30(0.80) vs 44(0.87)는 격차 0.07 < margin → 계속 불발이
+            # 옳고, 기존 모호성 픽스처(conf 동률)도 계속 불발).
+            bc = max(fits_gate, key=lambda f: (f[1].confidence, f[1].vote_count))
+            if all(
+                f is bc or bc[1].confidence >= f[1].confidence + self._conf_margin
+                for f in fits_gate
+            ):
+                chosen, refit_arbitrated = bc, True
         elif not fits_gate and len(fits_near) == 1:
             chosen = fits_near[0]
         if chosen is not None:
@@ -321,7 +339,11 @@ class FreezerVisionFirstStrategy:
                 JudgmentStatus.COMPLETE,
                 (ProductCount(p, count),),
                 confidence=cand.confidence * 0.8,
-                reason="freezer_vision_first_unique_refit",
+                reason=(
+                    "freezer_vision_first_refit_arbitrated"
+                    if refit_arbitrated
+                    else "freezer_vision_first_unique_refit"
+                ),
             )
         return None
 
