@@ -217,22 +217,34 @@ class TestAnalyze:
         assert report["tray_prior"]["flips"] == []
 
     def test_tracklet_head_split_and_fragmentation(self):
-        # T1 (docs/0723_tracklet_cost_benefit.md §8): 정답 클래스 트랙과
-        # 비정답(held/배경) 트랙의 head_obs 분리 실측 + 트랙 ≥ 4 단절 의심.
+        # T1 (docs/0723_tracklet_cost_benefit.md §8) — 7차 실측 보정 반영:
+        # head_obs는 이동(passed)·실질(obs≥3) 트랙만(정답 클래스의 진열
+        # 인스턴스와 플리커 잔트랙 배제), 단절 의심은 실질 트랙 ≥ 4,
+        # 에피소드 병합으로 영상을 공유한 형제 존 트리거는 1회만 계수.
+        detail_30 = [
+            {"first": 140, "last": 200, "obs": 20, "head_obs": 0, "passed": True},
+            # 진열 인스턴스 (정지) — head 모집단에서 제외돼야 함
+            {"first": 0, "last": 300, "obs": 90, "head_obs": 25, "passed": False},
+        ]
+        detail_27 = [
+            {"first": 0, "last": 400, "obs": 200, "head_obs": 28, "passed": True},
+            {"first": 50, "last": 90, "obs": 12, "head_obs": 0, "passed": False},
+            {"first": 100, "last": 130, "obs": 8, "head_obs": 0, "passed": False},
+            {"first": 200, "last": 230, "obs": 5, "head_obs": 0, "passed": False},
+            # 플리커 잔트랙 (obs<3) — 실질 트랙이 아니다
+            {"first": 300, "last": 301, "obs": 1, "head_obs": 0, "passed": False},
+        ]
+        me = {"top": {
+            30: {"passed": True, "tracks": 2, "track_detail": detail_30},
+            27: {"passed": True, "tracks": 5, "track_detail": detail_27},
+        }}
         doc = _doc(
             ground_truth=_gt({"zone": 2, "class_id": 30, "count": 1}),
-            triggers=[_trigger(zone=2, trace={
-                "vote_summary": {"motion_evidence": {"top": {
-                    30: {"passed": True, "tracks": 1, "track_detail": [
-                        {"first": 140, "last": 200, "obs": 20,
-                         "head_obs": 0, "passed": True},
-                    ]},
-                    27: {"passed": True, "tracks": 5, "track_detail": [
-                        {"first": 0, "last": 400, "obs": 200,
-                         "head_obs": 28, "passed": True},
-                    ]},
-                }}},
-            })],
+            triggers=[
+                _trigger(zone=2, trace={"vote_summary": {"motion_evidence": me}}),
+                # 공유 영상의 형제 존 트리거 — detail 동일 → 중복 미계수
+                _trigger(zone=3, trace={"vote_summary": {"motion_evidence": me}}),
+            ],
         )
         # 구 아카이브 (track_detail 이전) — 조용히 제외
         old = _doc("ses-old", triggers=[_trigger(trace={
@@ -242,12 +254,14 @@ class TestAnalyze:
         })])
         report = analyze([doc, old])
         tk = report["tracklet"]
-        assert tk["triggers"] == 1
-        assert tk["gt_head_obs"] == [0.0]
-        assert tk["non_gt_head_obs"] == [28.0]
+        assert tk["triggers"] == 2  # detail 관측 트리거 수 (중복 제거는 지표만)
+        assert tk["gt_head_obs"] == [0.0]  # 이동 트랙만 — 진열(정지) 제외
+        assert tk["non_gt_head_obs"] == [28.0]  # held 패턴 트랙
         (frag,) = tk["fragmented"]
-        assert frag["class_id"] == 27 and frag["tracks"] == 5
-        assert tk["quantiles"]["tracks_per_class"]["max"] == 5.0
+        assert frag["class_id"] == 27 and frag["tracks"] == 4  # 실질 트랙만
+        assert tk["quantiles"]["tracks_per_class"] == {
+            "n": 2, "min": 2.0, "p5": 2.0, "p25": 2.0, "median": 4.0, "max": 4.0,
+        }
         out = render(report)
         assert "트랙릿 T1" in out and "단절 의심" in out
 

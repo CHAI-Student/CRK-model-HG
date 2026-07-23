@@ -177,14 +177,21 @@ def analyze(docs: list[dict]) -> dict:
         },
         # 트랙릿 T1 (docs/0723_tracklet_cost_benefit.md §8): head_obs 분포와
         # 클래스당 트랙 수 — held 강등(T2) 임계·재연관 창(G2) 판단 입력.
+        # 7차 실측 보정: 저신뢰 플리커 검출(entry 컷 미달도 트랙은 생성)이
+        # 1~2관측 잔트랙을 대량 생산해 원지표를 잠식했다(비정답 n=1136,
+        # median 0, 단절 의심 203건 범람) — ① 트랙 수는 실질 트랙(obs≥3)만,
+        # ② head_obs는 이동(passed) 트랙만(정답 클래스의 진열 인스턴스
+        # 정지 트랙도 함께 배제됨), ③ 동일 세션에서 에피소드 병합 영상을
+        # 공유하는 존 트리거들의 중복 계수는 detail 동일성으로 제거.
         "tracklet": {
             "triggers": 0,
-            "tracks_per_class": [],
-            "gt_head_obs": [],
+            "tracks_per_class": [],  # 실질(obs≥3) 트랙 수 / 카메라×클래스
+            "gt_head_obs": [],  # 이동 트랙 한정
             "non_gt_head_obs": [],
-            "fragmented": [],  # 트랙 ≥ 4 (카메라×클래스) — 단절 의심
+            "fragmented": [],  # 실질 트랙 ≥ 4 — 단절 의심 (상위만 렌더)
         },
     }
+    tracklet_seen: set = set()  # 공유 영상 중복 제거 키
     for doc in docs:
         if "_load_error" in doc:
             report["load_errors"].append(
@@ -342,15 +349,32 @@ def analyze(docs: list[dict]) -> dict:
                         if detail is None:
                             continue  # 구 아카이브 (T1 이전) — 조용히 제외
                         saw_detail = True
-                        n_tracks = int(info.get("tracks") or len(detail))
-                        tk["tracks_per_class"].append(float(n_tracks))
-                        if n_tracks >= 4:
+                        # 공유 영상 중복 제거 (report 키 주석 ③): 에피소드
+                        # 병합으로 같은 영상을 받은 형제 존 트리거의 detail은
+                        # 완전 동일 — 세션 내에서 한 번만 계수한다.
+                        key = (
+                            sid,
+                            camera,
+                            int(cid),
+                            tuple(
+                                (t.get("first"), t.get("last"), t.get("obs"))
+                                for t in detail
+                            ),
+                        )
+                        if key in tracklet_seen:
+                            continue
+                        tracklet_seen.add(key)
+                        substantial = [
+                            t for t in detail if int(t.get("obs") or 0) >= 3
+                        ]
+                        tk["tracks_per_class"].append(float(len(substantial)))
+                        if len(substantial) >= 4:
                             tk["fragmented"].append({
                                 "session": sid,
                                 "zone": zone,
                                 "camera": camera,
                                 "class_id": int(cid),
-                                "tracks": n_tracks,
+                                "tracks": len(substantial),
                             })
                         if gt_zone:
                             bucket = (
@@ -358,8 +382,10 @@ def analyze(docs: list[dict]) -> dict:
                                 if int(cid) in gt_ids
                                 else "non_gt_head_obs"
                             )
-                            for t in detail:
-                                if int(t.get("first", -1)) >= 0:  # pos 계측 있는 트랙만
+                            for t in substantial:
+                                # 이동(passed) 트랙만 — T2(held 강등)의 모집단.
+                                # 정답 클래스의 진열 인스턴스(정지)도 배제된다.
+                                if int(t.get("first", -1)) >= 0 and t.get("passed"):
                                     tk[bucket].append(float(t.get("head_obs") or 0))
                 if saw_detail:
                     tk["triggers"] += 1
@@ -538,17 +564,21 @@ def render(report: dict) -> str:
         if tq.get("tracks_per_class"):
             q = tq["tracks_per_class"]
             lines.append(
-                f"  트랙/클래스: n={q['n']} median={q['median']:.3g} "
+                f"  실질(obs≥3) 트랙/클래스: n={q['n']} median={q['median']:.3g} "
                 f"max={q['max']:.3g} — max가 물리 인스턴스 수를 넘으면 단절"
             )
         if tk["fragmented"]:
+            worst = sorted(tk["fragmented"], key=lambda f: -f["tracks"])[:12]
+            more = len(tk["fragmented"]) - len(worst)
             lines.append(
-                f"  단절 의심(트랙 ≥ 4) {len(tk['fragmented'])}건: "
+                f"  단절 의심(실질 트랙 ≥ 4) {len(tk['fragmented'])}건"
+                f" (상위 {len(worst)}): "
                 + ", ".join(
                     f"{f['session']}/z{f['zone']}/{f['camera']}/c{f['class_id']}"
                     f"({f['tracks']})"
-                    for f in tk["fragmented"]
+                    for f in worst
                 )
+                + (f" 외 {more}건" if more > 0 else "")
             )
             lines.append("  → 빈발 시 재연관 창(G2, 0723 문서 §2) 도입")
         for key, label in (
@@ -558,8 +588,8 @@ def render(report: dict) -> str:
             if tq.get(key):
                 q = tq[key]
                 lines.append(
-                    f"  head_obs {label}: n={q['n']} median={q['median']:.3g} "
-                    f"max={q['max']:.3g}"
+                    f"  head_obs(이동 트랙 한정) {label}: n={q['n']} "
+                    f"median={q['median']:.3g} max={q['max']:.3g}"
                 )
         if tq.get("gt_head_obs") and tq.get("non_gt_head_obs"):
             lines.append(
