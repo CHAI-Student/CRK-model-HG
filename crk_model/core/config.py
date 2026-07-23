@@ -199,6 +199,10 @@ class Settings:
     # conf 0.157 identity partial이 잔차 65g 오상품을 과금 — 저증거 청구 차단.
     # 0 = 비활성 (구 동작).
     judgment_partial_min_confidence: float = 0.18
+    # ④ refit 복수 적합 중재의 절대 conf 하한 (실기 ses-1 ch1: 0.69 유령이
+    # margin 우세만으로 오과금 — 승자는 자체로 선명해야 한다). 2.0 = 중재
+    # 비활성(유일-적합만).
+    judgment_refit_arb_conf_floor: float = 0.8
     # ---- 무게 우도 score shadow (docs/0722_weight_likelihood_design.md Phase 1) ----
     # 판정 미사용 — 이벤트별 score 순위와 현행 판정의 diff만 trace/아카이브에
     # 기록. k는 우도비 상한(clamp): 1이면 무게 무력(거부권만), 클수록 무게가
@@ -320,6 +324,9 @@ class Settings:
             judgment_conf_margin=_env_float("MODEL__JUDGMENT__CONF_MARGIN", 0.15),
             judgment_partial_min_confidence=_env_float(
                 "MODEL__JUDGMENT__PARTIAL_MIN_CONFIDENCE", 0.18
+            ),
+            judgment_refit_arb_conf_floor=_env_float(
+                "MODEL__JUDGMENT__REFIT_ARB_CONF_FLOOR", 0.8
             ),
             likelihood_shadow=_env_bool("MODEL__JUDGMENT__LIKELIHOOD_SHADOW", True),
             likelihood_k=_env_float("MODEL__JUDGMENT__LIKELIHOOD_K", 20.0),

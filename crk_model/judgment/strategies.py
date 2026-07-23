@@ -168,6 +168,12 @@ class FreezerVisionFirstStrategy:
         conf_margin: float = 0.15,
         # ① 복수 적합 중재에서 conf 우세로 득표 서열을 뒤집는 최소 격차.
         # 2.0 = 항상 득표 서열 (구 동작에 근사).
+        refit_arb_conf_floor: float = 0.8,
+        # ④ 복수 적합 중재의 절대 conf 하한: margin 우세만으로는 "덜 흐린
+        # 유령"이 이긴다 — 실기 ses-1-1784791905 ch1에서 13(conf 0.69)이
+        # 24(0.35)를 margin으로 꺾고 오과금됐고, 정당 케이스(ses-3-1784790444
+        # ch0의 40)는 conf 0.82였다. 중재 승자는 자체로도 선명해야 한다.
+        # 2.0 = 중재 비활성 (유일-적합만, 구 동작).
     ):
         self._max_kinds = max_kinds
         self._identity_pool = identity_pool
@@ -179,6 +185,7 @@ class FreezerVisionFirstStrategy:
         self._unit_slack = count_unit_slack
         self._conf_override = conf_override
         self._conf_margin = conf_margin
+        self._refit_arb_floor = refit_arb_conf_floor
 
     def precondition(self, ctx: JudgmentContext) -> bool:
         return (
@@ -326,10 +333,13 @@ class FreezerVisionFirstStrategy:
             # ch0: 30(0.80) vs 44(0.87)는 격차 0.07 < margin → 계속 불발이
             # 옳고, 기존 모호성 픽스처(conf 동률)도 계속 불발).
             bc = max(fits_gate, key=lambda f: (f[1].confidence, f[1].vote_count))
-            if all(
+            if bc[1].confidence >= self._refit_arb_floor and all(
                 f is bc or bc[1].confidence >= f[1].confidence + self._conf_margin
                 for f in fits_gate
             ):
+                # 절대 하한: margin 우세만으로는 "덜 흐린 유령"이 이긴다
+                # (실기 ses-1 ch1: 0.69가 0.35를 꺾고 오과금 — 승자는 자체로
+                # 선명(≥0.8)해야 한다. 정당 케이스 ses-3 ch0은 0.82).
                 chosen, refit_arbitrated = bc, True
         elif not fits_gate and len(fits_near) == 1:
             chosen = fits_near[0]

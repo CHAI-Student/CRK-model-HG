@@ -187,6 +187,7 @@ class ModelService:
                     count_unit_slack=self.settings.judgment_count_unit_slack,
                     conf_override=self.settings.judgment_conf_override,
                     conf_margin=self.settings.judgment_conf_margin,
+                    refit_arb_conf_floor=self.settings.judgment_refit_arb_conf_floor,
                 ),
                 partial_min_confidence=self.settings.judgment_partial_min_confidence,
             ), count_unit_slack=self.settings.judgment_count_unit_slack),

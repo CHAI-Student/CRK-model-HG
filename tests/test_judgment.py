@@ -181,6 +181,29 @@ class TestFreezer:
         assert result.status is JudgmentStatus.COMPLETE
         assert [(pc.product.class_id, pc.count) for pc in result.products] == [(40, 1)]
 
+    def test_refit_arbitration_requires_absolute_conf_floor(self):
+        # 실기 ses-1-1784791905 ch1 재현: 정답 23이 vision에 없는 상태에서
+        # 13(4표/0.69, 잔차 −11.5)이 24(3표/0.3, 잔차 12.5)를 margin 우세로
+        # 꺾고 COMPLETE 오과금 — margin만으로는 "덜 흐린 유령"이 이긴다.
+        # 중재 승자는 자체 conf ≥ 0.8이어야 하고, 미달이면 불발 → 기존
+        # 경로(identity partial → 병합 가드)가 과금을 억제한다.
+        p40 = ActiveProduct("P40", "40", class_id=40, unit_weight=131.0,
+                            unit_price=1000, stock_qty=5)
+        p13 = ActiveProduct("P13", "13", class_id=13, unit_weight=189.0,
+                            unit_price=1000, stock_qty=5)
+        p24 = ActiveProduct("P24", "24", class_id=24, unit_weight=165.0,
+                            unit_price=1000, stock_qty=5)
+        router = JudgmentRouter()
+        result = router.judge(ctx(
+            -177.5, [p40, p13, p24],
+            [cand(40, conf=1.0, votes=11), cand(13, conf=0.69, votes=4),
+             cand(24, conf=0.3, votes=3)],
+            profile=FREEZER,
+        ))
+        assert result.reason != "freezer_vision_first_refit_arbitrated"
+        billed = [(pc.product.class_id, pc.count) for pc in result.products]
+        assert (13, 1) not in billed
+
     def test_refit_arbitration_stays_ambiguous_without_decisive_evidence(self):
         # 실기 ses-6 ch0 재현: 30(5표/0.80, 잔차 3) vs 44(4표/0.87, 잔차 6) —
         # 득표·conf가 엇갈리고 conf 격차(0.07) < margin(0.15) → 종전대로 불발
