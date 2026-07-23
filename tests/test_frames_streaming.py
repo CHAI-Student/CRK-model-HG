@@ -44,6 +44,75 @@ def _make_test_avi(path) -> str:
     return str(path)
 
 
+class TestHwaccelProbeAndFallback:
+    """CI 34연속 실패의 회귀 고정: `-hwaccels` 목록은 컴파일 여부일 뿐이라
+    드라이버 없는 호스트에서 `-hwaccel cuda`가 EPERM으로 죽었다. 프로브는
+    실초기화 rc로 판정하고, 런타임 실패(0프레임)는 CPU로 1회 폴백한다."""
+
+    def _reset_cache(self, monkeypatch):
+        from crk_model.adapters import avi_frames
+
+        monkeypatch.setattr(avi_frames, "_hwaccel_cache", None)
+        return avi_frames
+
+    def test_probe_false_when_device_init_fails(self, monkeypatch):
+        avi_frames = self._reset_cache(monkeypatch)
+
+        class FakeResult:
+            returncode = 1
+
+        monkeypatch.setattr(
+            avi_frames.subprocess, "run", lambda *a, **k: FakeResult()
+        )
+        assert avi_frames._ffmpeg_hwaccel_available() is False
+
+    def test_probe_true_when_device_init_succeeds(self, monkeypatch):
+        avi_frames = self._reset_cache(monkeypatch)
+
+        class FakeResult:
+            returncode = 0
+
+        calls = {}
+
+        def fake_run(cmd, **kwargs):
+            calls["cmd"] = cmd
+            return FakeResult()
+
+        monkeypatch.setattr(avi_frames.subprocess, "run", fake_run)
+        assert avi_frames._ffmpeg_hwaccel_available() is True
+        assert "-init_hw_device" in calls["cmd"]  # 컴파일 목록 조회가 아닌 실초기화
+
+    def test_zero_frame_hwaccel_failure_falls_back_to_cpu(self, monkeypatch):
+        from crk_model.adapters import avi_frames
+
+        monkeypatch.setattr(avi_frames, "_ffmpeg_hwaccel_available", lambda: True)
+
+        def fake_cmd(path, *, size, gate_size, hwaccel):
+            if hwaccel:
+                raise OSError("ffmpeg decode failed (rc=255)")
+            yield "frame-cpu"
+
+        monkeypatch.setattr(avi_frames, "_decode_avi_ffmpeg_cmd", fake_cmd)
+        out = list(avi_frames._decode_avi_ffmpeg("x.avi", size=480, gate_size=120))
+        assert out == ["frame-cpu"]
+
+    def test_failure_after_first_frame_propagates_without_fallback(self, monkeypatch):
+        # 프레임을 이미 방출한 뒤의 실패는 폴백하면 중복 방출 — I1대로 전파.
+        from crk_model.adapters import avi_frames
+
+        monkeypatch.setattr(avi_frames, "_ffmpeg_hwaccel_available", lambda: True)
+
+        def fake_cmd(path, *, size, gate_size, hwaccel):
+            yield "frame-1"
+            raise OSError("mid-stream failure")
+
+        monkeypatch.setattr(avi_frames, "_decode_avi_ffmpeg_cmd", fake_cmd)
+        gen = avi_frames._decode_avi_ffmpeg("x.avi", size=480, gate_size=120)
+        assert next(gen) == "frame-1"
+        with pytest.raises(OSError):
+            next(gen)
+
+
 class TestDecodeAviStreaming:
     """decode_avi가 제너레이터를 반환하고, 프레임을 한 번에 하나씩만 낸다."""
 

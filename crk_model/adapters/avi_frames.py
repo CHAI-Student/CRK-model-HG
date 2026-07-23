@@ -31,15 +31,29 @@ _hwaccel_cache: bool | None = None
 
 
 def _ffmpeg_hwaccel_available() -> bool:
-    """ffmpeg -hwaccels 출력에 "cuda" 포함 여부를 1회 확인해 캐시."""
+    """CUDA 디바이스를 실제로 초기화해 보고 1회 캐시.
+
+    구현 주의 (CI 34연속 실패의 원인): `ffmpeg -hwaccels`는 **빌드에 컴파일된**
+    hwaccel 목록이라, NVIDIA 드라이버가 없는 호스트(GitHub 러너, 일반 PC)에서도
+    "cuda"가 나온다. 그 목록만 보고 `-hwaccel cuda`를 넘기면 디바이스 생성이
+    AVERROR(EPERM)으로 죽어 디코드 전체가 "Error opening output files:
+    Operation not permitted"로 실패한다 — CPU 폴백 없이. 컴파일 여부가 아니라
+    `-init_hw_device cuda`로 실사용 가능 여부를 검사한다 (Jetson에서만 True)."""
     global _hwaccel_cache
     if _hwaccel_cache is not None:
         return _hwaccel_cache
     try:
         result = subprocess.run(
-            ["ffmpeg", "-hwaccels"], capture_output=True, text=True, timeout=5
+            [
+                "ffmpeg", "-hide_banner", "-v", "error",
+                "-init_hw_device", "cuda",
+                "-f", "lavfi", "-i", "color=black:size=64x64:rate=5",
+                "-frames:v", "1", "-f", "null", "-",
+            ],
+            capture_output=True,
+            timeout=10,
         )
-        _hwaccel_cache = "cuda" in result.stdout.lower()
+        _hwaccel_cache = result.returncode == 0
     except Exception:
         _hwaccel_cache = False
     return _hwaccel_cache
@@ -125,11 +139,35 @@ def _decode_avi_opencv(
 def _decode_avi_ffmpeg(
     path: str, *, size: int, gate_size: int
 ) -> Iterator[FrameBundle]:
+    """ffmpeg 디코드 진입점 — hwaccel 시도 후 실패(0프레임) 시 CPU 1회 재시도.
+
+    프로브(_ffmpeg_hwaccel_available)가 통과했어도 런타임에 NVDEC 초기화가
+    깨질 수 있다(드라이버 상태 등). 프레임을 하나도 못 얻고 죽은 경우에만
+    CPU로 폴백한다 — 원본 frame_extractor의 "HWACCEL: CPU" 폴백 동형.
+    프레임을 얻은 뒤의 실패는 폴백하지 않는다(중복 방출 방지, I1 에러 전파)."""
+    if _ffmpeg_hwaccel_available():
+        got_frame = False
+        try:
+            for bundle in _decode_avi_ffmpeg_cmd(
+                path, size=size, gate_size=gate_size, hwaccel=True
+            ):
+                got_frame = True
+                yield bundle
+            return
+        except OSError:
+            if got_frame:
+                raise
+    yield from _decode_avi_ffmpeg_cmd(path, size=size, gate_size=gate_size, hwaccel=False)
+
+
+def _decode_avi_ffmpeg_cmd(
+    path: str, *, size: int, gate_size: int, hwaccel: bool
+) -> Iterator[FrameBundle]:
     import numpy as np  # lazy
 
     frame_bytes = size * size * 3
     cmd = ["ffmpeg"]
-    if _ffmpeg_hwaccel_available():  # cuda 미지원 호스트에서 강제 지정 시 open 실패 방지
+    if hwaccel:
         cmd.extend(["-hwaccel", "cuda"])
     # left-crop 우선 (모듈 docstring 기하 계약): min(iw,size) 크롭 후 scale은
     # 640×480 운영 소스에서 1:1 통과(no-op), 소형 소스에서만 확대 보정.
