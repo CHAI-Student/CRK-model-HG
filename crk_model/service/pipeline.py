@@ -144,7 +144,7 @@ class TriggerPipeline:
         # True로 주입 (MODEL__VISION__MOTION_EVIDENCE).
         motion_evidence_floor_px: float | None = None,
         # None = 프로파일 기본 (냉장 10px / 냉동 12px — 원본
-        # MOTION_MIN_DISPLACEMENT_PX 동형, left-crop 좌표계 전제).
+        # MOTION_MIN_DISPLACEMENT_PX 동형, 1:1 center-crop 좌표계 전제).
         held_track_min_head: int = 5,
         # T2 held 트랙 판정의 head 임계 (MotionEvidence.held_min_head 주입,
         # MODEL__VISION__HELD_TRACK_MIN_HEAD). 강등 모드 자체는 voting_params

@@ -464,7 +464,7 @@ def parse_args() -> argparse.Namespace:
         "--crop-width",
         type=int,
         default=480,
-        help="Match service inference crop width; 0 disables crop.",
+        help="Match service inference crop width (center-crop); 0 disables crop.",
     )
     parser.add_argument("--window-name", default="CRK TensorRT Preview")
     parser.add_argument(
@@ -551,7 +551,8 @@ def main() -> int:
                 break
 
             if args.crop_width > 0 and frame.shape[1] > args.crop_width:
-                infer_frame = frame[:, : args.crop_width]
+                x0 = (frame.shape[1] - args.crop_width) // 2
+                infer_frame = frame[:, x0 : x0 + args.crop_width]
             else:
                 infer_frame = frame
 

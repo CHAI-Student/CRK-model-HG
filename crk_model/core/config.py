@@ -159,9 +159,11 @@ class Settings:
     conf_weight_side_only: float = 0.40
     conf_common_class_bonus: float = 0.2
     # Side ROI: 존 바깥(오른쪽) 검출 제거 경계 — 카메라 장착에 맞게 조정
-    # 가능해야 한다. 기본 400은 left-crop 480×480 좌표계(P0-1)에서의 원본
-    # 정합값(side_roi_x_max=400). 구값 240은 squash resize 좌표계 산물로,
-    # 실기에서 side 검출 194/195가 제거되던 원인이었다.
+    # 가능해야 한다. 기본 400은 center-crop 480×480 좌표계에서의 값
+    # (원본 left-crop 좌표계의 side_roi_x_max=400을 그대로 이식 — 2026-07-24
+    # center-crop 전환으로 크롭 원점이 이동했으므로 실기 재측정 필요).
+    # 구값 240은 squash resize 좌표계 산물로, 실기에서 side 검출 194/195가
+    # 제거되던 원인이었다.
     side_roi_max_center_x: float = 400.0
     # 정지 트랙 억제 (이슈 #10 돌출 진열 상품): 같은 class가 IoU ≥ iou로
     # min_frames(추론 프레임 기준) 이상 같은 자리에 머물면 투표에서
@@ -180,15 +182,16 @@ class Settings:
     #   side 스트림도 top 뷰). dual_top_proxy + cabinet_type=freezer면 두
     #   카메라 모두 freezer 수직 ROI(기본 상단 절반)를 적용하고 side x-ROI는
     #   생략한다 (원본 _uses_freezer_dual_top_profile 동형).
-    # freezer_roi_vertical_region/y_split: 유지할 절반과 분할선 (left-crop
-    #   480×480 좌표계). 원본 운영값 upper/240.
+    # freezer_roi_vertical_region/y_split: 유지할 절반과 분할선 (center-crop
+    #   480×480 좌표계 — y_split은 세로축이라 crop 원점 이동(가로) 영향 없음).
+    #   원본 운영값은 upper/240이었으나 300으로 상향(2026-07-24, 사용자 결정).
     # top_roi_enabled/y_split: 냉장(dual) 레이아웃 top 카메라 전용 —
     #   delta가 0이 아닐 때 하단 절반(center_y >= split)만 유지. 원본 기본은
     #   true지만 HG는 냉동 dual-top 실기가 우선이라 보수적으로 off — 냉장
     #   레이아웃 투입 시 켠다.
     camera_layout: str = "dual"
     freezer_roi_vertical_region: str = "upper"
-    freezer_roi_y_split: float = 240.0
+    freezer_roi_y_split: float = 300.0
     top_roi_enabled: bool = False
     top_roi_y_split: float = 240.0
     # 손 검출 conf 하한 (perf-gap P1-7): 유령 손의 래치·궤적 오염 차단.
@@ -244,7 +247,8 @@ class Settings:
     # ---- 모션 변위 증거 (issue #16 후속 — 원본 변위 필터 이식) ----
     # 변위 없는 카메라×클래스의 표를 combine에서 몰수. static_track이 못 잡는
     # "깜빡이는 정지 물체"까지 커버해 baseline(손 타이밍 대리 신호)을 대체한다.
-    # floor None = 프로파일 기본(냉장 10px/냉동 12px, left-crop 좌표계).
+    # floor None = 프로파일 기본(냉장 10px/냉동 12px) — 픽셀 임계라 1:1 크롭이면
+    # crop 원점(left/center)과 무관하게 그대로 유효.
     motion_evidence_enabled: bool = True
     motion_evidence_floor_px: float | None = None
     # ---- T2 held 트랙 강등 (0713 A-2의 트랙 단위 재구현, 0723 문서 §8) ----
@@ -375,7 +379,7 @@ class Settings:
             freezer_roi_vertical_region=os.environ.get(
                 "MODEL__VISION__FREEZER_ROI_VERTICAL_REGION", "upper"
             ).strip().lower(),
-            freezer_roi_y_split=_env_float("MODEL__VISION__FREEZER_ROI_Y_SPLIT", 240.0),
+            freezer_roi_y_split=_env_float("MODEL__VISION__FREEZER_ROI_Y_SPLIT", 300.0),
             top_roi_enabled=_env_bool("MODEL__VISION__TOP_ROI_ENABLED", False),
             top_roi_y_split=_env_float("MODEL__VISION__TOP_ROI_Y_SPLIT", 240.0),
             hand_confidence_threshold=_env_float(

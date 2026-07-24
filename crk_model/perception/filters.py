@@ -1,9 +1,11 @@
 """검출 필터 체인 — 파이프라인 stage ④ (다이어그램 3).
 
 원본 대응: Motion(BboxTracker) / Hand Path / Side ROI / conf 필터 중
-- Side ROI: side 카메라는 center_x < 400만 유효 — left-crop 480×480
-  좌표계(P0-1)에서의 원본 정합값(side_roi_x_max=400). 구값 240은 squash
-  resize 좌표계 산물로 side 검출을 과잉 제거했다.
+- Side ROI: side 카메라는 center_x < 400만 유효 — center-crop 480×480
+  좌표계에서의 값 (원본 left-crop 좌표계의 side_roi_x_max=400을 그대로
+  이식 — 2026-07-24 center-crop 전환으로 크롭 원점이 이동했으므로 실기
+  재측정 필요). 구값 240은 squash resize 좌표계 산물로 side 검출을 과잉
+  제거했다.
 - Hand Path: 최근 손 bbox 궤적과 교차하지 않는 제품 검출 제거 (근사 구현)
 - Static Track: 같은 자리에 정지 상태로 계속 잡히는 검출 제거 (이슈 #10 —
   전시 영역 밖으로 돌출된 진열 상품이 프리롤부터 전 프레임에 잡혀 최상위
@@ -88,8 +90,9 @@ class DetectionFilterChain:
         # "upper"|"lower"면 **두 카메라 모두** center_y 기준 해당 절반만 유지
         # (dual_top_proxy — side 스트림도 실제로는 top 뷰). 이때 side x-ROI는
         # 원본과 동일하게 생략된다. "off"(기본) = 기존 동작.
-        vertical_roi_y_split: float = 240.0,
-        # left-crop 480×480 좌표계(P0-1)의 분할선 — 원본 freezer_roi_y_split.
+        vertical_roi_y_split: float = 300.0,
+        # center-crop 480×480 좌표계의 분할선(세로축, crop 원점 이동 영향 없음)
+        # — 원본 freezer_roi_y_split(원본 운영값 240 → 300, 2026-07-24).
         top_roi_enabled: bool = False,
         # 냉장(top+side) 레이아웃의 top 카메라 수직 ROI (원본 top_roi_enabled):
         # 트리거 delta가 0이 아닐 때 center_y >= split(하단 절반)만 유지.

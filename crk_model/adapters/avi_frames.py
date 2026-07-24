@@ -1,12 +1,11 @@
 """AVI → FrameBundle 디코드 어댑터 (원본 frame_extractor 대응).
 
-- 기하 계약 (perf-gap 보고서 P0-1): 640×480 소스에서 **left-crop 480×480**.
-  원본은 yolo_wrapper._preprocess_image의 crop_policy="left"로 오른쪽 160px
-  (존 바깥 영역)를 버리고 비율을 보존한다 — 엔진(.engine)이 이 기하에서
-  학습·운영돼 왔으므로 squash resize(비등방 축소)는 conf 하락과 bbox 좌표계
-  왜곡(ROI/hand_margin 상수 어긋남)을 낳는다. 크롭 후 크기가 부족한 소형
-  소스(테스트 픽스처 등)만 리사이즈로 보정한다 (운영 640×480에서는 무손실
-  크롭만 발생).
+- 기하 계약 (2026-07-24 결정: center-crop 전환, 원본 엔진 좌표계 정합 여부는
+  불문): 640×480 소스에서 **center-crop 480×480** — 좌우 각 80px(존 바깥
+  영역 절반씩)를 버리고 비율을 보존한다. squash resize(비등방 축소)는 여전히
+  피한다 — conf 하락과 bbox 좌표계 왜곡(ROI/hand_margin 상수 어긋남)을 낳기
+  때문. 크롭 후 크기가 부족한 소형 소스(테스트 픽스처 등)만 리사이즈로
+  보정한다 (운영 640×480에서는 무손실 크롭만 발생).
 - 디코드는 워커 스레드에서 lazy로 일어난다 (LazyAviFrames): /trigger 응답은
   202 의미론대로 즉시 반환되고, 무거운 작업은 단일 워커(I7)가 순차 수행.
 - 스트리밍: 480×480×3 bytes 프레임 ~400장을 리스트로 상주시키면 카메라당
@@ -122,11 +121,13 @@ def _decode_avi_opencv(
             ok, img = cap.read()
             if not ok:
                 break
-            # left-crop 우선 (모듈 docstring 기하 계약): 640×480 → 480×480.
+            # center-crop 우선 (모듈 docstring 기하 계약): 640×480 → 480×480.
             # 크롭 후에도 목표에 못 미치는 소형 소스만 리사이즈 보정.
             h, w = img.shape[:2]
             if w > size or h > size:
-                img = img[:size, :size]
+                y0 = max((h - size) // 2, 0)
+                x0 = max((w - size) // 2, 0)
+                img = img[y0 : y0 + size, x0 : x0 + size]
             if img.shape[0] != size or img.shape[1] != size:
                 img = cv2.resize(img, (size, size))
             full = img
@@ -169,11 +170,13 @@ def _decode_avi_ffmpeg_cmd(
     cmd = ["ffmpeg"]
     if hwaccel:
         cmd.extend(["-hwaccel", "cuda"])
-    # left-crop 우선 (모듈 docstring 기하 계약): min(iw,size) 크롭 후 scale은
+    # center-crop 우선 (모듈 docstring 기하 계약): min(iw,size) 크롭 후 scale은
     # 640×480 운영 소스에서 1:1 통과(no-op), 소형 소스에서만 확대 보정.
+    # x/y는 (iw-ow)/(ih-oh)의 절반 — ffmpeg crop 필터의 ow/oh는 계산된 출력
+    # 크기(=min(iw,size)/min(ih,size))를 가리키는 내장 변수.
     # ffmpeg 필터 표현식 내 콤마는 인자 구분자와 겹치므로 \, 로 이스케이프.
     vf = (
-        f"crop=min(iw\\,{size}):min(ih\\,{size}):0:0,"
+        f"crop=min(iw\\,{size}):min(ih\\,{size}):(iw-ow)/2:(ih-oh)/2,"
         f"scale={size}:{size}"
     )
     cmd.extend(

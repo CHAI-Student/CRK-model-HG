@@ -56,7 +56,7 @@ MODEL__VISION__YOLO_MODEL_PATH=models/<engine>.engine model-service-hg
 ```bash
 MODEL__VISION__CAMERA_LAYOUT=dual_top_proxy
 # (선택) MODEL__VISION__FREEZER_ROI_VERTICAL_REGION=upper  # 기본값
-# (선택) MODEL__VISION__FREEZER_ROI_Y_SPLIT=240.0          # 기본값
+# (선택) MODEL__VISION__FREEZER_ROI_Y_SPLIT=300.0          # 기본값(2026-07-24: 240→300)
 ```
 
 확인 지점 (세션 아카이브 `vote_summary`):
