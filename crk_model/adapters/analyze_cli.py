@@ -2,9 +2,10 @@
 
 세 가지 질문에 아카이브(+ `label-session` 정답 라벨)만으로 답한다:
 
-1. **shadow 정오** — BOCPD(loadcell_shadow)·무게 우도(likelihood_shadow)의
-   mismatch 세션 목록과, 라벨이 있으면 "현행 판정 vs shadow 중 누가 맞았나"
-   집계 (Phase 2 승격 게이트의 실측치).
+1. **shadow 정오** — 무게 우도(likelihood_shadow)의 mismatch 세션 목록과,
+   라벨이 있으면 "현행 판정 vs shadow 중 누가 맞았나" 집계 (Phase 2 승격
+   게이트의 실측치). BOCPD shadow는 primary 승격(2026-07-23)으로 은퇴 —
+   구 아카이브의 loadcell_shadow 필드는 무시된다.
 2. **conformal 보정** — 라벨된 트리거에서 정답 상품의 투표 통계(votes/ratio/
    share/conf) 분위수 → 채택 임계(MIN_VOTE_*)의 근거 있는 제안값
    ("목표 재현율에서 역산" — 손튜닝 노브의 대체).
@@ -158,7 +159,6 @@ def analyze(docs: list[dict]) -> dict:
         "load_errors": [],
         "by_status": {},
         "labeled": 0,
-        "bocpd": {"observed": 0, "mismatches": []},
         "likelihood": {
             "observed": 0,
             "mismatches": [],
@@ -347,19 +347,6 @@ def analyze(docs: list[dict]) -> dict:
             trace = trig.get("trace") or {}
             delta = float(trig.get("delta_weight") or 0.0)
             gt_zone = _gt_multiset(gt_items, zone) if gt_items else []
-
-            sh = trace.get("loadcell_shadow")
-            if isinstance(sh, dict) and "delta" in sh:
-                report["bocpd"]["observed"] += 1
-                if sh.get("mismatch"):
-                    report["bocpd"]["mismatches"].append({
-                        "session": sid,
-                        "zone": zone,
-                        "primary_delta": sh.get("primary_delta"),
-                        "primary_reason": sh.get("primary_reason"),
-                        "shadow_delta": sh.get("delta"),
-                        "delta_std": sh.get("delta_std"),
-                    })
 
             entries = trace.get("likelihood_shadow") or []
             entries = [e for e in entries if isinstance(e, dict) and "top" in e]
@@ -645,18 +632,6 @@ def render(report: dict) -> str:
                     f"과금 {d['billed']} ← 정답 {d['ground_truth']}"
                 )
 
-    b = report["bocpd"]
-    lines.append("")
-    lines.append(f"--- BOCPD shadow (관측 {b['observed']}건) ---")
-    if not b["mismatches"]:
-        lines.append("mismatch 없음")
-    for m in b["mismatches"]:
-        lines.append(
-            f"  {m['session']} zone{m['zone']}: primary {m['primary_delta']}g "
-            f"({m['primary_reason'] or '-'}) vs shadow {m['shadow_delta']}g "
-            f"±{m['delta_std']}"
-        )
-
     lk = report["likelihood"]
     lines.append("")
     lines.append(f"--- 무게 우도 shadow (관측 {lk['observed']}건) ---")
@@ -884,8 +859,8 @@ def render_session(doc: dict, *, full: bool = False) -> str:
     전략·득표·탈락 사유·shadow까지 한 화면으로 재구성한다 (--session).
 
     기본은 압축 출력 (11차 정리): 승격·은퇴로 "일치가 기본값"이 된 필드
-    (BOCPD 일치, 은퇴 스테이지 0 드랍, candidates와 중복인 생존 클래스,
-    motion 전체 트랙 덤프)를 접고 예외(mismatch·몰수·held)만 보여준다.
+    (은퇴 스테이지 0 드랍, candidates와 중복인 생존 클래스, motion 전체
+    트랙 덤프)를 접고 예외(mismatch·몰수·held)만 보여준다.
     원자료 전체는 --full."""
     lines = [f"=== {doc.get('session_id')} ({doc.get('status')}) ==="]
     gt = doc.get("ground_truth")
@@ -1015,12 +990,6 @@ def render_session(doc: dict, *, full: bool = False) -> str:
             )
             if tube.get("tubes"):
                 lines.append(f"   tube_shadow.tubes: {tube['tubes']}")
-        lc = trace.get("loadcell_shadow")
-        if lc:
-            if full or lc.get("mismatch"):
-                # BOCPD primary 승격(2026-07-23) 후 일치가 기본값 — 압축
-                # 덤프는 회귀 방향 mismatch만 보여준다.
-                lines.append(f"   loadcell_shadow: {lc}")
         for entry in trace.get("likelihood_shadow") or []:
             if not isinstance(entry, dict):
                 continue

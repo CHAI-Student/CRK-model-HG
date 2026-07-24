@@ -38,7 +38,9 @@ def _gt(*items, note=""):
 
 
 class TestAnalyze:
-    def test_bocpd_mismatch_collected(self):
+    def test_old_archive_loadcell_shadow_ignored(self):
+        # BOCPD shadow 은퇴 (2026-07-24, primary 승격 완료) — 구 아카이브에
+        # 남은 loadcell_shadow 필드는 예외 없이 조용히 무시된다 (관용 파싱).
         doc = _doc(triggers=[_trigger(trace={
             "loadcell_shadow": {
                 "analyzer": "bocpd", "delta": -170.0, "delta_std": 4.9,
@@ -47,9 +49,7 @@ class TestAnalyze:
             }
         })])
         report = analyze([doc])
-        assert report["bocpd"]["observed"] == 1
-        m = report["bocpd"]["mismatches"][0]
-        assert m["shadow_delta"] == -170.0 and m["primary_delta"] == 0.0
+        assert "bocpd" not in report and report["sessions"] == 1
 
     def test_likelihood_labeled_eval_score_correct(self):
         # 현행 판정 27×1, score 1위 40×1, GT 40×1 → score만 정답
@@ -393,6 +393,7 @@ class TestAnalyze:
                         "hand_path": {"top": 66, "side": 0},
                     },
                 },
+                # 구 아카이브 잔존 필드 (BOCPD shadow 은퇴) — 덤프에 안 나와야 함
                 "loadcell_shadow": {"analyzer": "plateau", "delta": -155.0,
                                     "primary_delta": -155.0, "mismatch": False},
                 "likelihood_shadow": [
@@ -410,11 +411,12 @@ class TestAnalyze:
         out = render_session(doc)
         assert "rejected: c3:4표(share)" in out
         assert "baseline" not in out and "hand_path" in out
-        assert "loadcell_shadow" not in out  # 일치 — 접힘
+        assert "loadcell_shadow" not in out  # 은퇴 — 구 아카이브 필드 무시
         assert "likelihood ch0: 일치" in out
         assert "likelihood ch1 MISMATCH" in out
         full = render_session(doc, full=True)
-        assert "vote_summary.classes" in full and "loadcell_shadow" in full
+        assert "vote_summary.classes" in full
+        assert "loadcell_shadow" not in full
 
     def test_session_dump_renders_tube_shadow(self):
         from crk_model.adapters.analyze_cli import render_session
@@ -445,15 +447,11 @@ class TestCli:
     def test_end_to_end_json_archive(self, tmp_path, capsys):
         day = tmp_path / "2026-07-23"
         day.mkdir()
-        doc = _doc(triggers=[_trigger(trace={
-            "loadcell_shadow": {"analyzer": "bocpd", "delta": -100.0,
-                                "delta_std": 3.0, "primary_delta": 0.0,
-                                "primary_reason": "x", "mismatch": True},
-        })])
+        doc = _doc(triggers=[_trigger()])
         (day / "ses-1.json").write_text(json.dumps(doc), encoding="utf-8")
         assert main(["--dir", str(tmp_path)]) == 0
         out = capsys.readouterr().out
-        assert "BOCPD shadow" in out and "ses-1" in out
+        assert "무게 우도 shadow" in out and "세션 1개" in out
 
     def test_empty_dir_returns_error(self, tmp_path, capsys):
         assert main(["--dir", str(tmp_path)]) == 1

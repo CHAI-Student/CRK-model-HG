@@ -24,7 +24,6 @@ from crk_model.core.types import (
     VisionCandidate,
 )
 from crk_model.frames.motion_gate import Frame, HandLatch, MotionGate
-from crk_model.ingest.bocpd import BocpdAnalyzer
 from crk_model.ingest.loadcell import (
     ChannelWeightEvent,
     LoadcellAnalyzer,
@@ -94,10 +93,6 @@ class TriggerTrace:
     # 케이스를 사후에 재구성하기 위한 클래스별/카메라별 요약
     # ({"classes": VotingEnsemble.debug_summary(), "filtered_out_by_camera": {...}}).
     vote_summary: dict = field(default_factory=dict)
-    # BOCPD shadow (research §2): 판정에는 미사용 — 기존 분석기와의 delta
-    # diff를 아카이브로 실측해 승격 여부를 결정한다 (특히 primary가
-    # insufficient_*로 delta=0을 낼 때 BOCPD가 보는 값).
-    loadcell_shadow: dict | None = None
     # 무게 우도 score shadow (docs/0722_weight_likelihood_design.md Phase 1):
     # 판정 미사용 — 이벤트(트레이)별 score 순위와 현행 판정의 diff 기록.
     # mismatch=true 세션을 아카이브에서 수집해 승격(Phase 2/3)을 결정한다.
@@ -152,9 +147,6 @@ class TriggerPipeline:
         track_max_gap: int = 0,
         # 갭 1 트랙 소멸 (MotionEvidence.track_max_gap 주입, MODEL__VISION__
         # TRACK_MAX_GAP): 공백 > N 추론프레임 트랙은 사망. 0 = 무소멸(현행).
-        bocpd_shadow_enabled: bool = False,
-        # BOCPD shadow 분석기 (research §2): 라이브러리 기본 False(하위호환),
-        # 운영값은 Settings가 주입 (MODEL__LOADCELL__BOCPD_SHADOW).
         likelihood_shadow_enabled: bool = False,
         # 무게 우도 score shadow (research §1-2 승인분, Phase 1): 라이브러리
         # 기본 False(하위호환), 운영값은 Settings가 주입
@@ -181,7 +173,6 @@ class TriggerPipeline:
         self._motion_evidence_floor = motion_evidence_floor_px
         self._held_min_head = held_track_min_head
         self._track_max_gap = track_max_gap
-        self._bocpd_shadow = bocpd_shadow_enabled
         self._likelihood: WeightLikelihoodScorer | None = (
             WeightLikelihoodScorer(**dict(likelihood_params or {}))
             if likelihood_shadow_enabled
@@ -241,43 +232,6 @@ class TriggerPipeline:
             # 재수집은 장치측 훅 (QA Q3 ① 순서 계약) — 구간화 보류 사실만 기록
             trace.reason_codes.append("return_stabilization_pending")
         delta = analysis.delta_weight
-        if self._bocpd_shadow:
-            # shadow는 판정 경로를 절대 깨지 않는다 — 실패는 기록만.
-            # primary가 bocpd로 승격된 경우(MODEL__LOADCELL__ANALYZER=bocpd)
-            # 자기 비교는 무의미하므로 plateau를 shadow로 돌려 대칭 diff를
-            # 유지한다 (승격 후에도 회귀 방향의 mismatch를 관측 가능).
-            try:
-                if getattr(analyzer, "name", "plateau") == "bocpd":
-                    sh_plateau = LoadcellAnalyzer(profile).analyze(req.loadcells)
-                    trace.loadcell_shadow = {
-                        "analyzer": "plateau",
-                        "delta": round(sh_plateau.delta_weight, 2),
-                        "reason": sh_plateau.reason,
-                        "primary_delta": round(delta, 2),
-                        "primary_reason": analysis.reason,
-                        "mismatch": abs(sh_plateau.delta_weight - delta) > 5.0,
-                    }
-                else:
-                    sh = BocpdAnalyzer().analyze(req.loadcells)
-                    trace.loadcell_shadow = {
-                        "analyzer": "bocpd",
-                        "delta": round(sh.delta_weight, 2),
-                        "delta_std": round(sh.delta_std, 2),
-                        "channels": [
-                            {
-                                "channel": c.channel,
-                                "delta": round(c.delta, 2),
-                                "levels": [round(s.level, 1) for s in c.segments],
-                            }
-                            for c in sh.channels
-                        ],
-                        "primary_delta": round(delta, 2),
-                        "primary_reason": analysis.reason,
-                        "mismatch": abs(sh.delta_weight - delta) > 5.0,
-                    }
-            except Exception as exc:  # noqa: BLE001 — shadow 격리
-                trace.loadcell_shadow = {"analyzer": "bocpd", "error": type(exc).__name__}
-
         if not vision_only and abs(delta) < profile.min_weight_change_grams:
             # 저무게 스킵: vision 전체 생략 = YOLO 호출 0 (QA Q8)
             trace.reason_codes.append("low_weight_skip")
@@ -440,16 +394,15 @@ class TriggerPipeline:
     ) -> None:
         """무게 우도 score shadow (Phase 1) — 판정 경로를 절대 깨지 않는다.
 
-        σ_d는 BOCPD shadow의 delta_std가 있으면 그것을 쓴다 (설계 §2 —
-        BOCPD 승격 시 자연 연결). 실패·비적용은 조용히 건너뛰거나 error만
-        기록한다 (BOCPD shadow와 동일 격리 패턴)."""
+        실패·비적용은 조용히 건너뛰거나 error만 기록한다 (shadow 격리).
+        σ_d는 설계 §2의 BOCPD delta_std 연결이 BOCPD shadow 은퇴(2026-07-24,
+        primary 승격 완료)로 소스를 잃어 현재 None 고정 — 라이브러리 기본
+        σ 사용. Phase 2 승격 시 primary BocpdLoadcellAnalyzer에서 직접 뽑는
+        경로로 재연결한다."""
         if self._likelihood is None:
             return
         try:
             sigma_d = None
-            sh = trace.loadcell_shadow
-            if sh and isinstance(sh.get("delta_std"), (int, float)):
-                sigma_d = float(sh["delta_std"])
             tray_prior = None
             if self._tray_memory is not None and ctx.vision_candidates:
                 tray_prior = self._tray_memory.priors_for(
@@ -702,12 +655,6 @@ class TriggerPipeline:
             # 투표 진입 컷(entry_conf) 탈락 수 — "후보 0"이 어디서 죽었는지
             # (모델 미검출/필터/진입 컷/결합 임계) 세션 아카이브에서 즉시 구분.
             "filter_drops_by_stage": self._filters.drop_stats,
-            # baseline shadow 검증 (이슈 #14 후속): 억제(예정) 대상의 클래스
-            # 구성 — 진짜 상품 class가 여기 나타나면 active 승격 보류 신호.
-            "baseline_drops_by_class": {
-                cam: dict(by_cls)
-                for cam, by_cls in self._filters.baseline_drops_by_class.items()
-            },
             "entry_dropped_by_camera": dict(voting.entry_dropped),
             # 변위 증거 진단 (issue #16 후속): 카메라×클래스별 통과/최대경로/
             # 임계 — rejected_by: "no_motion"의 근거를 아카이브에서 재구성.

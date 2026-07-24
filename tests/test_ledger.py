@@ -1,4 +1,4 @@
-"""ledger: 배리어(I17), 정산기(I11·I13·I14), 교차존, freezer close, shadow, I10."""
+"""ledger: 배리어(I17), 정산기(I11·I13·I14), 교차존, freezer close, I10."""
 import pytest
 from conftest import cand
 
@@ -16,7 +16,6 @@ from crk_model.ledger import (
     CausalBarrier,
     CloseSettler,
     EventLog,
-    ShadowSettlerRunner,
     TriggerEvent,
     interim_summary,
 )
@@ -282,20 +281,10 @@ class TestVisionComboResolve:
         assert billed == {"P44": 4}
 
 
-class TestInterimAndShadow:
+class TestInterim:
     def test_interim_is_distinct_type_and_rejected_by_payment(self, cola):
         # I10: 잠정 타입은 결제 빌더가 TypeError로 거부
         summary = interim_summary("s1", [removal("s1", 1, 1.0, cola)], PROFILES)
         assert isinstance(summary, InterimSummary)
         with pytest.raises(TypeError):
             build_payment_payload(summary)
-
-    def test_shadow_runner_logs_diff(self, cola):
-        primary = CloseSettler()
-        shadow = CloseSettler(ErrorSessionPolicy.FINALIZE_ERROR_FREE_ZONES)
-        runner = ShadowSettlerRunner(primary, shadow)
-        events = [removal("s1", 1, 1.0, cola), error_event("s1", 2, 2.0)]
-        result = runner.settle("s1", events, PROFILES)
-        assert result.blocked  # primary 기준 반환
-        # blocked vs 확정의 가격 차이가 diff에 잡히지 않아도 실행은 안전해야 함
-        assert isinstance(runner.diffs, list)

@@ -1,4 +1,4 @@
-"""BOCPD 로드셀 분석기 (shadow) — 베이지안 온라인 변화점 검출.
+"""BOCPD 로드셀 분석기 (primary) — 베이지안 온라인 변화점 검출.
 
 Adams & MacKay 2007 (arXiv:0710.3742)의 run-length 사후분포 재귀를 이 도메인에
 맞게 축소 구현한 것 (claudedocs/research_judgment_performance_20260722.md §2).
@@ -14,10 +14,10 @@ insufficient_stable_regions → 무음 0원), 1.6초 간격 연속 취출이면 
 run별 평균에 켤레 정규 사전(모호 사전 κ₀=0.01 — 새 레벨이 어디로 튀어도
 changepoint 가설이 유효). hazard 상수 H (기본 0.1 ≈ 평균 run 10샘플 = 8s).
 
-**shadow 전용**: 판정·정산은 기존 분석기를 그대로 쓰고, 이 결과는
-trace.loadcell_shadow로 아카이브에만 남는다 — 레포 관행(shadow 병행 →
-아카이브 실측 비교 → 승격). 계산은 순수 파이썬 O(n·max_run), 트리거당
-샘플 ~20-70개라 비용 무시 가능.
+**primary 승격 (2026-07-23)**: shadow 병행 실측(63관측/2 mismatch, 이후
+17건 mismatch 0)을 거쳐 기본 분석기로 확정 — shadow 관측 장치는 2026-07-24
+삭제, plateau는 `MODEL__LOADCELL__ANALYZER=plateau` 롤백 스위치로 유지.
+계산은 순수 파이썬 O(n·max_run), 트리거당 샘플 ~20-70개라 비용 무시 가능.
 """
 from __future__ import annotations
 

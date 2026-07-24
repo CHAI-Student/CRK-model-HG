@@ -44,8 +44,6 @@ def _env_zones(key: str) -> tuple[int, ...]:
 
 _VALID_CABINET_TYPES = ("refrigerated", "freezer")
 
-_VALID_BASELINE_MODES = ("off", "shadow", "active")
-
 _VALID_CAMERA_LAYOUTS = ("dual", "dual_top_proxy")
 
 
@@ -58,20 +56,6 @@ def _env_choice(key: str, default: str, valid: tuple[str, ...]) -> str:
         # fail-closed: 오타가 조용히 기본값이 되면 의도한 구성이 아닌 채
         # 운영되고 있음을 알 수 없다 (cabinet_type과 동일 원칙).
         raise ValueError(f"Invalid value for {key}: {raw}")
-    return normalized
-
-
-
-
-def _env_baseline_mode(key: str, default: str) -> str:
-    raw = os.environ.get(key)
-    if not raw:
-        return default
-    normalized = raw.strip().lower()
-    if normalized not in _VALID_BASELINE_MODES:
-        # cabinet_type과 동일한 fail-closed: 오타가 조용히 기본 모드로
-        # 폴백되면 shadow 검증 없이 active로 갔다고 오인할 수 있다.
-        raise ValueError(f"Invalid baseline suppress mode: {raw}")
     return normalized
 
 
@@ -113,8 +97,8 @@ class Settings:
     freezer_zones: tuple[int, ...] = field(default_factory=tuple)
     # 기기 단위 정적 설정 (원본 MachineModel.cabinet_type 대응, config.py
     # 60-75행). "refrigerated"|"freezer" — 실기가 냉동이면 반드시 명시해야
-    # 한다. 미설정 시 기본값(refrigerated)이 전 존에 ±3g 프로파일을 적용해
-    # 이슈 #6의 공동 원인이 됐다.
+    # 한다. 미설정 시 기본값(refrigerated)이 전 존에 냉장 ±5g 프로파일을
+    # 적용해 이슈 #6의 공동 원인이 됐다.
     cabinet_type: str = "refrigerated"
     # D9: Node 합의(P4) 전 기본값은 fail-closed
     error_policy: ErrorSessionPolicy = ErrorSessionPolicy.BLOCK_PAYMENT
@@ -165,18 +149,6 @@ class Settings:
     # 구값 240은 squash resize 좌표계 산물로, 실기에서 side 검출 194/195가
     # 제거되던 원인이었다.
     side_roi_max_center_x: float = 400.0
-    # 정지 트랙 억제 (이슈 #10 돌출 진열 상품): 같은 class가 IoU ≥ iou로
-    # min_frames(추론 프레임 기준) 이상 같은 자리에 머물면 투표에서
-    # 제거. min_frames=0이면 비활성.
-    static_track_min_frames: int = 24
-    static_track_iou: float = 0.85
-    # Baseline 억제 (이슈 #14 후속): 손 등장 전(프리롤)에 이미 있던 class를
-    # 배경으로 등록하고 같은 자리 재검출을 억제 — static_track의 연속 IoU
-    # 0.85 조건을 못 채우는 "깜빡이는 고정 물체" 대응. 모드: off / shadow
-    # (드랍 없이 drop_stats["baseline"] 계수만) / active(실제 드랍).
-    # shadow 실측으로 진짜 상품 표가 안 깎이는 걸 확인한 뒤 active로 승격.
-    baseline_suppress_mode: str = "shadow"
-    baseline_suppress_iou: float = 0.5
     # ---- 수직 ROI (원본 정합 웨이브 2 — perf-gap P1-5 이식) ----
     # camera_layout: "dual"(top+side, 기본) | "dual_top_proxy"(냉동 실기 —
     #   side 스트림도 top 뷰). dual_top_proxy + cabinet_type=freezer면 두
@@ -283,13 +255,9 @@ class Settings:
     # "plateau"(구 3연속 안정 창, 롤백 스위치). 승격 근거: 이슈 #17 실측
     # 63관측/2 mismatch + 5차 ses-2(동시+빠른 취출에서 plateau가
     # insufficient_stable_regions → delta 0 → 0원 누락, BOCPD는 −297.5±2.6
-    # 채널 분해까지 정확). bocpd primary일 때 shadow는 자동으로 plateau로
-    # 바뀌어 대칭 diff가 유지된다 — 회귀 방향 mismatch도 계속 관측 가능.
+    # 채널 분해까지 정확). BOCPD_SHADOW 병행 기록 장치는 승격 확정으로
+    # 2026-07-24 삭제 — 회귀 감시는 아카이브 delta 정오로 직접 한다.
     loadcell_analyzer: str = "bocpd"
-    # BOCPD shadow 분석기 (research §2): 판정 미사용, 아카이브 diff 실측용.
-    # plateau 휴리스틱이 못 보는 delta(#14 무음 0원, 연속 취출 플래토 붕괴)를
-    # 변화점 검출이 어떻게 읽는지 병행 기록 — 승격은 실측 후 결정.
-    bocpd_shadow: bool = True
     # 오염 delta 이중 타깃 재시도 (이슈 #10): |delta − sum(segments)|가 이
     # 값을 넘으면(접촉 하중 오염 서명) delta 타깃 판정 실패 시 세그먼트 합
     # 타깃으로 1회 재판정. 실측 오염 트리거 8~18g / 깨끗한 트리거 0.
@@ -298,9 +266,6 @@ class Settings:
     # Phase 3 승격 완료 (2026-07-21): 운영 검증(PENALTY_ENABLED=1)을 거쳐
     # 기본 ON. 비활성화하려면 MODEL__CROSS_ZONE__PENALTY_ENABLED=0.
     cross_zone_penalty_enabled: bool = True
-    # shadow 병행 (L6 ②): primary는 페널티 OFF 유지, 페널티 ON 정산기를
-    # shadow로 돌려 diff만 기록. PENALTY_ENABLED=1이면 무의미하므로 무시된다.
-    cross_zone_shadow: bool = False
     # 카메라 계약 상수 — CRK-CAMERA replay_duration/trigger duration과 단일 소스
     # (trigger duration은 0.8s 로드셀 캐던스 대응으로 3.0 -> 4.0, CRK-CAMERA 7c8395f)
     cross_zone_replay_s: float = 4.0
@@ -363,16 +328,6 @@ class Settings:
                 "MODEL__VISION__CONF_COMMON_CLASS_BONUS", 0.2
             ),
             side_roi_max_center_x=_env_float("MODEL__VISION__SIDE_ROI_MAX_CENTER_X", 400.0),
-            static_track_min_frames=_env_int(
-                "MODEL__VISION__STATIC_TRACK_MIN_FRAMES", 24
-            ),
-            static_track_iou=_env_float("MODEL__VISION__STATIC_TRACK_IOU", 0.85),
-            baseline_suppress_mode=_env_baseline_mode(
-                "MODEL__VISION__BASELINE_SUPPRESS_MODE", "shadow"
-            ),
-            baseline_suppress_iou=_env_float(
-                "MODEL__VISION__BASELINE_SUPPRESS_IOU", 0.5
-            ),
             camera_layout=_env_choice(
                 "MODEL__VISION__CAMERA_LAYOUT", "dual", _VALID_CAMERA_LAYOUTS
             ),
@@ -440,7 +395,6 @@ class Settings:
             ),
             track_min_hits=_env_int("MODEL__VISION__TRACK_MIN_HITS", 0),
             track_max_gap=_env_int("MODEL__VISION__TRACK_MAX_GAP", 0),
-            bocpd_shadow=_env_bool("MODEL__LOADCELL__BOCPD_SHADOW", True),
             motion_gate_keepalive=_env_opt_int("MODEL__VISION__MOTION_GATE_KEEPALIVE"),
             loadcell_analyzer=_env_choice(
                 "MODEL__LOADCELL__ANALYZER", "bocpd", ("plateau", "bocpd")
@@ -452,7 +406,6 @@ class Settings:
             cross_zone_penalty_enabled=_env_bool(
                 "MODEL__CROSS_ZONE__PENALTY_ENABLED", True
             ),
-            cross_zone_shadow=_env_bool("MODEL__CROSS_ZONE__SHADOW", False),
             cross_zone_replay_s=_env_float("MODEL__CROSS_ZONE__REPLAY_S", 4.0),
             cross_zone_trigger_s=_env_float("MODEL__CROSS_ZONE__TRIGGER_S", 4.0),
             cross_zone_epsilon_s=_env_float("MODEL__CROSS_ZONE__EPSILON_S", 1.0),

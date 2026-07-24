@@ -105,7 +105,7 @@ class VotingEnsemble:
             (vote_recovery, "vote_recovery"),
         ):
             if mode not in ("off", "shadow", "active"):
-                # baseline_suppress_mode와 동일한 fail-closed — 오타가 조용히
+                # cabinet_type과 동일한 fail-closed — 오타가 조용히
                 # off가 되면 강등 없이 운영 중임을 알 수 없다.
                 raise ValueError(f"Invalid {name}: {mode}")
         self._conf_floor = conf_floor

@@ -103,7 +103,7 @@ class FreezerVisionFirstStrategy:
     만큼 넓고, 실제로 득표 1위(65표, 0.86)가 3g 차이로 게이트를 놓치자
     16표 배경 후보가 "무게가 맞아서" COMPLETE 채택되는 사고가 났다
     (이슈 #15: 같은 상품 2회 연속 취출이 로드셀 20g 차이로 서로 다른 두
-    상품으로 과금). 오검출 억제는 perception 계층(static/baseline/share
+    상품으로 과금). 오검출 억제는 perception 계층(모션 변위 증거/share
     floor)의 책임이고, 판정층은 득표 순위를 신뢰한다 — 층별 단일 책임.
 
     무게 게이트는 n-스케일이다 (이슈 #16 설계, docs/0722_issue16_arbitration_design.md):

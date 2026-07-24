@@ -461,10 +461,12 @@ class TestCabinetTypeDefaultProfile:
         assert outcome.event.judgment.reason == "weight_only"
         assert outcome.event.judgment.status.value == "complete"
 
-    def test_bocpd_primary_switch_swaps_shadow_to_plateau(self, cola):
-        # 이슈 #14 승격 스위치: MODEL__LOADCELL__ANALYZER=bocpd — primary가
-        # BOCPD 어댑터로 바뀌고, shadow는 plateau로 뒤집혀 대칭 diff 유지.
-        settings = Settings(loadcell_analyzer="bocpd", close_grace_s=0.0)
+    def test_bocpd_default_primary_and_plateau_rollback(self, cola):
+        # 이슈 #14: bocpd가 기본 primary (2026-07-23 정식 승격, shadow 장치
+        # 은퇴) — 롤백 스위치 MODEL__LOADCELL__ANALYZER=plateau도 동일 판정
+        # 계약으로 동작해야 한다.
+        assert Settings().loadcell_analyzer == "bocpd"
+        settings = Settings(loadcell_analyzer="plateau", close_grace_s=0.0)
         svc = ModelService(FakeDetector(), clock=FakeClock(), settings=settings)
         svc.handle_multi_zone(open_payload(cola))
         svc.handle_trigger(trigger_payload())  # delta -100 = cola 1개
@@ -472,9 +474,6 @@ class TestCabinetTypeDefaultProfile:
         outcome = svc.worker.outcomes[-1]
         assert outcome.event.judgment.status.value == "complete"
         assert abs(outcome.event.delta_weight - (-100.0)) < 5.0
-        sh = outcome.trace.loadcell_shadow
-        assert sh is not None and sh["analyzer"] == "plateau"
-        assert sh["mismatch"] is False  # 깨끗한 계단 — 두 분석기 일치
 
     def test_invalid_loadcell_analyzer_env_rejected(self, monkeypatch):
         monkeypatch.setenv("MODEL__LOADCELL__ANALYZER", "bocdp")
@@ -580,8 +579,6 @@ class TestVisionTuningWiring:
         monkeypatch.setenv("MODEL__VISION__MIN_VOTE_COUNT", "1")
         monkeypatch.setenv("MODEL__VISION__CONF_FLOOR", "0.1")
         monkeypatch.setenv("MODEL__VISION__SIDE_ROI_MAX_CENTER_X", "480")
-        monkeypatch.setenv("MODEL__VISION__BASELINE_SUPPRESS_MODE", "active")
-        monkeypatch.setenv("MODEL__VISION__BASELINE_SUPPRESS_IOU", "0.6")
         s = Settings.from_env()
         assert s.top_confidence_threshold == 0.35
         assert s.side_confidence_threshold == 0.30
@@ -589,8 +586,6 @@ class TestVisionTuningWiring:
         assert s.min_vote_count == 1
         assert s.vote_conf_floor == 0.1
         assert s.side_roi_max_center_x == 480
-        assert s.baseline_suppress_mode == "active"
-        assert s.baseline_suppress_iou == 0.6
 
     def test_from_env_reads_judgment_and_gate_tuning(self, monkeypatch):
         monkeypatch.setenv("MODEL__JUDGMENT__SINGLE_SHARE", "0.4")
@@ -629,11 +624,6 @@ class TestVisionTuningWiring:
         plain = _default_profile_from_settings(Settings(cabinet_type="freezer"))
         assert plain.motion_gate_threshold == 0.005
 
-    def test_from_env_rejects_invalid_baseline_mode(self, monkeypatch):
-        monkeypatch.setenv("MODEL__VISION__BASELINE_SUPPRESS_MODE", "on")
-        with pytest.raises(ValueError):
-            Settings.from_env()
-
     def test_settings_flow_into_voting_ensemble(self, cola):
         # 진입 컷 0.9로 올리면 FakeDetector(conf 0.8) 검출이 투표에 못 들어가
         # vision 후보 0 → (냉장 기본) weight_only로 빠진다 — env가 실제로
@@ -667,8 +657,5 @@ class TestVisionTuningWiring:
         summary = svc.worker.outcomes[-1].trace.vote_summary
         assert "filter_drops_by_stage" in summary
         assert set(summary["filter_drops_by_stage"]) == {
-            "side_roi", "vertical_roi", "hand_conf", "baseline",
-            "static_track", "hand_path",
+            "side_roi", "vertical_roi", "hand_conf", "hand_path",
         }
-        # baseline shadow 검증용 클래스별 세부 (이슈 #14 후속)
-        assert set(summary["baseline_drops_by_class"]) == {"top", "side"}

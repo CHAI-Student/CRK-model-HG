@@ -38,7 +38,6 @@ from crk_model.ledger.events import EventLog
 from crk_model.ledger.ghost_ledger import GhostLedgerConfig
 from crk_model.ledger.journal import EventJournal
 from crk_model.ledger.settler import CloseSettler
-from crk_model.ledger.shadow import ShadowSettlerRunner
 from crk_model.ledger.tray_memory import SessionTrayMemory
 from crk_model.perception.detector import Detector
 from crk_model.perception.filters import DetectionFilterChain
@@ -144,31 +143,6 @@ class ModelService:
             count_unit_slack=self.settings.judgment_count_unit_slack,
             vision_combo=self.settings.close_vision_combo,
         )
-        # Phase 2 (L6 ②): 페널티 OFF primary + 페널티 ON shadow 병행 — diff만
-        # 기록해 개선 방향을 검증한 뒤 Phase 3에서 PENALTY_ENABLED로 승격한다.
-        # 페널티가 이미 primary에 켜져 있으면 shadow는 무의미하므로 배선 생략.
-        gateway_settler = self.settler
-        if self.settings.cross_zone_shadow and not cross_zone.enabled:
-            shadow = CloseSettler(
-                self.settings.error_policy,
-                default_profile=self._default_profile,
-                cross_zone=CrossZonePenaltyConfig(
-                    enabled=True,
-                    replay_s=cross_zone.replay_s,
-                    trigger_s=cross_zone.trigger_s,
-                    epsilon_s=cross_zone.epsilon_s,
-                    alpha=cross_zone.alpha,
-                    source_conf_min=cross_zone.source_conf_min,
-                ),
-                ghost=ghost,
-                active_products_provider=products_provider,
-                count_unit_slack=self.settings.judgment_count_unit_slack,
-                vision_combo=self.settings.close_vision_combo,
-            )
-            gateway_settler = ShadowSettlerRunner(self.settler, shadow)
-            logger.info("[CONFIG] cross-zone penalty shadow settler enabled")
-        # prune 경로: runner면 양쪽 캐시를 함께 정리한다 (_prune_ledger 참고)
-        self._gateway_settler = gateway_settler
         # journal과 동일한 하위호환 원칙: archive를 명시적으로 주지 않으면
         # 비활성(SessionArchive("")) — 기본 생성자로 settings.session_archive_dir
         # 를 자동 활성화하면 테스트/임시 ModelService가 실제 저장소(data/sessions)
@@ -177,7 +151,7 @@ class ModelService:
         self.archive = archive if archive is not None else SessionArchive("")
         self._clock = clock
         self.gateway = MultiZoneGateway(
-            gateway_settler,
+            self.settler,
             self.event_log,
             self._profiles,
             clock=clock,
@@ -217,9 +191,8 @@ class ModelService:
             early_termination_enabled=self.settings.early_termination_enabled,
             motion_evidence_enabled=self.settings.motion_evidence_enabled,
             motion_evidence_floor_px=self.settings.motion_evidence_floor_px,
-            bocpd_shadow_enabled=self.settings.bocpd_shadow,
             # 무게 우도 score shadow (MODEL__JUDGMENT__LIKELIHOOD_*, Phase 1):
-            # 판정 미사용 — 아카이브 diff 실측용 (BOCPD shadow와 동일 패턴).
+            # 판정 미사용 — 아카이브 diff 실측용.
             likelihood_shadow_enabled=self.settings.likelihood_shadow,
             likelihood_params={
                 "k": self.settings.likelihood_k,
@@ -229,9 +202,9 @@ class ModelService:
             # ModelService가 관리 — OPEN 새 세션마다 reset (아래 handle_multi_zone).
             tray_memory=self._tray_memory,
             # 로드셀 안정 판정 (MODEL__WEIGHT__STABLE_WINDOW 등, 이슈 #14):
-            # post-roll 샘플 수와 함께 최종 plateau 성립 조건을 결정한다.
-            # MODEL__LOADCELL__ANALYZER=bocpd면 primary를 BOCPD 어댑터로 교체
-            # (승격 스위치 — shadow 실측 우세 확인 후에만 켠다).
+            # post-roll 샘플 수와 함께 최종 안정 구간 성립 조건을 결정한다.
+            # primary는 BOCPD (2026-07-23 정식 승격) — 회귀 시
+            # MODEL__LOADCELL__ANALYZER=plateau로 롤백.
             analyzer_factory=(
                 (
                     lambda profile: BocpdLoadcellAnalyzer(
@@ -254,10 +227,6 @@ class ModelService:
             # 현장 카메라/조명에 따라 env로 조정한다 (.env.example 참조).
             filters=DetectionFilterChain(
                 side_roi_max_center_x=self.settings.side_roi_max_center_x,
-                static_track_min_frames=self.settings.static_track_min_frames,
-                static_track_iou=self.settings.static_track_iou,
-                baseline_suppress_mode=self.settings.baseline_suppress_mode,
-                baseline_suppress_iou=self.settings.baseline_suppress_iou,
                 # 수직 ROI (P1-5): 냉동 dual-top에서만 두 카메라 공통 적용 —
                 # 냉장 기기는 camera_layout이 dual_top_proxy여도 켜지 않는다
                 # (원본 _uses_freezer_dual_top_profile: freezer ∧ dual_top).
@@ -494,7 +463,7 @@ class ModelService:
         self._recent_session_ids.append(new_session_id)
         keep = set(self._recent_session_ids)
         self.event_log.prune(keep)
-        self._gateway_settler.prune(keep)  # shadow 배선 시 양쪽 캐시 함께 정리
+        self.settler.prune(keep)
 
     def process_pending(self) -> int:
         """워커 drain — 장치에서는 전용 스레드/태스크가 주기 호출.
