@@ -120,6 +120,28 @@ class TestVoting:
         (c,) = v.combine()
         assert abs(c.confidence - (0.8 * 0.6 + 0.6 * 0.4 + 0.6 * 0.2)) < 1e-9
 
+    def test_weighted_conf_custom_camera_weights(self):
+        # 카메라 conf 결합 가중은 env로 조정 가능해야 한다
+        # (MODEL__VISION__CONF_WEIGHT_* — Settings가 voting_params로 주입).
+        v = VotingEnsemble(
+            min_vote_count=1, conf_floor=0.0,
+            top_weight=0.8, side_weight=0.1, common_class_bonus=0.05,
+        )
+        v.add_frame("top", [Detection(1, 0.8)])
+        v.add_frame("side", [Detection(1, 0.6)])
+        (c,) = v.combine()
+        assert abs(c.confidence - (0.8 * 0.8 + 0.6 * 0.1 + 0.6 * 0.05)) < 1e-9
+
+    def test_weighted_conf_custom_single_camera_weight(self):
+        # 단일 카메라 검출은 전용 *_ONLY 가중 — 양카메라 가중과 독립 조정.
+        v = VotingEnsemble(
+            min_vote_count=1, conf_floor=0.0,
+            top_weight=0.8, top_only_weight=0.95,
+        )
+        v.add_frame("top", [Detection(1, 0.6)])
+        (c,) = v.combine()
+        assert c.confidence == pytest.approx(0.6 * 0.95)
+
     def test_weighted_conf_uses_camera_max_not_mean(self):
         # P1-4 (perf-gap 보고서): 원본 combine()은 카메라별 최대 conf
         # (top/side_max_confidence)로 결합한다. 구버전의 평균 결합은

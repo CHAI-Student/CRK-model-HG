@@ -147,6 +147,17 @@ class Settings:
     # 진입 컷이 노이즈를 이미 거르므로 기본 0.0. 진입 컷을 0으로 낮춰 저신뢰
     # 투표를 보존하고 싶을 때만 안전판으로 올려 쓴다.
     vote_conf_floor: float = 0.0
+    # 카메라 conf 결합 가중 (voting._weighted_confidence, 원본 combine()
+    # 427-458행 동형 — P1-4): 양카메라 검출 시
+    #   weighted = top·W_TOP + side·W_SIDE + min(top,side)·COMMON_CLASS_BONUS,
+    # 단일 카메라 검출 시 전용 *_ONLY 가중을 곱한다 (한쪽 conf 반토막 방지).
+    # 기본값은 원본 운영값(0.60/0.40/0.2) — 실기에서 카메라별 신뢰도 차이가
+    # 확인되면 env로만 조정한다 (예: side 오검출 과다 시 SIDE를 내림).
+    conf_weight_top: float = 0.60
+    conf_weight_side: float = 0.40
+    conf_weight_top_only: float = 0.60
+    conf_weight_side_only: float = 0.40
+    conf_common_class_bonus: float = 0.2
     # Side ROI: 존 바깥(오른쪽) 검출 제거 경계 — 카메라 장착에 맞게 조정
     # 가능해야 한다. 기본 400은 left-crop 480×480 좌표계(P0-1)에서의 원본
     # 정합값(side_roi_x_max=400). 구값 240은 squash resize 좌표계 산물로,
@@ -336,6 +347,17 @@ class Settings:
             min_vote_count=_env_int("MODEL__VISION__MIN_VOTE_COUNT", 3),
             min_vote_share=_env_float("MODEL__VISION__MIN_VOTE_SHARE", 0.1),
             vote_conf_floor=_env_float("MODEL__VISION__CONF_FLOOR", 0.0),
+            conf_weight_top=_env_float("MODEL__VISION__CONF_WEIGHT_TOP", 0.60),
+            conf_weight_side=_env_float("MODEL__VISION__CONF_WEIGHT_SIDE", 0.40),
+            conf_weight_top_only=_env_float(
+                "MODEL__VISION__CONF_WEIGHT_TOP_ONLY", 0.60
+            ),
+            conf_weight_side_only=_env_float(
+                "MODEL__VISION__CONF_WEIGHT_SIDE_ONLY", 0.40
+            ),
+            conf_common_class_bonus=_env_float(
+                "MODEL__VISION__CONF_COMMON_CLASS_BONUS", 0.2
+            ),
             side_roi_max_center_x=_env_float("MODEL__VISION__SIDE_ROI_MAX_CENTER_X", 400.0),
             static_track_min_frames=_env_int(
                 "MODEL__VISION__STATIC_TRACK_MIN_FRAMES", 24

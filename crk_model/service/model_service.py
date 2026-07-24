@@ -281,6 +281,13 @@ class ModelService:
                 "min_vote_count": self.settings.min_vote_count,
                 "min_vote_share": self.settings.min_vote_share,
                 "conf_floor": self.settings.vote_conf_floor,
+                # 카메라 conf 결합 가중 (MODEL__VISION__CONF_WEIGHT_* /
+                # CONF_COMMON_CLASS_BONUS) — 기본은 원본 운영값 0.60/0.40/0.2
+                "top_weight": self.settings.conf_weight_top,
+                "side_weight": self.settings.conf_weight_side,
+                "top_only_weight": self.settings.conf_weight_top_only,
+                "side_only_weight": self.settings.conf_weight_side_only,
+                "common_class_bonus": self.settings.conf_common_class_bonus,
                 # T2 held 트랙 강등 (MODEL__VISION__HELD_TRACK_DEMOTION)
                 "held_demotion": self.settings.held_track_demotion,
                 # 트랙릿 갭 4종 (0723 문서 §2 잔여, shadow-first — MODEL__

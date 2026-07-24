@@ -138,6 +138,41 @@ class TestOutcomesBound:
         assert Settings.from_env().outcomes_keep == 256
 
 
+class TestConfWeightWiring:
+    """카메라 conf 결합 가중의 env 배선 (MODEL__VISION__CONF_WEIGHT_*).
+
+    산식 자체는 test_perception이 검증 — 여기서는 env → Settings →
+    voting_params 경로가 끊기지 않는 것만 고정한다 (env 이름 오타 방지)."""
+
+    def test_from_env_parses_conf_weights(self, monkeypatch):
+        monkeypatch.setenv("MODEL__VISION__CONF_WEIGHT_TOP", "0.8")
+        monkeypatch.setenv("MODEL__VISION__CONF_WEIGHT_SIDE", "0.2")
+        monkeypatch.setenv("MODEL__VISION__CONF_WEIGHT_TOP_ONLY", "0.9")
+        monkeypatch.setenv("MODEL__VISION__CONF_WEIGHT_SIDE_ONLY", "0.3")
+        monkeypatch.setenv("MODEL__VISION__CONF_COMMON_CLASS_BONUS", "0.1")
+        s = Settings.from_env()
+        assert (s.conf_weight_top, s.conf_weight_side) == (0.8, 0.2)
+        assert (s.conf_weight_top_only, s.conf_weight_side_only) == (0.9, 0.3)
+        assert s.conf_common_class_bonus == 0.1
+
+    def test_settings_reach_voting_params(self):
+        svc = make_service(settings=Settings(
+            close_grace_s=0.0, conf_weight_top=0.8, conf_weight_side=0.2,
+            conf_weight_top_only=0.9, conf_weight_side_only=0.3,
+            conf_common_class_bonus=0.1,
+        ))
+        vp = svc.pipeline._voting_params
+        assert (vp["top_weight"], vp["side_weight"]) == (0.8, 0.2)
+        assert (vp["top_only_weight"], vp["side_only_weight"]) == (0.9, 0.3)
+        assert vp["common_class_bonus"] == 0.1
+
+    def test_defaults_match_original_operating_values(self):
+        vp = make_service().pipeline._voting_params
+        assert (vp["top_weight"], vp["side_weight"]) == (0.60, 0.40)
+        assert (vp["top_only_weight"], vp["side_only_weight"]) == (0.60, 0.40)
+        assert vp["common_class_bonus"] == 0.2
+
+
 # ---------------------------------------------------------------------------
 # 2) EventLog/settler prune on 새 세션 OPEN (I11 보존 확인)
 # ---------------------------------------------------------------------------
