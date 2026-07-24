@@ -2,6 +2,7 @@
 from crk_model.ledger.barrier import BarrierStatus, CausalBarrier
 from crk_model.ledger.cross_zone import CrossZonePenaltyConfig
 from crk_model.ledger.events import EventLog, TriggerEvent
+from crk_model.ledger.ghost_ledger import GhostLedgerConfig
 from crk_model.ledger.journal import EventJournal
 from crk_model.ledger.settler import CloseSettler, interim_summary
 from crk_model.ledger.shadow import ShadowSettlerRunner
@@ -13,6 +14,7 @@ __all__ = [
     "CrossZonePenaltyConfig",
     "EventJournal",
     "EventLog",
+    "GhostLedgerConfig",
     "ShadowSettlerRunner",
     "TriggerEvent",
     "interim_summary",

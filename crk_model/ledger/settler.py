@@ -31,6 +31,7 @@ from crk_model.ledger.cross_zone import (
     apply_cross_zone_penalty,
 )
 from crk_model.ledger.events import EventLog, TriggerEvent
+from crk_model.ledger.ghost_ledger import GhostLedgerConfig, apply_ghost_demotion
 
 
 class _Basket:
@@ -149,6 +150,9 @@ class CloseSettler:
         default_profile: SensorProfile = REFRIGERATOR,
         *,
         cross_zone: CrossZonePenaltyConfig | None = None,
+        ghost: GhostLedgerConfig | None = None,
+        # 세션 고스트 원장 (0723 이슈 #17 P1, ledger/ghost_ledger.py) —
+        # 기본 shadow (검출·시뮬레이션 notes만). active 승격은 라벨 실측 후.
         # 교차존 재판정(④~⑥)은 allowlist가 필요하다 — ModelService가 세션
         # 스냅샷 provider(ActiveProductStore)를 주입한다. None이면 페널티
         # 패스 비활성 (기존 테스트/직접 생성 하위호환).
@@ -157,6 +161,11 @@ class CloseSettler:
         # 냉동 close 재solve의 개수당 게이트 가산(g) — 판정층 gate_n과 동일
         # 원칙 (설계 3a, docs/0722_issue16_arbitration_design.md). I3 게이트를
         # 쓰는 두 지점(판정·정산)이 같은 산식을 유지해야 한다. 0 = flat 게이트.
+        vision_combo: bool = True,
+        # 0723 이슈 #17: 단일 종 ×N 스냅(N≥2)·게이트 실패 시, 존의 자격 표를
+        # 받은 2종 조합이 게이트 안에서 delta를 설명하면 조합을 우선한다
+        # ("무게=거부권, 선택=vision" — 0722 중재 설계와 같은 원칙).
+        # MODEL__CLOSE__VISION_COMBO=0으로 비활성.
     ):
         self.error_policy = error_policy
         # zone이 profiles dict에 없을 때의 폴백 프로파일 (cabinet_type 이식) —
@@ -164,8 +173,10 @@ class CloseSettler:
         # 동작(REFRIGERATOR)과 동일한 하위호환.
         self.default_profile = default_profile
         self.cross_zone = cross_zone or CrossZonePenaltyConfig()
+        self.ghost = ghost or GhostLedgerConfig()
         self._products_provider = active_products_provider
         self.count_unit_slack = count_unit_slack
+        self.vision_combo = vision_combo
         self._finalized: dict[str, FinalizedSettlement] = {}
 
     def settle(
@@ -180,6 +191,17 @@ class CloseSettler:
 
         notes: list[str] = []
         ok = _ok_events(events)
+        # 0723 세션 고스트 원장 — cross_zone보다 먼저: active에서 유령 후보를
+        # 강등해 두면 cross_zone 재판정의 채택 후보에서도 밀려난다 (ses-11).
+        if self.ghost.mode != "off" and self._products_provider is not None:
+            ok = apply_ghost_demotion(
+                ok,
+                profiles,
+                tuple(self._products_provider()),
+                self.ghost,
+                notes,
+                self.default_profile,
+            )
         # 0711 교차존 비전 오염 페널티 (CLOSE 2차 패스) — 워터마크(F8) 덕분에
         # 이 시점에는 늦게 도착한 연장 병합 이벤트까지 전부 EventLog에 있다.
         # 잠정 판정은 그대로 두고 확정 입력(ok 이벤트의 judgment)만 보정한다.
@@ -339,14 +361,38 @@ class CloseSettler:
                 continue
             kinds = b.items()
             if len(kinds) == 1:
-                p, _c = kinds[0]
+                p, c_inc = kinds[0]
                 count = round(-net / p.unit_weight) if p.unit_weight > 0 else 0
                 # I3 게이트 — n-스케일 (설계 3a): DB 편차·오염은 개수 비례 누적
                 gate_n = gate + self.count_unit_slack * max(0, count - 1)
-                if (
+                snap_ok = (
                     1 <= count <= p.stock_qty  # I12
                     and abs(-net - count * p.unit_weight) <= gate_n  # I3
-                ):
+                )
+                # 0723 이슈 #17 (7회 반복 실사고: 3+44 취출 → 44×4 스냅):
+                # 무게 잔차만으로는 게이트 안 동률인 두 가설(단일 종 ×N vs
+                # 2종 조합)을 못 가른다 — 그때의 선택권은 vision("무게=거부권,
+                # 선택=vision"). 스냅이 트리거 증분 개수를 **부풀리는** 경우
+                # (판정은 c_inc개만 봤는데 무게가 count개를 요구 — 의심 신호)
+                # 와 게이트 실패에 한해, 존의 자격 표를 받은 2종 조합이 게이트
+                # 안에서 net을 설명하면 조합을 우선. 판정·무게가 일치하는
+                # 정상 스냅(count ≤ 증분)은 조합 탐색 자체를 안 한다.
+                combo = (
+                    self._vision_combo(zone, -net, gate, events, {p.class_id: c_inc})
+                    if self.vision_combo
+                    and ((count >= 2 and count > c_inc) or not snap_ok)
+                    else None
+                )
+                if combo is not None:
+                    for pid in list(b.counts):
+                        b.set_count(pid, 0)
+                    for prod, n in combo:
+                        b.add(prod, n)
+                    notes.append(
+                        f"freezer_close_resolve_combo:zone{zone}:"
+                        + ",".join(f"{prod.product_id}={n}" for prod, n in combo)
+                    )
+                elif snap_ok:
                     b.set_count(p.product_id, count)
                     notes.append(f"freezer_close_resolve:zone{zone}:{p.product_id}={count}")
                 else:
@@ -354,6 +400,73 @@ class CloseSettler:
                     notes.append(f"freezer_close_gate_failed:zone{zone}:keep_incremental")
             elif len(kinds) > 1:
                 notes.append(f"freezer_close_multi_kind:zone{zone}:keep_incremental")
+
+    # 조합의 각 클래스가 요구하는 최소 자격 표 수 — 변위 몰수를 통과한 표가
+    # 이만큼 있어야 "vision이 그 클래스를 봤다"로 친다 (유령 스파이크 차단).
+    _COMBO_VOTE_FLOOR = 3
+
+    def _vision_combo(
+        self,
+        zone: int,
+        target: float,
+        gate: float,
+        events: Sequence[TriggerEvent],
+        incremental: Mapping[int, int],
+    ) -> tuple[tuple[ActiveProduct, int], ...] | None:
+        """단일 종 ×N 스냅의 비전 교차 검증 대안: 이 존 removal 이벤트들에서
+        자격 표(≥ _COMBO_VOTE_FLOOR)를 받은 서로 다른 2종의 (n_A, n_B) 조합 중
+        |target − (n_A·w_A + n_B·w_B)| ≤ gate_n(n_A+n_B)인 것을 찾는다.
+
+        선택 기준: 커버한 표 합 최대 → 트리거 증분(incremental: class_id→개수)
+        과의 편차 최소 → 잔차 최소 → 총 개수 최소. 잔차를 1순위로 두지 않는
+        이유가 이 기제의 존재 이유다 — 게이트 안이면 무게는 이미 거부권을
+        행사하지 않은 것이고, 3+44(잔차 8.5) vs 44×4(잔차 0)의 선택은 c3의
+        실존 표·판정 증거가 해야 한다. 증분 편차 항은 같은 2종 안에서 개수
+        배분이 갈릴 때(27×3+30×1 vs 27×1+30×4) 트리거 판정이 실제로 본
+        개수를 존중한다. I12(재고 상한)·I3(게이트) 준수."""
+        if self._products_provider is None:
+            return None
+        votes: dict[int, int] = {}
+        for e in events:
+            if e.zone != zone or e.delta_weight >= 0 or e.status != "ok":
+                continue
+            for c in e.vision_candidates:
+                if c.class_id > 0 and c.vote_count >= self._COMBO_VOTE_FLOOR:
+                    votes[c.class_id] = max(votes.get(c.class_id, 0), c.vote_count)
+        if len(votes) < 2:
+            return None
+        products = [
+            p
+            for p in self._products_provider()
+            if p.class_id in votes and p.unit_weight > 0 and p.stock_qty > 0
+        ]
+        best: tuple[tuple, tuple[tuple[ActiveProduct, int], ...]] | None = None
+        for i, pa in enumerate(products):
+            for pb in products[i + 1:]:
+                if pa.class_id == pb.class_id:
+                    continue
+                for na in range(1, min(pa.stock_qty, 6) + 1):
+                    for nb in range(1, min(pb.stock_qty, 6) + 1):
+                        total = na + nb
+                        residual = abs(
+                            target - (na * pa.unit_weight + nb * pb.unit_weight)
+                        )
+                        if residual > gate + self.count_unit_slack * (total - 1):
+                            continue  # I3
+                        combo_counts = {pa.class_id: na, pb.class_id: nb}
+                        deviation = sum(
+                            abs(combo_counts.get(cid, 0) - incremental.get(cid, 0))
+                            for cid in set(combo_counts) | set(incremental)
+                        )
+                        score = (
+                            votes[pa.class_id] + votes[pb.class_id],
+                            -deviation,
+                            -residual,
+                            -total,
+                        )
+                        if best is None or score > best[0]:
+                            best = (score, ((pa, na), (pb, nb)))
+        return best[1] if best else None
 
 
 def interim_summary(

@@ -35,6 +35,7 @@ from crk_model.judgment.strategies import FreezerVisionFirstStrategy
 from crk_model.ledger.archive import SessionArchive
 from crk_model.ledger.cross_zone import CrossZonePenaltyConfig
 from crk_model.ledger.events import EventLog
+from crk_model.ledger.ghost_ledger import GhostLedgerConfig
 from crk_model.ledger.journal import EventJournal
 from crk_model.ledger.settler import CloseSettler
 from crk_model.ledger.shadow import ShadowSettlerRunner
@@ -124,6 +125,13 @@ class ModelService:
             source_conf_min=self.settings.cross_zone_source_conf_min,
         )
         products_provider = lambda: self.snapshots.snapshot().products  # noqa: E731
+        # 세션 고스트 원장 (0723 이슈 #17 P1) — 기본 shadow, 라벨 실측 후 승격
+        ghost = GhostLedgerConfig(
+            mode=self.settings.ghost_mode,
+            min_zones=self.settings.ghost_min_zones,
+            vote_floor=self.settings.ghost_vote_floor,
+            alpha=self.settings.ghost_alpha,
+        )
         # 판정(pipeline)·정산(settler)·잠정 집계(gateway interim)의 tolerance
         # 단일 소스 원칙: 존 미지정 시 폴백 프로파일을 세 경로 모두 같은 값으로
         # 주입한다 (cabinet_type=freezer인데 정산만 냉장 ±3g로 계산되는 불일치 방지).
@@ -131,8 +139,10 @@ class ModelService:
             self.settings.error_policy,
             default_profile=self._default_profile,
             cross_zone=cross_zone,
+            ghost=ghost,
             active_products_provider=products_provider,
             count_unit_slack=self.settings.judgment_count_unit_slack,
+            vision_combo=self.settings.close_vision_combo,
         )
         # Phase 2 (L6 ②): 페널티 OFF primary + 페널티 ON shadow 병행 — diff만
         # 기록해 개선 방향을 검증한 뒤 Phase 3에서 PENALTY_ENABLED로 승격한다.
@@ -150,8 +160,10 @@ class ModelService:
                     alpha=cross_zone.alpha,
                     source_conf_min=cross_zone.source_conf_min,
                 ),
+                ghost=ghost,
                 active_products_provider=products_provider,
                 count_unit_slack=self.settings.judgment_count_unit_slack,
+                vision_combo=self.settings.close_vision_combo,
             )
             gateway_settler = ShadowSettlerRunner(self.settler, shadow)
             logger.info("[CONFIG] cross-zone penalty shadow settler enabled")

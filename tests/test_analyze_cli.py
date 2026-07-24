@@ -315,6 +315,40 @@ class TestAnalyze:
         out = render(report)
         assert "튜브 shadow" in out and "✓shadow" in out
 
+    def test_ghost_shadow_eval_and_gt_flag(self):
+        # 세션 고스트 원장 shadow (ghost_ledger): 정산 notes에서 검출 세션·
+        # 재판정 시뮬 라벨 정오·정답 오플래그(승격 보류 신호)를 집계한다.
+        helped = _doc(
+            "ses-ghost",
+            ground_truth=_gt({"zone": 1, "class_id": 40, "count": 2}),
+            zones=[{"zone": 1, "products": [
+                {"product_id": "P24", "class_id": 24, "unit_weight": 166.0,
+                 "count": 1},
+            ]}],
+            notes=[
+                "ghost_classes:class24@z1/4",
+                "zone1:ghost_shadow:billed=class24:would=class40x2",
+            ],
+        )
+        flagged = _doc(
+            "ses-flag",
+            ground_truth=_gt({"zone": 2, "class_id": 13, "count": 1}),
+            zones=[{"zone": 2, "products": [
+                {"product_id": "P13", "class_id": 13, "unit_weight": 189.0,
+                 "count": 1},
+            ]}],
+            notes=["ghost_classes:class13@z2/3"],
+        )
+        report = analyze([helped, flagged])
+        gh = report["ghost"]
+        assert gh["observed"] == 2
+        assert gh["labeled_eval"] == {
+            "shadow_correct": 1, "current_correct": 0, "both_wrong": 0,
+        }
+        assert gh["gt_flagged"] == [{"session": "ses-flag", "classes": [13]}]
+        out = render(report)
+        assert "고스트 shadow" in out and "ghost 오플래그" in out
+
     def test_none_take_label_counts_as_labeled(self):
         # label-session --none (10차 ses-12): 무취출 GT — 청구 0이면 정답,
         # 청구가 있으면 오답. 구 0x1 우회 라벨도 class 0 필터로 동일 취급.

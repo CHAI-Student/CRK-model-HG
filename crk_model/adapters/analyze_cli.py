@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -217,6 +218,20 @@ def analyze(docs: list[dict]) -> dict:
                 },
             },
         },
+        # 세션 고스트 원장 shadow (ledger/ghost_ledger.py, 0723 이슈 #17 P1):
+        # 정산 notes의 ghost_classes/ghost_shadow를 집계 — MODEL__GHOST__MODE
+        # =active 승격 게이트. gt_flagged(정답 클래스 오플래그)는 승격 보류
+        # 신호 (held_gt_flags와 동일 절차).
+        "ghost": {
+            "observed": 0,
+            "gt_flagged": [],
+            "shadow": [],
+            "labeled_eval": {
+                "shadow_correct": 0,
+                "current_correct": 0,
+                "both_wrong": 0,
+            },
+        },
     }
     tracklet_seen: set = set()  # 공유 영상 중복 제거 키
     for doc in docs:
@@ -262,6 +277,70 @@ def analyze(docs: list[dict]) -> dict:
                     self_billing["wrong"].append({"session": sid, "diffs": diffs})
                 else:
                     self_billing["correct"] += 1
+
+        # 세션 고스트 원장 shadow — 정산 notes에서 검출·시뮬레이션을 읽는다
+        session_notes = [n for n in (doc.get("notes") or []) if isinstance(n, str)]
+        gnote = next(
+            (n for n in session_notes if n.startswith("ghost_classes:")), None
+        )
+        if gnote is not None:
+            gh = report["ghost"]
+            gh["observed"] += 1
+            ghost_cids = {int(m) for m in re.findall(r"class(\d+)", gnote)}
+            if labeled:
+                gt_cids = {
+                    int(it["class_id"])
+                    for it in gt_items
+                    if it.get("class_id") is not None
+                }
+                flagged = sorted(ghost_cids & gt_cids)
+                if flagged:
+                    gh["gt_flagged"].append({"session": sid, "classes": flagged})
+            for n in session_notes:
+                m = re.match(r"zone(\d+):ghost_shadow:billed=([^:]+):would=(.+)", n)
+                if not m:
+                    continue
+                zone_n = int(m.group(1))
+                would_raw = m.group(3)
+                rec: dict = {
+                    "session": sid,
+                    "zone": zone_n,
+                    "billed_ghost": m.group(2),
+                    "would": would_raw,
+                }
+                if labeled and would_raw != "keep_original":
+                    zdoc = next(
+                        (
+                            z
+                            for z in doc.get("zones") or []
+                            if z.get("zone") == zone_n
+                        ),
+                        None,
+                    )
+                    billed_z = (
+                        _billed_multiset(zdoc.get("products") or [])
+                        if zdoc
+                        else []
+                    )
+                    if billed_z is not None:
+                        gt_z = _gt_multiset(gt_items, zone_n)
+                        would_items = sorted(
+                            (int(c), int(k))
+                            for c, k in re.findall(r"class(\d+)x(\d+)", would_raw)
+                        )
+                        # 주의: would는 트리거 재판정, billed는 존 최종 확정 —
+                        # 수준이 섞인 근사 비교다 (tube_eval과 동일 캐비앳).
+                        rec["ground_truth"] = gt_z
+                        rec["shadow_correct"] = would_items == gt_z
+                        rec["current_correct"] = billed_z == gt_z
+                        lv = gh["labeled_eval"]
+                        if rec["shadow_correct"] and not rec["current_correct"]:
+                            lv["shadow_correct"] += 1
+                        elif rec["current_correct"] and not rec["shadow_correct"]:
+                            lv["current_correct"] += 1
+                        elif not rec["current_correct"]:
+                            lv["both_wrong"] += 1
+                gh["shadow"].append(rec)
 
         for trig in doc.get("triggers") or []:
             zone = trig.get("zone")
@@ -720,6 +799,40 @@ def render(report: dict) -> str:
                     f"    {r['session']}/z{r['zone']}: "
                     f"현행 c{r['top_current']} → shadow c{r['top_shadow']}{mark}"
                 )
+
+    gh = report.get("ghost") or {}
+    if gh.get("observed"):
+        lines.append("")
+        lines.append(
+            f"--- 고스트 shadow (ghost_ledger — 검출 세션 {gh['observed']}건) ---"
+        )
+        for r in gh["gt_flagged"][:8]:
+            lines.append(
+                f"  ⚠ {r['session']}: 정답 클래스 {r['classes']}가 ghost 오플래그"
+                " — active 승격 보류 신호"
+            )
+        for r in gh["shadow"][:8]:
+            if "shadow_correct" in r:
+                mark = " ✓shadow" if r["shadow_correct"] else (
+                    " ✓현행" if r["current_correct"] else " 둘 다 ✗"
+                )
+            else:
+                mark = ""
+            lines.append(
+                f"  {r['session']}/z{r['zone']}: 과금된 유령 {r['billed_ghost']}"
+                f" → 재판정 {r['would']}{mark}"
+            )
+        lv = gh["labeled_eval"]
+        if any(lv.values()):
+            lines.append(
+                f"  라벨 정오: shadow만 정답 {lv['shadow_correct']} / "
+                f"현행만 정답 {lv['current_correct']} / 둘 다 오답 {lv['both_wrong']}"
+            )
+        if not gh["gt_flagged"]:
+            lines.append(
+                "  → 정답 오플래그 0 + shadow 우세 지속 시 MODEL__GHOST__MODE="
+                "active 승격 근거"
+            )
 
     lines.append("")
     lines.append("--- conformal 보정 (라벨된 정답 상품의 후보 통계) ---")

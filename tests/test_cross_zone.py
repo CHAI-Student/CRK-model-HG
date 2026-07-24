@@ -185,6 +185,40 @@ class TestCrossZonePenalty:
         assert any("zone1:cross_zone_penalty_gate_failed" in n for n in notes)
         assert out[0] is z2 and out[1] is z1  # 과금 무변경 — 관측만
 
+    def test_self_fit_strips_wrong_claimant(self):
+        # 10차 ses-1 실기 재구성 (GT z2:23, z3:27 — 동일측 동시 취출로 27이
+        # 양존 vision top): 존 간 잔차 비교만으로는 노이즈 낀 z3보다 z2가
+        # X=27의 면제를 받아 27이 양존 중복 과금된다. self-fit 자격 검사가
+        # "z2의 delta는 자기 후보 23을 5g 이상 명확히 더 잘 설명한다"로
+        # z2의 claimant 자격을 박탈 → 면제는 z3, z2는 재판정된다.
+        p27 = ActiveProduct("P27", "27", class_id=27, unit_weight=160.0,
+                            unit_price=1500, stock_qty=20)
+        p23 = ActiveProduct("P23", "23", class_id=23, unit_weight=176.0,
+                            unit_price=1500, stock_qty=20)
+        p13 = ActiveProduct("P13", "13", class_id=13, unit_weight=189.0,
+                            unit_price=2100, stock_qty=20)
+        z2 = event(
+            "s", 2, 100.0, judged(p27, conf=0.8), -172.5,  # 잔차 12.5 — 그러나 23이 3.5
+            candidates=[cand(27, conf=1.0, votes=22), cand(23, conf=0.8, votes=18),
+                        cand(13, conf=0.76, votes=9)],
+            change_ts=(100.0,),
+        )
+        z3 = event(
+            "s", 3, 101.0, judged(p27, conf=0.9), -145.0,  # 잔차 15 (freezer 노이즈)
+            candidates=[cand(27, conf=0.9, votes=30), cand(23, conf=0.3, votes=5)],
+            change_ts=(101.0,),
+        )
+        notes: list[str] = []
+        out = apply_cross_zone_penalty(
+            [z2, z3], {2: FREEZER, 3: FREEZER}, (p27, p23, p13), CFG, notes
+        )
+        # 잔차만 보면 z2(12.5) < z3(15)로 z2가 면제됐을 상황 — self-fit이 뒤집는다
+        assert any("zone3:cross_zone_mutual_exempt:class27" in n for n in notes)
+        assert out[1] is z3  # 진짜 소스 존은 원 판정 유지
+        assert [(pc.product.product_id, pc.count) for pc in out[0].judgment.products] == [
+            ("P23", 1)
+        ]
+
     def test_mutual_demotion_tie_keeps_both(self, bar170, bar178):
         # 잔차 동률이면 무게가 판별하지 못하는 것 — 양쪽 다 면제(원 판정
         # 유지), ④ 무게 모호성 게이트와 같은 "개입하지 않는" 방향.

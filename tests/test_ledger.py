@@ -1,9 +1,11 @@
 """ledger: 배리어(I17), 정산기(I11·I13·I14), 교차존, freezer close, shadow, I10."""
 import pytest
+from conftest import cand
 
 from crk_model.core.policy import ErrorSessionPolicy
 from crk_model.core.profiles import FREEZER, REFRIGERATOR
 from crk_model.core.types import (
+    ActiveProduct,
     InterimSummary,
     JudgmentResult,
     JudgmentStatus,
@@ -168,6 +170,101 @@ class TestCloseSettler:
         result = s.settle("s1", events, PROFILES)
         assert any("freezer_close_resolve" in n for n in result.notes)
         assert result.total_price == 5 * cola.unit_price
+
+
+class TestVisionComboResolve:
+    """0723 이슈 #17: freezer close 재solve의 단일 종 ×N 스냅 vs 비전 조합 중재.
+
+    실사고 7회 반복: z5에서 3(224g)+44(77.5g) 취출 → Δ가 44×4(310g)와 겹쳐
+    무게 잔차만으로 44×4 스냅 (c3의 자격 8표 무시). 게이트 안 동률의 선택은
+    vision — 자격 표를 받은 2종 조합을 우선한다."""
+
+    P44 = ActiveProduct(
+        "P44", "츄러스44", class_id=44, unit_weight=77.5, unit_price=1200, stock_qty=10
+    )
+    P3 = ActiveProduct(
+        "P3", "만두3", class_id=3, unit_weight=224.0, unit_price=3500, stock_qty=10
+    )
+    P27 = ActiveProduct(
+        "P27", "베이글27", class_id=27, unit_weight=156.0, unit_price=2000, stock_qty=10
+    )
+    P30 = ActiveProduct(
+        "P30", "브리또30", class_id=30, unit_weight=100.0, unit_price=1800, stock_qty=10
+    )
+
+    @staticmethod
+    def removal_with_cands(sid, zone, ts, product, count, delta, cands):
+        j = JudgmentResult(
+            JudgmentStatus.COMPLETE, (ProductCount(product, count),), 0.9, "strict"
+        )
+        return TriggerEvent(sid, zone, ts, delta, (), j, vision_candidates=tuple(cands))
+
+    def settler(self, *products):
+        return CloseSettler(active_products_provider=lambda: products)
+
+    def test_combo_beats_multiple_snap(self):
+        # 3+44 취출: 잔차는 44×4(0g) < 3+44(8.5g)지만 둘 다 게이트 안 —
+        # c3의 자격 8표가 조합을 고른다 (ses-8-1784812080 재구성).
+        s = self.settler(self.P44, self.P3)
+        e = self.removal_with_cands(
+            "s1", 9, 1.0, self.P44, 1, -310.0,
+            [cand(44, conf=0.95, votes=14), cand(3, conf=0.53, votes=8)],
+        )
+        result = s.settle("s1", [e], PROFILES)
+        billed = {pc.product.product_id: pc.count for z in result.zones for pc in z.products}
+        assert billed == {"P44": 1, "P3": 1}
+        assert any("freezer_close_resolve_combo:zone9" in n for n in result.notes)
+
+    def test_combo_requires_vote_floor(self):
+        # 2번째 클래스가 자격 표 미달(<3표)이면 조합 자체가 성립 안 함 —
+        # 유령 스파이크로 진짜 ×N 스냅이 무너지지 않는다.
+        s = self.settler(self.P44, self.P3)
+        e = self.removal_with_cands(
+            "s1", 9, 1.0, self.P44, 1, -310.0,
+            [cand(44, conf=0.95, votes=14), cand(3, conf=0.4, votes=2)],
+        )
+        result = s.settle("s1", [e], PROFILES)
+        billed = {pc.product.product_id: pc.count for z in result.zones for pc in z.products}
+        assert billed == {"P44": 4}
+        assert any("freezer_close_resolve:zone9:P44=4" in n for n in result.notes)
+
+    def test_combo_rescues_gate_failure(self):
+        # ses-9-1784800090 재구성: 27×3+30 취출 net −560, 단일 종 27×4는
+        # 잔차 64로 게이트 실패(증분 27×3 유지가 기존 동작) — 조합 27×3+30×1
+        # (잔차 8)이 구제한다.
+        s = self.settler(self.P27, self.P30)
+        e = self.removal_with_cands(
+            "s1", 9, 1.0, self.P27, 3, -560.0,
+            [cand(27, conf=0.9, votes=30), cand(30, conf=0.8, votes=12)],
+        )
+        result = s.settle("s1", [e], PROFILES)
+        billed = {pc.product.product_id: pc.count for z in result.zones for pc in z.products}
+        assert billed == {"P27": 3, "P30": 1}
+        assert any("freezer_close_resolve_combo:zone9" in n for n in result.notes)
+
+    def test_single_count_snap_untouched(self):
+        # N=1 정상 스냅은 조합 탐색 자체를 하지 않는다 (기존 동작 보존).
+        s = self.settler(self.P44, self.P3)
+        e = self.removal_with_cands(
+            "s1", 9, 1.0, self.P44, 1, -77.0,
+            [cand(44, conf=0.95, votes=14), cand(3, conf=0.53, votes=8)],
+        )
+        result = s.settle("s1", [e], PROFILES)
+        billed = {pc.product.product_id: pc.count for z in result.zones for pc in z.products}
+        assert billed == {"P44": 1}
+        assert not any("freezer_close_resolve_combo" in n for n in result.notes)
+
+    def test_kill_switch(self):
+        s = CloseSettler(
+            active_products_provider=lambda: (self.P44, self.P3), vision_combo=False
+        )
+        e = self.removal_with_cands(
+            "s1", 9, 1.0, self.P44, 1, -310.0,
+            [cand(44, conf=0.95, votes=14), cand(3, conf=0.53, votes=8)],
+        )
+        result = s.settle("s1", [e], PROFILES)
+        billed = {pc.product.product_id: pc.count for z in result.zones for pc in z.products}
+        assert billed == {"P44": 4}
 
 
 class TestInterimAndShadow:

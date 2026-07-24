@@ -123,8 +123,47 @@ def _judgment_residual(e: TriggerEvent) -> float | None:
     return abs(abs(e.delta_weight) - expected)
 
 
+# 센서 보증 분해능 (C3): 5g 미만 잔차 차이는 물리적으로 무의미 — self-fit
+# 비교에서 이보다 명확히 우세할 때만 "자기 무게가 대안을 선호한다"고 본다.
+_SELF_FIT_MARGIN_G = 5.0
+
+
+def _self_fit_prefers_alternative(
+    e: TriggerEvent,
+    cid: int,
+    active_products: Sequence[ActiveProduct],
+    max_count: int = 6,
+) -> bool:
+    """상호 강등 가드의 면제 자격 검사 (10차 ses-1: z2 Δ-172.5가 자기 후보
+    23(잔차 3.5)을 훨씬 잘 설명하는데도 존 간 잔차 비교만으로 공유 클래스
+    27의 면제를 받아 27이 양존 중복 과금됐다).
+
+    자기 존의 delta가 X(cid)보다 **다른 vision 후보**를 분해능 마진(C3, 5g)
+    이상 명확히 잘 설명하면, 이 존은 X의 진짜 소스 claimant 자격이 없다 —
+    잔차 크기와 무관하게 면제에서 밀려난다. 다품목 판정은 잔차 비교가
+    단일 종 대안과 이종 비교라 중립(False) — 기존 동작 유지."""
+    if len(e.judgment.products) != 1:
+        return False
+    r_x = _judgment_residual(e)
+    if r_x is None:
+        return False
+    target = abs(e.delta_weight)
+    candidate_classes = {c.class_id for c in e.vision_candidates} - {cid}
+    best_alt: float | None = None
+    for p in active_products:
+        if p.class_id not in candidate_classes or p.stock_qty <= 0 or p.unit_weight <= 0:
+            continue
+        for n in range(1, min(p.stock_qty, max_count) + 1):
+            r = abs(target - n * p.unit_weight)
+            if best_alt is None or r < best_alt:
+                best_alt = r
+    return best_alt is not None and best_alt + _SELF_FIT_MARGIN_G <= r_x
+
+
 def _mutual_exemptions(
-    events: Sequence[TriggerEvent], cfg: CrossZonePenaltyConfig
+    events: Sequence[TriggerEvent],
+    cfg: CrossZonePenaltyConfig,
+    active_products: Sequence[ActiveProduct] = (),
 ) -> set[tuple[int, int]]:
     """상호 강등 가드 (8차 ses-3): 두 존이 같은 정체성 X를 판정했고 오염
     창이 **양방향**으로 겹치면, 각자가 상대를 소스로 X를 강등해 X가 정산에서
@@ -164,7 +203,15 @@ def _mutual_exemptions(
                 continue  # 양방향 겹침이 아니면 상호 강등이 성립하지 않는다
             r1, r2 = _judgment_residual(e1), _judgment_residual(e2)
             for cid in shared:
-                if r1 is None or r2 is None or r1 == r2:
+                # self-fit 자격 (10차 ses-1): 자기 delta가 다른 후보를 명확히
+                # 선호하는 존은 X의 claimant 자격이 없다 — 자격 있는 존이
+                # 잔차 비교 없이 이긴다. 둘 다 무자격이면 기존 잔차 비교로
+                # 폴백 (상호 소멸 방지 불변식 유지 — 8차 ses-3).
+                unfit1 = _self_fit_prefers_alternative(e1, cid, active_products)
+                unfit2 = _self_fit_prefers_alternative(e2, cid, active_products)
+                if unfit1 != unfit2:
+                    exempt.add(((e2 if unfit1 else e1).zone, cid))
+                elif r1 is None or r2 is None or r1 == r2:
                     exempt.add((e1.zone, cid))
                     exempt.add((e2.zone, cid))
                 elif r1 < r2:
@@ -240,7 +287,7 @@ def apply_cross_zone_penalty(
     if not cfg.enabled or not active_products:
         return list(events)
     router = router or JudgmentRouter()
-    exempt = _mutual_exemptions(events, cfg)
+    exempt = _mutual_exemptions(events, cfg, active_products)
     out: list[TriggerEvent] = []
     for e in events:
         replaced = _repass_event(

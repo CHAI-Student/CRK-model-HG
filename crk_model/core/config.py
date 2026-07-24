@@ -101,6 +101,10 @@ class Settings:
     # 추론이 close_timeout보다 길 수 있어 별도의 넉넉한 stall 상한을 적용한다.
     # 이 상한 초과 = 워커 사망/행 (I17 fail-closed 유지)
     worker_stall_timeout_s: float = 120.0
+    # 0723 이슈 #17: freezer close 재solve의 단일 종 ×N 스냅(N≥2)·게이트 실패
+    # 시, 존의 자격 표를 받은 2종 조합이 게이트 안에서 net을 설명하면 조합
+    # 우선 ("무게=거부권, 선택=vision"). settler._vision_combo 참조.
+    close_vision_combo: bool = True
     # D8: 기본 OFF
     batch_size: int = 1
     # freezer 프로파일을 적용할 존 목록 (예: "9,10") — cabinet_type이 정하는
@@ -293,6 +297,14 @@ class Settings:
     # soft 페널티 계수 (α) / 페널티 소스 최소 신뢰도 (θ) — Phase 1 계측으로 보정
     cross_zone_alpha: float = 0.5
     cross_zone_source_conf_min: float = 0.35
+    # ---- 세션 고스트 원장 (0723 이슈 #17 P1, ledger/ghost_ledger.py) ----
+    # 옷 프린트 유령 표: 여러 존에서 자격 표를 얻고도 세션 내 무게 뒷받침이
+    # 0인 클래스를 CLOSE 2차 패스에서 강등. shadow(기본)는 notes 기록만 —
+    # active 승격은 analyze-sessions 라벨 대조(정답 클래스 오플래그율) 후.
+    ghost_mode: str = "shadow"
+    ghost_min_zones: int = 2
+    ghost_vote_floor: int = 3
+    ghost_alpha: float = 0.5
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -301,6 +313,7 @@ class Settings:
             close_timeout_s=_env_float("MODEL__CLOSE__BARRIER_TIMEOUT_S", 10.0),
             close_grace_s=_env_float("MODEL__CLOSE__GRACE_S", 3.0),
             worker_stall_timeout_s=_env_float("MODEL__CLOSE__WORKER_STALL_TIMEOUT_S", 120.0),
+            close_vision_combo=_env_bool("MODEL__CLOSE__VISION_COMBO", True),
             batch_size=_env_int("MODEL__VISION__BATCH_SIZE", 1),
             freezer_zones=_env_zones("MODEL__ZONES__FREEZER"),
             cabinet_type=_env_cabinet_type("MODEL__MACHINE__CABINET_TYPE", "refrigerated"),
@@ -421,4 +434,10 @@ class Settings:
             cross_zone_source_conf_min=_env_float(
                 "MODEL__CROSS_ZONE__SOURCE_CONF_MIN", 0.35
             ),
+            ghost_mode=_env_choice(
+                "MODEL__GHOST__MODE", "shadow", ("off", "shadow", "active")
+            ),
+            ghost_min_zones=_env_int("MODEL__GHOST__MIN_ZONES", 2),
+            ghost_vote_floor=_env_int("MODEL__GHOST__VOTE_FLOOR", 3),
+            ghost_alpha=_env_float("MODEL__GHOST__ALPHA", 0.5),
         )
