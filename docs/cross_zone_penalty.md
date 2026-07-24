@@ -1,5 +1,11 @@
 # 교차존 비전 오염 페널티 (cross-zone vision penalty)
 
+> **상태 (2026-07-24):** Phase 3 승격 확정으로 Phase 2 shadow 장치는 코드에서
+> **삭제됨** — `MODEL__CROSS_ZONE__SHADOW` env는 더 이상 읽히지 않고
+> `crk_model/ledger/shadow.py`(`ShadowSettlerRunner`)도 없다. §6 Phase 2와
+> §8 표의 해당 행은 historical 기록이다. 현행 스위치는
+> `MODEL__CROSS_ZONE__PENALTY_ENABLED`(기본 1)뿐.
+
 > 정식 문서 승격 (2026-07-21): Phase 3(PENALTY_ENABLED 기본 ON) 승격에 따라
 > 구 `docs/0711_idea.md`를 무날짜 정식 문서로 이관. 내용은 원문 유지.
 >
@@ -286,7 +292,7 @@ re-solve의 I3 원칙과 동일한 태도).
    세션 아카이브(YAML) 기록. 실기에서 "타 존 오염 창 겹침"이 실제로 얼마나
    발생하는지, 그때 vision candidates에 타 존 상품이 실제로 등장하는지
    빈도를 정량화.
-2. **Phase 2 — shadow 검증**: `MODEL__CROSS_ZONE__SHADOW=1`
+2. **Phase 2 — shadow 검증** *(historical — 장치는 2026-07-24 삭제)*: `MODEL__CROSS_ZONE__SHADOW=1`
    ModelService가 페널티 OFF primary + 페널티 ON shadow를
    `ShadowSettlerRunner`로 병행 배선한다. diff는 메모리(`runner.diffs`)와
    ops 로그 `[OPS][SHADOW_DIFF]` 양쪽에 기록 — 실기 로그에서 바로 수집.
@@ -334,7 +340,7 @@ re-solve의 I3 원칙과 동일한 태도).
 | `crk_model/adapters/http_app.py` | `/trigger` payload의 optional `change_timestamps` 수용 (`_parse_ts` 정규화) |
 | `crk_model/service/model_service.py` | Settings→config 배선, allowlist provider 주입, Phase 2 shadow 배선, prune 경로 정리 |
 | `crk_model/ledger/journal.py` / `archive.py` | change_timestamps 직렬화 (Phase 1 계측). 구버전 저널 라인은 `dict.get` 폴백으로 파싱 호환 |
-| `crk_model/ledger/shadow.py` | `ShadowSettlerRunner`에 `prune()` 위임(캐시 누수 방지) + `[OPS][SHADOW_DIFF]` 로깅 |
+| `crk_model/ledger/shadow.py` *(2026-07-24 삭제)* | `ShadowSettlerRunner`에 `prune()` 위임(캐시 누수 방지) + `[OPS][SHADOW_DIFF]` 로깅 |
 | `crk_model/core/config.py` | `MODEL__CROSS_ZONE__*` env 7종 (아래) |
 | `.env.example` | Phase 1→2→3 전환 절차 문서화 |
 | `tests/test_cross_zone.py` (신규) | §1 타임라인 재현(냉동 170g/178g 오판→보정), 삼중 안전장치(③θ/④모호성/⑥게이트), "이기면 인정", 냉장 미발동, 저널 왕복 — 15건 |
@@ -345,7 +351,7 @@ re-solve의 I3 원칙과 동일한 태도).
 | env | 기본 | 의미 |
 |---|---|---|
 | `MODEL__CROSS_ZONE__PENALTY_ENABLED` | 0 | Phase 3 — primary 정산기에 페널티 적용 |
-| `MODEL__CROSS_ZONE__SHADOW` | 0 | Phase 2 — 페널티 ON 정산기를 shadow 병행, diff만 기록 |
+| `MODEL__CROSS_ZONE__SHADOW` *(2026-07-24 삭제)* | 0 | Phase 2 — 페널티 ON 정산기를 shadow 병행, diff만 기록 |
 | `MODEL__CROSS_ZONE__REPLAY_S` | 4.0 | 카메라 프리롤 (CRK-CAMERA `replay_duration`과 단일 소스) |
 | `MODEL__CROSS_ZONE__TRIGGER_S` | 3.0 | change 후 저장 지속 (카메라 trigger duration) |
 | `MODEL__CROSS_ZONE__EPSILON_S` | 0.3 | IO-BOARD 감지 지연 마진 (ε) |

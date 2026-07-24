@@ -1,5 +1,9 @@
 # 프리롤 배경 억제(Baseline)와 판정 불변식 I-V
 
+> **상태 (2026-07-24):** §2의 baseline 필터는 2026-07-24 코드에서 **삭제됨** — 모션 변위 증거가
+> 대체(issue #16 실기: top 무력·side 폭주). I-V 판정 원칙과 env 튜닝 다이어그램(§5)은
+> 현행 정본으로 유지.
+
 > 2026-07-21~22 작성. 이슈 #14(quick take out)·#15(freezer vision first) 대응으로
 > 들어간 세 갈래 변경 — ① perception의 baseline 억제 필터, ② judgment의
 > 불변식 I-V(FreezerVisionFirst 재설계 + freezer 체인 차단), ③ env 튜닝 노브 —

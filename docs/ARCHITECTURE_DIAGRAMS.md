@@ -2,6 +2,9 @@
 
 # CRK-Model 추론·결제 로직 시각화 (재작성용 참조 문서)
 
+> **상태 (2026-07-24):** 원본 CRK-model 구조의 참조용 시각화 — 재설계의 설계 입력(2026-07-10).
+> HG **현행** 구조를 서술하는 문서가 아니다. 현행 아키텍처는 README를 참조.
+
 > 목적: `engine/decision_engine.py`(10.4k L) 와 `session/*`(집계·결제) 를 **처음부터 다시 짜기** 위해
 현재 로직을 한눈에 파악하기 위한 다이어그램 모음.
 모든 다이어그램은 **Mermaid** — GitHub / VS Code(Markdown Preview Mermaid) 에서 컴파일 없이 바로 렌더링됩니다.

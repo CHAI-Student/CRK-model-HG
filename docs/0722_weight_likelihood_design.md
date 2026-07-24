@@ -2,6 +2,12 @@
 
 상태: **Phase 1 (shadow) 구현 완료** (2026-07-23, `judgment/likelihood.py` —
 fix_logs.md 해당 항목 참조). Phase 2/3은 아카이브 실측 후.
+
+> **주 (2026-07-24):** 본문이 σ_d 소스로 지목한 `trace.loadcell_shadow.delta_std`
+> 는 BOCPD primary 승격 확정에 따른 shadow 장치 삭제로 더 이상 존재하지
+> 않는다 — 현재 σ_d는 None(라이브러리 기본 σ) 고정이며, Phase 2 승격 시
+> primary `BocpdLoadcellAnalyzer`에서 직접 뽑는 경로로 재연결한다
+> (`service/pipeline.py` `_likelihood_shadow` 주석).
 근거: claudedocs/research_judgment_performance_20260722.md
 §1(FAIM/Grab), issue #16 실기 4건, docs/0722_issue16_arbitration_design.md.
 
