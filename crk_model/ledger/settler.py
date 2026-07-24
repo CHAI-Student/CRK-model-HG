@@ -372,15 +372,17 @@ class CloseSettler:
                 # 0723 이슈 #17 (7회 반복 실사고: 3+44 취출 → 44×4 스냅):
                 # 무게 잔차만으로는 게이트 안 동률인 두 가설(단일 종 ×N vs
                 # 2종 조합)을 못 가른다 — 그때의 선택권은 vision("무게=거부권,
-                # 선택=vision"). 스냅이 트리거 증분 개수를 **부풀리는** 경우
-                # (판정은 c_inc개만 봤는데 무게가 count개를 요구 — 의심 신호)
-                # 와 게이트 실패에 한해, 존의 자격 표를 받은 2종 조합이 게이트
-                # 안에서 net을 설명하면 조합을 우선. 판정·무게가 일치하는
-                # 정상 스냅(count ≤ 증분)은 조합 탐색 자체를 안 한다.
+                # 선택=vision"). N≥2 스냅·게이트 실패에 한해, 존의 자격 표를
+                # 받은 2종 조합이 게이트 안에서 net을 설명하면 조합을 우선.
+                # ※ 11차 ses-1 정정: 초기 구현의 "count > 증분일 때만" 가드는
+                # 헛다리였다 — freezer에서는 트리거 판정의 count 자체가 무게
+                # 산정(I12)이라 증분==스냅이어도 독립 증거가 아니다 (ses-1:
+                # 판정이 이미 44×4로 부풀려 c_inc=4=count → 탐색 자체가 안 됨).
+                # N=1 정상 스냅만 탐색 제외. 진짜 ×N의 보호는 조합 게이트
+                # (2종 모두 자격 표 ≥3 + 잔차 ≤ gate_n)가 담당한다.
                 combo = (
                     self._vision_combo(zone, -net, gate, events, {p.class_id: c_inc})
-                    if self.vision_combo
-                    and ((count >= 2 and count > c_inc) or not snap_ok)
+                    if self.vision_combo and (count >= 2 or not snap_ok)
                     else None
                 )
                 if combo is not None:

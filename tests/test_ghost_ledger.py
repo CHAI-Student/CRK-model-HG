@@ -95,6 +95,50 @@ class TestDetection:
     def test_single_zone_is_not_ghost(self):
         assert detect_ghosts([ghost_billed_event()], GhostLedgerConfig()) == {}
 
+    def test_shared_episode_video_is_single_appearance(self):
+        # 11차 ses-2 재구성: 동시·연쇄 취출의 존 트리거들이 연장 병합된 같은
+        # 에피소드 영상을 공유하면 후보 집합이 동일해 모든 클래스가 공짜로
+        # "2존 등장"이 된다 (정답 27·30 오플래그 원인). 같은 video_paths는
+        # 존 breadth 증거가 아니다 — 에피소드 ≥2 요건으로 걸러진다.
+        shared = (("top", "/ep1_top.avi"), ("side", "/ep1_side.avi"))
+        j5 = JudgmentResult(
+            JudgmentStatus.COMPLETE, (ProductCount(R30, 1),), 0.9, "strict"
+        )
+        j3 = JudgmentResult(
+            JudgmentStatus.PARTIAL, (ProductCount(G13, 1),), 0.4,
+            "vision_first_identity_partial",
+        )
+        cands = [cand(13, conf=0.7, votes=12), cand(27, conf=1.0, votes=24),
+                 cand(30, conf=0.9, votes=20)]
+        e5 = TriggerEvent("s", 5, 1.0, -79.0, (), j5,
+                          vision_candidates=tuple(cands), video_paths=shared)
+        e3 = TriggerEvent("s", 3, 2.0, -150.0, (), j3,
+                          vision_candidates=tuple(cands), video_paths=shared)
+        # 13·27 모두 2존(z3/z5) 등장 + 무게 뒷받침 0이지만 같은 에피소드 —
+        # 유령 아님. (30은 COMPLETE 뒷받침으로 원래 제외)
+        assert detect_ghosts([e5, e3], GhostLedgerConfig()) == {}
+
+    def test_distinct_episode_videos_still_count(self):
+        # 서로 다른 에피소드 영상에서 반복 등장하면 breadth 성립 (기존 정의).
+        j = JudgmentResult(
+            JudgmentStatus.PARTIAL, (ProductCount(G13, 1),), 0.4,
+            "vision_first_identity_partial",
+        )
+        e1 = TriggerEvent(
+            "s", 1, 1.0, -176.0, (), j,
+            vision_candidates=(cand(13, conf=0.7, votes=12),),
+            video_paths=(("top", "/ep1.avi"),),
+        )
+        e2 = TriggerEvent(
+            "s", 2, 2.0, -100.0, (),
+            JudgmentResult(JudgmentStatus.COMPLETE, (ProductCount(R30, 1),), 0.9,
+                           "strict"),
+            vision_candidates=(cand(13, conf=0.7, votes=9),
+                               cand(30, conf=0.9, votes=20)),
+            video_paths=(("top", "/ep2.avi"),),
+        )
+        assert detect_ghosts([e1, e2], GhostLedgerConfig()) == {13: (1, 2)}
+
     def test_vote_floor_filters_low_vote_appearance(self):
         j = JudgmentResult(
             JudgmentStatus.COMPLETE, (ProductCount(R30, 1),), 0.9, "strict"

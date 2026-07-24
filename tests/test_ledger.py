@@ -215,6 +215,21 @@ class TestVisionComboResolve:
         assert billed == {"P44": 1, "P3": 1}
         assert any("freezer_close_resolve_combo:zone9" in n for n in result.notes)
 
+    def test_combo_fires_when_trigger_already_inflated(self):
+        # 11차 ses-1 재구성: freezer 트리거 판정의 count는 무게 산정(I12)이라
+        # 판정이 이미 44×4로 부풀린 경우(증분==스냅) 독립 증거가 아니다 —
+        # 초기 구현의 "count > 증분" 가드가 조합 탐색을 막아 44×4가 재발했다.
+        # N≥2 스냅이면 증분과 무관하게 탐색해야 한다.
+        s = self.settler(self.P44, self.P3)
+        e = self.removal_with_cands(
+            "s1", 9, 1.0, self.P44, 4, -305.0,
+            [cand(44, conf=0.72, votes=46), cand(3, conf=0.89, votes=8)],
+        )
+        result = s.settle("s1", [e], PROFILES)
+        billed = {pc.product.product_id: pc.count for z in result.zones for pc in z.products}
+        assert billed == {"P44": 1, "P3": 1}
+        assert any("freezer_close_resolve_combo:zone9" in n for n in result.notes)
+
     def test_combo_requires_vote_floor(self):
         # 2번째 클래스가 자격 표 미달(<3표)이면 조합 자체가 성립 안 함 —
         # 유령 스파이크로 진짜 ×N 스냅이 무너지지 않는다.
