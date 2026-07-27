@@ -334,6 +334,44 @@ class TestVisionComboResolve:
             for n in result.notes
         )
 
+    def test_combo_respects_judgment_rejection_of_vote_top(self):
+        # 13차 ses-20 재구성: c13(옷 프린트 유령, 28표 conf .84)이 득표 1위지만
+        # 판정층이 conf 중재로 기각하고 c23(9표 conf .96)x4를 과금(COMPLETE).
+        # 득표 1위는 실존 하한(③)을 정의상 통과하므로, "판정이 보고도 기각한
+        # 득표 1위는 콤보 재료 금지"(④)가 13x1+23x3(잔차 2g < 스냅 11g)의
+        # 되살림을 막는다.
+        p23 = ActiveProduct(
+            "P23", "북엇국23", class_id=23, unit_weight=176.0, unit_price=2700,
+            stock_qty=10,
+        )
+        s = self.settler(self.P13, p23)
+        e = self.removal_with_cands(
+            "s1", 9, 1.0, p23, 4, -715.0,
+            [cand(13, conf=0.84, votes=28), cand(23, conf=0.96, votes=9)],
+        )
+        result = s.settle("s1", [e], PROFILES)
+        billed = {pc.product.product_id: pc.count for z in result.zones for pc in z.products}
+        assert billed == {"P23": 4}
+        assert any("freezer_close_resolve:zone9:P23=4" in n for n in result.notes)
+        assert any(
+            "freezer_combo_suppressed:zone9:" in n
+            and "class13(top_rejected_by_judgment)" in n
+            for n in result.notes
+        )
+
+    def test_combo_vote_top_billed_stays_eligible(self):
+        # ④의 반대 방향 보존: 판정이 득표 1위(44)를 과금한 경우(보호 케이스
+        # 시그니처)는 제외가 걸리지 않아 조합 구제가 그대로 동작한다 —
+        # test_combo_beats_multiple_snap과 동일 데이터로 ④ 활성 하에 재확인.
+        s = self.settler(self.P44, self.P3)
+        e = self.removal_with_cands(
+            "s1", 9, 1.0, self.P44, 1, -310.0,
+            [cand(44, conf=0.95, votes=14), cand(3, conf=0.53, votes=8)],
+        )
+        result = s.settle("s1", [e], PROFILES)
+        billed = {pc.product.product_id: pc.count for z in result.zones for pc in z.products}
+        assert billed == {"P44": 1, "P3": 1}
+
     def test_combo_ghost_class_excluded(self):
         # 세션 유령(ghost_ledger 검출: ≥2존·≥2에피소드 자격 표 + 무게 뒷받침
         # 없음)은 콤보 자격에서 제외된다 — shadow 모드여도 검출은 순수 관측이라

@@ -182,7 +182,11 @@ class CloseSettler:
         # 세션 관측 증거 기반 콤보 자격 제외 (planogram 아님 — tray_memory와
         # 동일 태도): ① ghost_ledger가 유령으로 판명한 클래스, ② 다른 존의
         # 무게 뒷받침 과금이 이미 설명한 클래스(동시 멀티존 취출의 공유 영상
-        # 표 유입 차단 — 12차 ses-5: z3에서 과금된 27이 z1 콤보에 유입).
+        # 표 유입 차단 — 12차 ses-5: z3에서 과금된 27이 z1 콤보에 유입),
+        # ④ 이 존의 COMPLETE 판정이 보고도 기각한 득표 1위 클래스(13차
+        # ses-20: 판정이 conf 중재로 c13(28표)을 기각하고 23x4를 냈는데
+        # 콤보가 무게 산수만으로 13x1+23x3을 되살림 — 옷 프린트 유령이
+        # 득표 1위면 ③ 실존 하한은 정의상 통과하므로 이 규칙이 방어선).
         # 알려진 트레이드오프: 같은 클래스를 두 존에서 동시에 집는 세션에서
         # 한쪽 판정이 그 클래스를 놓치면 콤보 구제도 막힌다 — 실패 방향은
         # "비전 판정 유지"라 안전.
@@ -509,10 +513,12 @@ class CloseSettler:
         배분이 갈릴 때(27×3+30×1 vs 27×1+30×4) 트리거 판정이 실제로 본
         개수를 존중한다. I12(재고 상한)·I3(게이트) 준수.
 
-        guarded=True(기본)면 12차 자격 강화를 적용한다 — ① ghost 클래스 제외,
-        ② 다른 존의 무게 뒷받침 과금이 이미 설명한 클래스 제외, ③ 실존 증거
-        하한(top 대비 득표율 ≥ combo_min_vote_ratio 또는 conf ≥ combo_min_conf).
-        제외된 클래스는 excluded_out에 {class_id: 사유}로 기록된다.
+        guarded=True(기본)면 12·13차 자격 강화를 적용한다 — ① ghost 클래스
+        제외, ② 다른 존의 무게 뒷받침 과금이 이미 설명한 클래스 제외,
+        ④ 이 존의 COMPLETE 판정이 기각한 득표 1위 클래스 제외(판정 중재
+        존중), ③ 실존 증거 하한(top 대비 득표율 ≥ combo_min_vote_ratio 또는
+        conf ≥ combo_min_conf). 제외된 클래스는 excluded_out에
+        {class_id: 사유}로 기록된다.
         guarded=False는 억제 관측 note(freezer_combo_suppressed) 계산 전용."""
         if self._products_provider is None:
             return None
@@ -527,6 +533,13 @@ class CloseSettler:
                     confs[c.class_id] = max(confs.get(c.class_id, 0.0), c.confidence)
         if guarded:
             excluded = excluded_out if excluded_out is not None else {}
+            # ④ 판단 재료: 판정층이 본 원본 풀의 득표 1위 (제외 적용 전 기준 —
+            # "판정이 무엇을 보고도 기각했는가"를 판별해야 하므로).
+            raw_top_cid = (
+                max(votes, key=lambda cid: (votes[cid], confs.get(cid, 0.0)))
+                if votes
+                else None
+            )
             for cid in list(votes):
                 if ghosts and cid in ghosts:
                     excluded[cid] = "ghost"
@@ -534,7 +547,20 @@ class CloseSettler:
                 elif backed_zones and backed_zones.get(cid) and zone not in backed_zones[cid]:
                     excluded[cid] = "other_zone_backed"
                     del votes[cid]
-            # ③ 실존 증거 하한 — ①·② 제외 후 남은 풀 기준 top 대비.
+            # ④ 판정 중재 존중 (13차 ses-20): 이 존의 COMPLETE 판정이 득표 1위
+            # 클래스를 보고도 과금하지 않았다면(vision_top_not_billed 시그니처
+            # — conf 중재 등으로 명시 기각), 더 적은 정보(무게 산수)만 가진
+            # 콤보가 그 클래스를 되살릴 수 없다. 존에 무게 뒷받침 과금이 하나도
+            # 없으면(판정이 결정을 안 내린 partial 등) 적용하지 않는다.
+            if raw_top_cid is not None and raw_top_cid in votes:
+                zone_backed = any(
+                    zone in zs for zs in (backed_zones or {}).values()
+                )
+                top_billed_here = zone in (backed_zones or {}).get(raw_top_cid, set())
+                if zone_backed and not top_billed_here:
+                    excluded[raw_top_cid] = "top_rejected_by_judgment"
+                    del votes[raw_top_cid]
+            # ③ 실존 증거 하한 — ①·②·④ 제외 후 남은 풀 기준 top 대비.
             top_votes = max(votes.values(), default=0)
             for cid in list(votes):
                 if (
