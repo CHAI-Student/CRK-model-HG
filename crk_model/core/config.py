@@ -89,6 +89,14 @@ class Settings:
     # 시, 존의 자격 표를 받은 2종 조합이 게이트 안에서 net을 설명하면 조합
     # 우선 ("무게=거부권, 선택=vision"). settler._vision_combo 참조.
     close_vision_combo: bool = True
+    # 12차: 콤보 소수 클래스의 실존 증거 하한 — top 대비 득표율 또는 conf 중
+    # 하나는 넘어야 자격 (오분류 플리커 7~9표가 정상 ×N 스냅을 쪼개는 사고
+    # 차단). ratio=0으로 하한 비활성. settler._vision_combo 참조.
+    close_combo_min_vote_ratio: float = 0.5
+    close_combo_min_conf: float = 0.8
+    # 12차: 세션 관측 증거 기반 콤보 자격 제외(ghost / 타존 무게 뒷받침) —
+    # 동시 멀티존 취출의 공유 영상 표 유입 차단 (ses-5).
+    close_combo_session_guard: bool = True
     # D8: 기본 OFF
     batch_size: int = 1
     # freezer 프로파일을 적용할 존 목록 (예: "9,10") — cabinet_type이 정하는
@@ -294,6 +302,13 @@ class Settings:
             close_grace_s=_env_float("MODEL__CLOSE__GRACE_S", 3.0),
             worker_stall_timeout_s=_env_float("MODEL__CLOSE__WORKER_STALL_TIMEOUT_S", 120.0),
             close_vision_combo=_env_bool("MODEL__CLOSE__VISION_COMBO", True),
+            close_combo_min_vote_ratio=_env_float(
+                "MODEL__CLOSE__COMBO_MIN_VOTE_RATIO", 0.5
+            ),
+            close_combo_min_conf=_env_float("MODEL__CLOSE__COMBO_MIN_CONF", 0.8),
+            close_combo_session_guard=_env_bool(
+                "MODEL__CLOSE__COMBO_SESSION_GUARD", True
+            ),
             batch_size=_env_int("MODEL__VISION__BATCH_SIZE", 1),
             freezer_zones=_env_zones("MODEL__ZONES__FREEZER"),
             cabinet_type=_env_cabinet_type("MODEL__MACHINE__CABINET_TYPE", "refrigerated"),

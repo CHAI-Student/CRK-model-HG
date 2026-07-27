@@ -268,6 +268,106 @@ class TestVisionComboResolve:
         assert billed == {"P44": 1}
         assert not any("freezer_close_resolve_combo" in n for n in result.notes)
 
+    # --- 12차 자격 강화 (실사고 4건: 콤보가 정답 판정을 뒤집던 반대 방향) ---
+
+    P13 = ActiveProduct(
+        "P13", "만두13", class_id=13, unit_weight=189.0, unit_price=2100, stock_qty=10
+    )
+    P24 = ActiveProduct(
+        "P24", "핫도그24", class_id=24, unit_weight=165.0, unit_price=2200, stock_qty=10
+    )
+    P23 = ActiveProduct(
+        "P23", "북엇국23", class_id=23, unit_weight=180.0, unit_price=2500, stock_qty=10
+    )
+
+    def test_combo_low_evidence_minor_keeps_snap(self):
+        # 12차 ses-11 재구성: 13x2 취출(Δ-365), 스냅 잔차 13g로 게이트 안인데
+        # 이동 중 오분류 플리커 c24(9표, conf .45)가 조합 13+24(잔차 11g)를
+        # 만들어 정답 13x2를 쪼갰다. 실존 증거 하한(top 50% 또는 conf .8)이
+        # c24를 자격에서 제외해 스냅이 유지되고, 억제 관측 note가 남는다.
+        s = self.settler(self.P13, self.P24)
+        e = self.removal_with_cands(
+            "s1", 9, 1.0, self.P13, 2, -365.0,
+            [cand(13, conf=1.0, votes=44), cand(24, conf=0.45, votes=9)],
+        )
+        result = s.settle("s1", [e], PROFILES)
+        billed = {pc.product.product_id: pc.count for z in result.zones for pc in z.products}
+        assert billed == {"P13": 2}
+        assert any("freezer_close_resolve:zone9:P13=2" in n for n in result.notes)
+        assert any(
+            "freezer_combo_suppressed:zone9:" in n and "class24(low_evidence)" in n
+            for n in result.notes
+        )
+
+    def test_combo_other_zone_backed_excluded(self):
+        # 12차 ses-5 재구성: 양손 멀티존 동시 취출은 연장 병합된 같은 에피소드
+        # 영상을 공유해 두 존의 후보 풀이 동일하다 — z8에서 취출한 23의 표가
+        # z9 콤보 재료로, z9의 27이 z8 콤보 재료로 유입되어 양쪽 정답 스냅을
+        # 모두 쪼갰다. "다른 존 무게 뒷받침이 이미 설명한 정체성"은 콤보
+        # 자격에서 제외된다.
+        profiles = {8: FREEZER, 9: FREEZER}
+        p27 = ActiveProduct(
+            "P27", "베이글27", class_id=27, unit_weight=178.0, unit_price=2000,
+            stock_qty=10,
+        )
+        s = self.settler(self.P23, p27)
+        shared_cands = [cand(23, conf=1.0, votes=21), cand(27, conf=1.0, votes=47)]
+        e_z8 = self.removal_with_cands(
+            "s1", 8, 1.0, self.P23, 2, -360.0, shared_cands
+        )
+        e_z9 = self.removal_with_cands(
+            "s1", 9, 1.5, p27, 2, -356.0, shared_cands
+        )
+        result = s.settle("s1", [e_z8, e_z9], profiles)
+        billed = {
+            (z.zone, pc.product.product_id): pc.count
+            for z in result.zones
+            for pc in z.products
+        }
+        assert billed == {(8, "P23"): 2, (9, "P27"): 2}
+        assert any(
+            "freezer_combo_suppressed:zone8:" in n and "class27(other_zone_backed)" in n
+            for n in result.notes
+        )
+        assert any(
+            "freezer_combo_suppressed:zone9:" in n and "class23(other_zone_backed)" in n
+            for n in result.notes
+        )
+
+    def test_combo_ghost_class_excluded(self):
+        # 세션 유령(ghost_ledger 검출: ≥2존·≥2에피소드 자격 표 + 무게 뒷받침
+        # 없음)은 콤보 자격에서 제외된다 — shadow 모드여도 검출은 순수 관측이라
+        # 자격 판단에 사용한다. 실패 방향은 콤보 미형성 = 비전 판정 유지.
+        profiles = {8: FREEZER, 9: FREEZER}
+        p27 = ActiveProduct(
+            "P27", "베이글27", class_id=27, unit_weight=178.0, unit_price=2000,
+            stock_qty=10,
+        )
+        s = self.settler(self.P3, self.P44, p27)
+        # c44가 두 존·두 에피소드에서 자격 표(conf .9 — 실존 하한은 통과)를
+        # 얻지만 어느 존에서도 무게 뒷받침 과금이 없음 → ghost.
+        e_z8 = self.removal_with_cands(
+            "s1", 8, 1.0, p27, 2, -356.0,
+            [cand(27, conf=1.0, votes=30), cand(44, conf=0.9, votes=8)],
+        )
+        e_z9 = self.removal_with_cands(
+            "s1", 9, 5.0, self.P3, 2, -448.0,
+            [cand(3, conf=1.0, votes=40), cand(44, conf=0.9, votes=8)],
+        )
+        result = s.settle("s1", [e_z8, e_z9], profiles)
+        billed = {
+            (z.zone, pc.product.product_id): pc.count
+            for z in result.zones
+            for pc in z.products
+        }
+        # ghost 제외가 없으면 z9는 조합 3x1+44x3(잔차 8.5)이 스냅 3x2(잔차 0)를
+        # 뒤집는다.
+        assert billed == {(8, "P27"): 2, (9, "P3"): 2}
+        assert any(
+            "freezer_combo_suppressed:zone9:" in n and "class44(ghost)" in n
+            for n in result.notes
+        )
+
     def test_kill_switch(self):
         s = CloseSettler(
             active_products_provider=lambda: (self.P44, self.P3), vision_combo=False

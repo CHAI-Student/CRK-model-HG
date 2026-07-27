@@ -31,7 +31,11 @@ from crk_model.ledger.cross_zone import (
     apply_cross_zone_penalty,
 )
 from crk_model.ledger.events import EventLog, TriggerEvent
-from crk_model.ledger.ghost_ledger import GhostLedgerConfig, apply_ghost_demotion
+from crk_model.ledger.ghost_ledger import (
+    GhostLedgerConfig,
+    apply_ghost_demotion,
+    detect_ghosts,
+)
 
 
 class _Basket:
@@ -166,6 +170,22 @@ class CloseSettler:
         # 받은 2종 조합이 게이트 안에서 delta를 설명하면 조합을 우선한다
         # ("무게=거부권, 선택=vision" — 0722 중재 설계와 같은 원칙).
         # MODEL__CLOSE__VISION_COMBO=0으로 비활성.
+        combo_min_vote_ratio: float = 0.5,
+        combo_min_conf: float = 0.8,
+        # 12차 실사고 4건(ses-11 13x2→13+24, ses-3 3x4→3x3+30x3, ses-5 z1/z3):
+        # 콤보 소수 클래스의 자격이 표 3개뿐이라, 이동 상품의 오분류 플리커
+        # (7~9표, conf .45~.73)가 정상 ×N 스냅을 2종 조합으로 쪼갰다. 실존
+        # 증거 하한: top 대비 득표율 ≥ ratio "또는" conf ≥ min_conf — 많이
+        # 보였거나 확실하게 보였거나. 보호 케이스(3+44 실사고 7회)의 c3은
+        # 8/14표(57%) 혹은 conf .89로 통과한다. ratio=0으로 비활성.
+        combo_session_guard: bool = True,
+        # 세션 관측 증거 기반 콤보 자격 제외 (planogram 아님 — tray_memory와
+        # 동일 태도): ① ghost_ledger가 유령으로 판명한 클래스, ② 다른 존의
+        # 무게 뒷받침 과금이 이미 설명한 클래스(동시 멀티존 취출의 공유 영상
+        # 표 유입 차단 — 12차 ses-5: z3에서 과금된 27이 z1 콤보에 유입).
+        # 알려진 트레이드오프: 같은 클래스를 두 존에서 동시에 집는 세션에서
+        # 한쪽 판정이 그 클래스를 놓치면 콤보 구제도 막힌다 — 실패 방향은
+        # "비전 판정 유지"라 안전.
     ):
         self.error_policy = error_policy
         # zone이 profiles dict에 없을 때의 폴백 프로파일 (cabinet_type 이식) —
@@ -177,6 +197,9 @@ class CloseSettler:
         self._products_provider = active_products_provider
         self.count_unit_slack = count_unit_slack
         self.vision_combo = vision_combo
+        self.combo_min_vote_ratio = combo_min_vote_ratio
+        self.combo_min_conf = combo_min_conf
+        self.combo_session_guard = combo_session_guard
         self._finalized: dict[str, FinalizedSettlement] = {}
 
     def settle(
@@ -346,6 +369,16 @@ class CloseSettler:
         default_profile: SensorProfile = REFRIGERATOR,
     ) -> None:
         """4층: freezer 부호있는 net basket 재solve (불안정 close 대비, QA Q6)."""
+        # 세션 스코프 콤보 자격 제외 재료 — zone 루프 밖에서 1회 계산.
+        # ghost는 shadow 모드여도 검출 자체는 신뢰 가능한 순수 관측이라
+        # 콤보 "자격" 판단에는 사용한다 (판정 교체가 아니므로 승격 게이트와
+        # 별개 — 실패 방향은 콤보 미형성 = 비전 판정 유지로 안전).
+        ghosts: dict[int, tuple[int, ...]] = {}
+        backed_zones: dict[int, set[int]] = {}
+        if self.combo_session_guard and self.vision_combo:
+            if self.ghost.mode != "off":
+                ghosts = detect_ghosts(events, self.ghost)
+            backed_zones = self._backed_zones_by_class(events)
         for zone, b in list(baskets.items()):
             prof = _profile(profiles, zone, default_profile)
             if prof.weight_is_discriminative:
@@ -380,11 +413,36 @@ class CloseSettler:
                 # 판정이 이미 44×4로 부풀려 c_inc=4=count → 탐색 자체가 안 됨).
                 # N=1 정상 스냅만 탐색 제외. 진짜 ×N의 보호는 조합 게이트
                 # (2종 모두 자격 표 ≥3 + 잔차 ≤ gate_n)가 담당한다.
+                excluded: dict[int, str] = {}
                 combo = (
-                    self._vision_combo(zone, -net, gate, events, {p.class_id: c_inc})
+                    self._vision_combo(
+                        zone, -net, gate, events, {p.class_id: c_inc},
+                        ghosts=ghosts, backed_zones=backed_zones,
+                        excluded_out=excluded,
+                    )
                     if self.vision_combo and (count >= 2 or not snap_ok)
                     else None
                 )
+                # I8 관측 note: 자격 제외가 없었다면 나왔을 조합이 억제된 경우
+                # — analyze-sessions가 가드 정오(억제된 조합 vs GT)를 실측해
+                # ratio/conf/guard 파라미터를 검증·보정할 수 있게 한다.
+                if combo is None and excluded:
+                    unguarded = self._vision_combo(
+                        zone, -net, gate, events, {p.class_id: c_inc},
+                        guarded=False,
+                    )
+                    if unguarded is not None:
+                        notes.append(
+                            f"freezer_combo_suppressed:zone{zone}:"
+                            + ",".join(
+                                f"{prod.product_id}={n}" for prod, n in unguarded
+                            )
+                            + ":excluded="
+                            + ",".join(
+                                f"class{cid}({r})"
+                                for cid, r in sorted(excluded.items())
+                            )
+                        )
                 if combo is not None:
                     for pid in list(b.counts):
                         b.set_count(pid, 0)
@@ -407,6 +465,25 @@ class CloseSettler:
     # 이만큼 있어야 "vision이 그 클래스를 봤다"로 친다 (유령 스파이크 차단).
     _COMBO_VOTE_FLOOR = 3
 
+    @staticmethod
+    def _backed_zones_by_class(
+        events: Sequence[TriggerEvent],
+    ) -> dict[int, set[int]]:
+        """클래스별 무게 뒷받침 과금을 받은 존 집합 — ghost_ledger의
+        _weight_backed_classes와 동일 게이트(COMPLETE + refit/near_gate 아님)를
+        존 단위로 확장한 것. 콤보 자격 제외 ②(다른 존이 이미 설명한 정체성)의
+        판단 재료."""
+        backed: dict[int, set[int]] = defaultdict(set)
+        for e in events:
+            if e.status != "ok" or e.judgment.status is not JudgmentStatus.COMPLETE:
+                continue
+            reason = e.judgment.reason or ""
+            if "refit" in reason or "near_gate" in reason:
+                continue
+            for pc in e.judgment.products:
+                backed[pc.product.class_id].add(e.zone)
+        return backed
+
     def _vision_combo(
         self,
         zone: int,
@@ -414,6 +491,11 @@ class CloseSettler:
         gate: float,
         events: Sequence[TriggerEvent],
         incremental: Mapping[int, int],
+        *,
+        guarded: bool = True,
+        ghosts: Mapping[int, tuple[int, ...]] | None = None,
+        backed_zones: Mapping[int, set[int]] | None = None,
+        excluded_out: dict[int, str] | None = None,
     ) -> tuple[tuple[ActiveProduct, int], ...] | None:
         """단일 종 ×N 스냅의 비전 교차 검증 대안: 이 존 removal 이벤트들에서
         자격 표(≥ _COMBO_VOTE_FLOOR)를 받은 서로 다른 2종의 (n_A, n_B) 조합 중
@@ -425,16 +507,42 @@ class CloseSettler:
         행사하지 않은 것이고, 3+44(잔차 8.5) vs 44×4(잔차 0)의 선택은 c3의
         실존 표·판정 증거가 해야 한다. 증분 편차 항은 같은 2종 안에서 개수
         배분이 갈릴 때(27×3+30×1 vs 27×1+30×4) 트리거 판정이 실제로 본
-        개수를 존중한다. I12(재고 상한)·I3(게이트) 준수."""
+        개수를 존중한다. I12(재고 상한)·I3(게이트) 준수.
+
+        guarded=True(기본)면 12차 자격 강화를 적용한다 — ① ghost 클래스 제외,
+        ② 다른 존의 무게 뒷받침 과금이 이미 설명한 클래스 제외, ③ 실존 증거
+        하한(top 대비 득표율 ≥ combo_min_vote_ratio 또는 conf ≥ combo_min_conf).
+        제외된 클래스는 excluded_out에 {class_id: 사유}로 기록된다.
+        guarded=False는 억제 관측 note(freezer_combo_suppressed) 계산 전용."""
         if self._products_provider is None:
             return None
         votes: dict[int, int] = {}
+        confs: dict[int, float] = {}
         for e in events:
             if e.zone != zone or e.delta_weight >= 0 or e.status != "ok":
                 continue
             for c in e.vision_candidates:
                 if c.class_id > 0 and c.vote_count >= self._COMBO_VOTE_FLOOR:
                     votes[c.class_id] = max(votes.get(c.class_id, 0), c.vote_count)
+                    confs[c.class_id] = max(confs.get(c.class_id, 0.0), c.confidence)
+        if guarded:
+            excluded = excluded_out if excluded_out is not None else {}
+            for cid in list(votes):
+                if ghosts and cid in ghosts:
+                    excluded[cid] = "ghost"
+                    del votes[cid]
+                elif backed_zones and backed_zones.get(cid) and zone not in backed_zones[cid]:
+                    excluded[cid] = "other_zone_backed"
+                    del votes[cid]
+            # ③ 실존 증거 하한 — ①·② 제외 후 남은 풀 기준 top 대비.
+            top_votes = max(votes.values(), default=0)
+            for cid in list(votes):
+                if (
+                    votes[cid] < self.combo_min_vote_ratio * top_votes
+                    and confs.get(cid, 0.0) < self.combo_min_conf
+                ):
+                    excluded[cid] = "low_evidence"
+                    del votes[cid]
         if len(votes) < 2:
             return None
         products = [

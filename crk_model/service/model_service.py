@@ -142,6 +142,9 @@ class ModelService:
             active_products_provider=products_provider,
             count_unit_slack=self.settings.judgment_count_unit_slack,
             vision_combo=self.settings.close_vision_combo,
+            combo_min_vote_ratio=self.settings.close_combo_min_vote_ratio,
+            combo_min_conf=self.settings.close_combo_min_conf,
+            combo_session_guard=self.settings.close_combo_session_guard,
         )
         # journal과 동일한 하위호환 원칙: archive를 명시적으로 주지 않으면
         # 비활성(SessionArchive("")) — 기본 생성자로 settings.session_archive_dir
