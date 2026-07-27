@@ -97,6 +97,9 @@ class Settings:
     # 12차: 세션 관측 증거 기반 콤보 자격 제외(ghost / 타존 무게 뒷받침) —
     # 동시 멀티존 취출의 공유 영상 표 유입 차단 (ses-5).
     close_combo_session_guard: bool = True
+    # 14차: 게이트 안 스냅을 콤보가 뒤집으려면 존 판정 conf가 이 값 미만
+    # (확신 스냅 존중 — 오버라이드 오답 6건 전부 conf 0.96~1.0). >1로 비활성.
+    close_combo_override_max_conf: float = 0.95
     # D8: 기본 OFF
     batch_size: int = 1
     # freezer 프로파일을 적용할 존 목록 (예: "9,10") — cabinet_type이 정하는
@@ -308,6 +311,9 @@ class Settings:
             close_combo_min_conf=_env_float("MODEL__CLOSE__COMBO_MIN_CONF", 0.8),
             close_combo_session_guard=_env_bool(
                 "MODEL__CLOSE__COMBO_SESSION_GUARD", True
+            ),
+            close_combo_override_max_conf=_env_float(
+                "MODEL__CLOSE__COMBO_OVERRIDE_MAX_CONF", 0.95
             ),
             batch_size=_env_int("MODEL__VISION__BATCH_SIZE", 1),
             freezer_zones=_env_zones("MODEL__ZONES__FREEZER"),

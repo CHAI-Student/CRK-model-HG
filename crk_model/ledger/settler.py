@@ -192,6 +192,11 @@ class CloseSettler:
         # 알려진 트레이드오프: 같은 클래스를 두 존에서 동시에 집는 세션에서
         # 한쪽 판정이 그 클래스를 놓치면 콤보 구제도 막힌다 — 실패 방향은
         # "비전 판정 유지"라 안전.
+        combo_override_max_conf: float = 0.95,
+        # ⑤ (14차 ses-2): 게이트 안 스냅을 콤보가 뒤집으려면 존 판정
+        # (COMPLETE) conf가 이 값 미만이어야 한다. 실측 오버라이드 오답
+        # 6건은 전부 conf 0.96~1.0, 보호 케이스는 0.9/0.72. >1로 설정하면
+        # 규칙 비활성. MODEL__CLOSE__COMBO_OVERRIDE_MAX_CONF.
     ):
         self.error_policy = error_policy
         # zone이 profiles dict에 없을 때의 폴백 프로파일 (cabinet_type 이식) —
@@ -206,6 +211,7 @@ class CloseSettler:
         self.combo_min_vote_ratio = combo_min_vote_ratio
         self.combo_min_conf = combo_min_conf
         self.combo_session_guard = combo_session_guard
+        self.combo_override_max_conf = combo_override_max_conf
         self._finalized: dict[str, FinalizedSettlement] = {}
 
     def settle(
@@ -429,10 +435,45 @@ class CloseSettler:
                     if self.vision_combo and (count >= 2 or not snap_ok)
                     else None
                 )
+                # ⑤ 확신 스냅 존중 (14차 ses-2): 게이트 안 스냅 + 존 판정이
+                # COMPLETE·고conf(≥ combo_override_max_conf)면 콤보가 뒤집을 수
+                # 없다. 오버라이드 오답 6건(12차 ses-11·ses-3, 13차 ses-20,
+                # 14차 ses-1·ses-2)은 전부 판정 conf 0.96~1.0이었고, 보호
+                # 케이스(3+44 구제)는 0.9/0.72 — 콤보의 존재 이유인 "vision이
+                # 자신 없는 앨리어싱 스냅"과 "vision이 확신한 정답 스냅"을
+                # 판정 자신감이 가른다. 게이트 실패 구제(snap_ok=False)는
+                # 이 규칙과 무관하게 기존대로 동작.
+                conf_rejected = False
+                if combo is not None and snap_ok:
+                    zone_conf = max(
+                        (
+                            e.judgment.confidence
+                            for e in events
+                            if e.zone == zone
+                            and e.status == "ok"
+                            and e.delta_weight < 0
+                            and e.judgment.status is JudgmentStatus.COMPLETE
+                        ),
+                        default=None,
+                    )
+                    if (
+                        zone_conf is not None
+                        and zone_conf >= self.combo_override_max_conf
+                    ):
+                        notes.append(
+                            f"freezer_combo_rejected_confident_snap:zone{zone}:"
+                            + ",".join(
+                                f"{prod.product_id}={n}" for prod, n in combo
+                            )
+                            + f":conf={zone_conf:.2f}"
+                        )
+                        combo = None
+                        conf_rejected = True
                 # I8 관측 note: 자격 제외가 없었다면 나왔을 조합이 억제된 경우
                 # — analyze-sessions가 가드 정오(억제된 조합 vs GT)를 실측해
                 # ratio/conf/guard 파라미터를 검증·보정할 수 있게 한다.
-                if combo is None and excluded:
+                # ⑤로 기각된 경우는 이미 전용 note가 남았으므로 중복 생략.
+                if combo is None and excluded and not conf_rejected:
                     unguarded = self._vision_combo(
                         zone, -net, gate, events, {p.class_id: c_inc},
                         guarded=False,

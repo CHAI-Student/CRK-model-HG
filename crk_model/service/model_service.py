@@ -145,6 +145,7 @@ class ModelService:
             combo_min_vote_ratio=self.settings.close_combo_min_vote_ratio,
             combo_min_conf=self.settings.close_combo_min_conf,
             combo_session_guard=self.settings.close_combo_session_guard,
+            combo_override_max_conf=self.settings.close_combo_override_max_conf,
         )
         # journal과 동일한 하위호환 원칙: archive를 명시적으로 주지 않으면
         # 비활성(SessionArchive("")) — 기본 생성자로 settings.session_archive_dir

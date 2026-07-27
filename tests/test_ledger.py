@@ -192,9 +192,9 @@ class TestVisionComboResolve:
     )
 
     @staticmethod
-    def removal_with_cands(sid, zone, ts, product, count, delta, cands):
+    def removal_with_cands(sid, zone, ts, product, count, delta, cands, conf=0.9):
         j = JudgmentResult(
-            JudgmentStatus.COMPLETE, (ProductCount(product, count),), 0.9, "strict"
+            JudgmentStatus.COMPLETE, (ProductCount(product, count),), conf, "strict"
         )
         return TriggerEvent(sid, zone, ts, delta, (), j, vision_candidates=tuple(cands))
 
@@ -390,6 +390,27 @@ class TestVisionComboResolve:
             "freezer_combo_suppressed:zone9:" in n
             and "class13(rejected_by_judgment)" in n
             and "class30(rejected_by_judgment)" in n
+            for n in result.notes
+        )
+
+    def test_combo_cannot_override_confident_snap(self):
+        # 14차 ses-2 재구성(⑤): 판정이 conf 1.0으로 13x4를 확정(우도 일치),
+        # 스냅 잔차 13.5g로 게이트 안. c24(18표, conf .84)가 실존 하한의
+        # conf 분기를 통과해 조합 13x3+24x1(잔차 10.5g)이 성립하지만,
+        # 확신(≥0.95) 스냅은 콤보가 뒤집을 수 없다 — 콤보는 판정이 자신
+        # 없는 앨리어싱 스냅(보호 케이스 conf 0.9)과 게이트 실패 구제 전용.
+        s = self.settler(self.P13, self.P24)
+        e = self.removal_with_cands(
+            "s1", 9, 1.0, self.P13, 4, -742.5,
+            [cand(13, conf=1.0, votes=74), cand(24, conf=0.84, votes=18)],
+            conf=1.0,
+        )
+        result = s.settle("s1", [e], PROFILES)
+        billed = {pc.product.product_id: pc.count for z in result.zones for pc in z.products}
+        assert billed == {"P13": 4}
+        assert any("freezer_close_resolve:zone9:P13=4" in n for n in result.notes)
+        assert any(
+            "freezer_combo_rejected_confident_snap:zone9:" in n and "conf=1.00" in n
             for n in result.notes
         )
 
