@@ -355,7 +355,41 @@ class TestVisionComboResolve:
         assert any("freezer_close_resolve:zone9:P23=4" in n for n in result.notes)
         assert any(
             "freezer_combo_suppressed:zone9:" in n
-            and "class13(top_rejected_by_judgment)" in n
+            and "class13(rejected_by_judgment)" in n
+            for n in result.notes
+        )
+
+    def test_combo_rejected_runnerup_excluded(self):
+        # 14차 ses-1 재구성(④ 일반화): 판정이 c13(137표)·c30(48표)을 모두
+        # 기각하고 c3(27표, conf 1.0)x4를 확정(arbitrated). ④가 득표 1위만
+        # 막으면 차순위 c30(48표, conf .94 — ③ 실존 하한 통과)이 콤보
+        # 3x3+30x3(잔차 13g)으로 스냅 3x4(잔차 4g)를 뒤집는다. 과금 클래스
+        # (27표) 이상 득표한 기각 클래스는 전부 콤보 재료 금지.
+        p3 = ActiveProduct(
+            "P3", "만두3", class_id=3, unit_weight=229.0, unit_price=3500,
+            stock_qty=10,
+        )
+        p30 = ActiveProduct(
+            "P30", "요맘때30", class_id=30, unit_weight=82.0, unit_price=1500,
+            stock_qty=10,
+        )
+        s = self.settler(self.P13, p3, p30)
+        e = self.removal_with_cands(
+            "s1", 9, 1.0, p3, 4, -920.0,
+            [
+                cand(13, conf=0.89, votes=137),
+                cand(30, conf=0.94, votes=48),
+                cand(3, conf=1.0, votes=27),
+            ],
+        )
+        result = s.settle("s1", [e], PROFILES)
+        billed = {pc.product.product_id: pc.count for z in result.zones for pc in z.products}
+        assert billed == {"P3": 4}
+        assert any("freezer_close_resolve:zone9:P3=4" in n for n in result.notes)
+        assert any(
+            "freezer_combo_suppressed:zone9:" in n
+            and "class13(rejected_by_judgment)" in n
+            and "class30(rejected_by_judgment)" in n
             for n in result.notes
         )
 
