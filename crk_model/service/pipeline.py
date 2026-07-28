@@ -99,10 +99,15 @@ class TriggerTrace:
     likelihood_shadow: list[dict] | None = None
     # 프레임별 bbox 기록 (render-session 시각 검증용, MODEL__SESSION__
     # SAVE_DETECTIONS opt-in): 추론이 실행된 프레임마다 {camera, pos,
-    # detections[{class_id, conf, bbox, hand, kept}]} — raw 검출 전체에
-    # 필터 통과 여부(kept)를 병기해 "검출됐지만 필터에서 죽었다"까지
-    # 오버레이로 재구성한다. None = 미기록(기본, 아카이브 포맷 불변).
+    # detections[{class_id, conf, bbox, hand}]} — **판정 로직에 실제로
+    # 기여한 검출만** (필터 체인 통과 ∧ 투표 진입 conf 이상. hand는 투표하지
+    # 않으므로 체인 통과 = 래치/hand_path 기여). 필터·진입 컷 탈락분은
+    # 개수 통계(vote_summary)로만 남는다 — 오버레이는 판정 근거의 재현이지
+    # raw 덤프가 아니다 (2026-07-28 사용자 결정). None = 미기록(기본).
     frame_detections: list[dict] | None = None
+    # 카메라별 디코드 크롭 원점 스탬프 (frame_detections의 좌표계 계약):
+    # render-session이 같은 크롭으로 AVI를 디코드해야 bbox가 맞는다.
+    camera_crops: dict[str, str] | None = None
 
 
 @dataclass(frozen=True)
@@ -166,9 +171,14 @@ class TriggerPipeline:
         # log_p_tray 항으로만 소비 — 판정·정산 무변경.
         save_detections: bool = False,
         # 프레임별 bbox 기록 (MODEL__SESSION__SAVE_DETECTIONS): 추론 프레임의
-        # raw 검출 + 필터 통과 여부를 trace.frame_detections에 남긴다 —
-        # 아카이브 동봉 후 render-session CLI가 AVI 위에 오버레이한다.
-        # 판정 무변경(관측 전용), 기본 off (아카이브 용량·성능 영향 차단).
+        # 판정 기여 검출(필터 체인 통과 ∧ 투표 진입 conf 이상)을
+        # trace.frame_detections에 남긴다 — 아카이브 동봉 후 render-session
+        # CLI가 AVI 위에 오버레이한다. 판정 무변경(관측 전용), 기본 off
+        # (아카이브 용량·성능 영향 차단).
+        camera_crops: Mapping[str, str] | None = None,
+        # 카메라별 디코드 크롭 원점 (MODEL__VIDEO__SIDE_CROP 배선) — 파이프라인
+        # 자체는 디코드하지 않으므로 판정에는 무영향. save_detections 시
+        # trace에 스탬프해 렌더가 동일 기하를 재현하게 하는 좌표계 계약이다.
     ):
         self._detector = detector
         self._profiles = dict(profiles)
@@ -191,6 +201,7 @@ class TriggerPipeline:
         )
         self._tray_memory = tray_memory
         self._save_detections = save_detections
+        self._camera_crops = dict(camera_crops) if camera_crops else None
 
     def process(self, session_id: str, req: TriggerRequest) -> TriggerOutcome:
         try:
@@ -636,7 +647,7 @@ class TriggerPipeline:
                         # 검출 0 프레임도 기록한다 — 렌더에서 "게이트 스킵"과
                         # "추론했으나 무검출"을 구분할 유일한 근거.
                         self._record_frame_detections(
-                            trace, camera, pos, raw, detections
+                            trace, camera, pos, detections
                         )
                     tids = (
                         # pos 전달 = T1 트랙별 위치 계측 (motion_evidence.py)
@@ -688,19 +699,24 @@ class TriggerPipeline:
         }
         return voting.combine()
 
-    @staticmethod
     def _record_frame_detections(
-        trace: TriggerTrace, camera: str, pos: int, raw, kept
+        self, trace: TriggerTrace, camera: str, pos: int, detections
     ) -> None:
         """추론 프레임 1장의 bbox 기록 (save_detections 탭).
 
-        raw 전체를 남기고 필터 통과분은 kept=True로 표시한다 — 동일 객체가
-        필터를 그대로 통과하므로(filters.apply는 복사하지 않는다) id 비교로
-        충분하다. bbox는 detect 입력 프레임(center-crop 480×480) 좌표계
-        그대로 — render-session이 같은 decode_avi 기하로 재현한다."""
+        판정 로직에 실제로 기여한 검출만 남긴다 (2026-07-28 사용자 결정):
+        입력은 이미 필터 체인 통과분이고, 여기서 투표 진입 conf
+        (VotingEnsemble entry_conf_top/side와 동일 소스 self._voting_params,
+        기본 0.0) 미만의 비손 검출을 추가로 거른다 — 진입 컷 탈락 표는
+        투표에 들어가지 않으므로 오버레이 대상이 아니다. hand는 투표하지
+        않지만 래치(I16)·hand_path 기준으로 판정에 기여하므로 체인 통과분을
+        그대로 남긴다. bbox는 detect 입력 프레임(480×480 크롭) 좌표계
+        그대로 — 크롭 원점은 trace.camera_crops 스탬프가 계약한다."""
         if trace.frame_detections is None:
             trace.frame_detections = []
-        kept_ids = {id(d) for d in kept}
+            if self._camera_crops is not None:
+                trace.camera_crops = dict(self._camera_crops)
+        entry = self._voting_params.get(f"entry_conf_{camera}", 0.0)
         trace.frame_detections.append(
             {
                 "camera": camera,
@@ -711,9 +727,9 @@ class TriggerPipeline:
                         "conf": round(d.confidence, 4),
                         "bbox": [round(float(v), 1) for v in d.bbox],
                         "hand": d.is_hand,
-                        "kept": id(d) in kept_ids,
                     }
-                    for d in raw
+                    for d in detections
+                    if d.is_hand or d.confidence >= entry
                 ],
             }
         )

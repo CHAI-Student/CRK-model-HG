@@ -25,10 +25,10 @@ from crk_model.service.model_service import ModelService
 logger = logging.getLogger(__name__)
 
 
-def _default_decode(video_paths: Mapping[str, str]):
+def _default_decode(video_paths: Mapping[str, str], crop_by_camera=None):
     from crk_model.adapters.avi_frames import LazyAviFrames
 
-    return LazyAviFrames(video_paths)
+    return LazyAviFrames(video_paths, crop_by_camera=crop_by_camera)
 
 
 # ---- wire 계약 번역 (REFERENCE.md의 Node/Edge 포맷 → 도메인 계약) ----------
@@ -216,7 +216,14 @@ def create_app(
     # 명시적으로 validate_video_paths를 주면 그 값이 항상 우선한다.
     if validate_video_paths is None:
         validate_video_paths = decode is None
-    decode = decode or _default_decode
+    if decode is None:
+        # 카메라별 크롭 원점 (MODEL__VIDEO__SIDE_CROP): 냉장 side는 left-crop.
+        # 판정에 쓰는 좌표계 그 자체이므로 ModelService 설정에서 단일 소스로
+        # 가져온다 (render-session도 아카이브의 camera_crops로 같은 기하 재현).
+        crops = service.camera_crops
+
+        def decode(video_paths, _crops=crops):
+            return _default_decode(video_paths, crop_by_camera=_crops)
     app = FastAPI(title="CRK-model-HG")
 
     @app.post("/trigger")

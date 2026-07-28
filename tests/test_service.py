@@ -860,47 +860,43 @@ class TestSegmentTargetRetry:
 
 class TestSaveDetectionsTap:
     """프레임별 bbox 기록 (MODEL__SESSION__SAVE_DETECTIONS) — render-session
-    시각 검증의 데이터 소스. 판정 무변경 관측 전용이어야 한다."""
+    시각 검증의 데이터 소스. 판정 무변경 관측 전용이며, **판정 로직에 실제
+    기여한 검출만**(필터 체인 통과 ∧ 투표 진입 conf 이상) 남긴다."""
 
     def _pipe(self, cola, save_detections):
         detector = FakeDetector(detections=[
             Detection(1, 0.8, bbox=(50.0, 50.0, 100.0, 100.0)),
-            # side ROI(center_x >= 400) 탈락 재현용 — kept=False 기록 검증
+            # side ROI(center_x >= 400) 탈락 재현용 — side 기록 제외 검증
             Detection(1, 0.6, bbox=(400.0, 50.0, 470.0, 100.0)),
+            # 진입 컷(0.5) 미만 — 투표 불참이므로 기록 제외 검증
+            Detection(1, 0.2, bbox=(200.0, 200.0, 250.0, 250.0)),
         ])
         store = ActiveProductStore()
         store.update([cola])
         # 조기 종료 off: top에서 합의가 서면 side가 아예 안 돌아 side ROI
-        # 탈락(kept=False) 기록을 검증할 수 없다 — 여기서는 전 카메라 순회 고정.
+        # 제외 경로를 검증할 수 없다 — 여기서는 전 카메라 순회 고정.
         return TriggerPipeline(
             detector, {1: REFRIGERATOR}, store,
             save_detections=save_detections, early_termination_enabled=False,
+            voting_params={"entry_conf_top": 0.5, "entry_conf_side": 0.5},
+            camera_crops={"top": "center", "side": "left"},
+        )
+
+    def _request(self):
+        return TriggerRequest(
+            1,
+            {"top": moving_frames(8), "side": moving_frames(8)},
+            samples(500, 400),
+            1.0,
         )
 
     def test_off_by_default_records_nothing(self, cola):
-        pipe = self._pipe(cola, save_detections=False)
-        outcome = pipe.process(
-            "s1",
-            TriggerRequest(
-                1,
-                {"top": moving_frames(8), "side": moving_frames(8)},
-                samples(500, 400),
-                1.0,
-            ),
-        )
+        outcome = self._pipe(cola, save_detections=False).process("s1", self._request())
         assert outcome.trace.frame_detections is None
+        assert outcome.trace.camera_crops is None
 
-    def test_records_raw_detections_with_kept_flag(self, cola):
-        pipe = self._pipe(cola, save_detections=True)
-        outcome = pipe.process(
-            "s1",
-            TriggerRequest(
-                1,
-                {"top": moving_frames(8), "side": moving_frames(8)},
-                samples(500, 400),
-                1.0,
-            ),
-        )
+    def test_records_only_judgment_contributing_detections(self, cola):
+        outcome = self._pipe(cola, save_detections=True).process("s1", self._request())
         records = outcome.trace.frame_detections
         assert records  # 추론이 1회 이상 실행됐고 전부 기록됨
         assert len(records) == outcome.trace.yolo_calls
@@ -908,27 +904,30 @@ class TestSaveDetectionsTap:
             assert rec["camera"] in ("top", "side")
             assert isinstance(rec["pos"], int)
             for d in rec["detections"]:
-                assert set(d) == {"class_id", "conf", "bbox", "hand", "kept"}
+                assert set(d) == {"class_id", "conf", "bbox", "hand"}  # kept 없음
                 assert len(d["bbox"]) == 4
-        # raw 전체 보존: 필터 탈락(side ROI) 검출도 kept=False로 남는다
+                assert d["conf"] >= 0.5  # 진입 컷 미만은 기록되지 않는다
+        # side ROI 탈락(center_x >= 400) 검출은 side 기록에 없다 — top에는 있다
         side = [d for r in records if r["camera"] == "side" for d in r["detections"]]
-        assert any(not d["kept"] for d in side)
-        assert any(d["kept"] for d in side)
+        top = [d for r in records if r["camera"] == "top" for d in r["detections"]]
+        assert side and all(d["bbox"][0] < 400 for d in side)
+        assert any(d["bbox"][0] >= 400 for d in top)
+        # 크롭 좌표계 스탬프 — render-session의 디코드 기하 계약
+        assert outcome.trace.camera_crops == {"top": "center", "side": "left"}
         # 판정 무변경 (관측 전용): off 파이프라인과 동일 결과
-        base = self._pipe(cola, save_detections=False).process(
-            "s1",
-            TriggerRequest(
-                1,
-                {"top": moving_frames(8), "side": moving_frames(8)},
-                samples(500, 400),
-                1.0,
-            ),
-        )
+        base = self._pipe(cola, save_detections=False).process("s1", self._request())
         assert base.event.judgment == outcome.event.judgment
 
     def test_settings_env_wiring(self, monkeypatch):
         from crk_model.core.config import Settings as S
 
         assert S().save_detections is False
+        assert S().side_camera_crop == "center"
         monkeypatch.setenv("MODEL__SESSION__SAVE_DETECTIONS", "1")
-        assert S.from_env().save_detections is True
+        monkeypatch.setenv("MODEL__VIDEO__SIDE_CROP", "left")
+        settings = S.from_env()
+        assert settings.save_detections is True
+        assert settings.side_camera_crop == "left"
+        monkeypatch.setenv("MODEL__VIDEO__SIDE_CROP", "rihgt")  # 오타는 fail-closed
+        with pytest.raises(ValueError):
+            S.from_env()

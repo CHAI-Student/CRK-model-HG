@@ -438,4 +438,11 @@ class TestFrameDetectionsArchive:
         rec = records[0]
         assert rec["camera"] in ("top", "side")
         det = rec["detections"][0]
-        assert set(det) == {"class_id", "conf", "bbox", "hand", "kept"}
+        assert set(det) == {"class_id", "conf", "bbox", "hand"}  # 판정 기여분만
+        # 진입 컷(Settings 기본 0.70) 미만 검출은 동봉되지 않는다
+        assert all(
+            d["conf"] >= 0.70
+            for r in records for d in r["detections"] if not d["hand"]
+        )
+        # 크롭 좌표계 스탬프 (render-session 디코드 기하 계약)
+        assert trig["trace"]["camera_crops"] == {"top": "center", "side": "center"}

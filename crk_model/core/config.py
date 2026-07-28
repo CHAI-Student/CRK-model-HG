@@ -162,8 +162,13 @@ class Settings:
     # (원본 left-crop 좌표계의 side_roi_x_max=400을 그대로 이식 — 2026-07-24
     # center-crop 전환으로 크롭 원점이 이동했으므로 실기 재측정 필요).
     # 구값 240은 squash resize 좌표계 산물로, 실기에서 side 검출 194/195가
-    # 제거되던 원인이었다.
+    # 제거되던 원인이었다. 냉장 실기(side_camera_crop=left)는 좌 0~300만
+    # 사용 — refrg.env.example의 300 참조 (2026-07-28 사용자 결정).
     side_roi_max_center_x: float = 400.0
+    # side 카메라 크롭 원점 (2026-07-28 냉장 실기): "center"(기본, 기존 동작)
+    # | "left" — 냉장 기기는 존이 side 화면 왼쪽에 있어 x=0..480 left-crop
+    # (원본 엔진 좌표계 복원)을 쓴다. top 카메라는 항상 center.
+    side_camera_crop: str = "center"
     # ---- 수직 ROI (원본 정합 웨이브 2 — perf-gap P1-5 이식) ----
     # camera_layout: "dual"(top+side, 기본) | "dual_top_proxy"(냉동 실기 —
     #   side 스트림도 top 뷰). dual_top_proxy + cabinet_type=freezer면 두
@@ -354,6 +359,9 @@ class Settings:
                 "MODEL__VISION__CONF_COMMON_CLASS_BONUS", 0.2
             ),
             side_roi_max_center_x=_env_float("MODEL__VISION__SIDE_ROI_MAX_CENTER_X", 400.0),
+            side_camera_crop=_env_choice(
+                "MODEL__VIDEO__SIDE_CROP", "center", ("center", "left")
+            ),
             camera_layout=_env_choice(
                 "MODEL__VISION__CAMERA_LAYOUT", "dual", _VALID_CAMERA_LAYOUTS
             ),

@@ -87,7 +87,7 @@ class TestHwaccelProbeAndFallback:
 
         monkeypatch.setattr(avi_frames, "_ffmpeg_hwaccel_available", lambda: True)
 
-        def fake_cmd(path, *, size, gate_size, hwaccel):
+        def fake_cmd(path, *, size, gate_size, hwaccel, crop="center"):
             if hwaccel:
                 raise OSError("ffmpeg decode failed (rc=255)")
             yield "frame-cpu"
@@ -102,7 +102,7 @@ class TestHwaccelProbeAndFallback:
 
         monkeypatch.setattr(avi_frames, "_ffmpeg_hwaccel_available", lambda: True)
 
-        def fake_cmd(path, *, size, gate_size, hwaccel):
+        def fake_cmd(path, *, size, gate_size, hwaccel, crop="center"):
             yield "frame-1"
             raise OSError("mid-stream failure")
 

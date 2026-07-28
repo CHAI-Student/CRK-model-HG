@@ -14,16 +14,23 @@ preview와 달리 **운영 파이프라인이 그 순간 실제로 본 검출**�
     render-session --latest --map /home/crk/videos=./videos   # 경로 이식
 
 오버레이 규칙:
-- 필터 통과 검출: 클래스별 고정 색 실선 + "id conf" 라벨
-- 필터 탈락 검출: 회색 박스 + CUT 라벨 (검출은 됐지만 투표에 못 들어간 증거)
-- hand: 흰색
-- 헤더: 세션/트리거/존/delta/판정, 프레임별 POS + INFER n/m 또는 SKIP
+- 아카이브에는 **판정 로직에 실제 기여한 검출만** 담긴다 (필터 체인 통과 ∧
+  투표 진입 conf 이상 — 파이프라인 기록 시점에 걸러짐). 렌더는 그것만 그린다
+  (구 스키마의 kept=False 항목은 무시).
+- 상품: 클래스별 고정 색 실선 + "id conf" 라벨 / hand: 흰색
+- 캔버스 여백: 카메라 480×480 프레임을 여백 있는 캔버스 가운데 두고, 실험
+  정보 헤더는 프레임 **밖** 상단 밴드에 그린다 — bbox 라벨이 프레임 경계를
+  넘어도 여백에서 보이고, 헤더가 bbox 라벨을 가리지 않는다. 프레임 경계는
+  회색 테두리로 표시.
+- 헤더: 세션/트리거/존/delta/판정/카메라, 프레임별 POS + INFER n 또는 SKIP
   (기록이 없는 프레임 = 모션 게이트 스킵 또는 조기 종료 이후)
+- 크롭 기하: 아카이브의 camera_crops 스탬프(냉장 side=left 등)를 읽어 기록
+  당시와 동일한 크롭으로 디코드한다 — 좌표계 무변환 계약의 유지 장치.
 
 구현 제약: 이 레포는 런타임 의존성 0 — cv2를 쓰지 않는다. 디코드는
-adapters.avi_frames.decode_avi(운영과 동일한 center-crop 480×480 기하라
-bbox 좌표계가 그대로 맞는다), 그리기는 numpy 슬라이싱 + 내장 5×7 비트맵
-폰트, 인코드는 ffmpeg 파이프(rawvideo → mp4/jpg). numpy+ffmpeg 필요.
+adapters.avi_frames.decode_avi(운영과 동일 기하), 그리기는 numpy 슬라이싱
++ 내장 5×7 비트맵 폰트, 인코드는 ffmpeg 파이프(rawvideo → mp4/jpg).
+numpy+ffmpeg 필요.
 """
 from __future__ import annotations
 
@@ -39,6 +46,18 @@ from crk_model.adapters.avi_frames import decode_avi
 from crk_model.ledger.archive import SessionArchive, _load_document
 
 FRAME_SIZE = 480
+# 캔버스 레이아웃: 헤더 밴드(프레임 밖) + 프레임 주위 여백 — bbox 라벨이
+# 카메라 프레임 경계를 넘어도 보이고, 헤더가 라벨을 가리지 않는다.
+# 폭/높이는 짝수 유지 (libx264 yuv420p 제약).
+HEADER_H = 80  # 헤더 4줄 × 18px + 패딩
+LABEL_GAP = 24  # 헤더와 프레임 사이 — 상단 bbox 라벨(y-16)이 들어가는 띠
+MARGIN = 40  # 좌/우/하단 여백
+CANVAS_W = MARGIN + FRAME_SIZE + MARGIN  # 560
+CANVAS_H = HEADER_H + LABEL_GAP + FRAME_SIZE + MARGIN  # 624
+FRAME_X = MARGIN  # 캔버스 내 프레임 원점
+FRAME_Y = HEADER_H + LABEL_GAP
+_CANVAS_BG = (24, 24, 24)
+_FRAME_BORDER = (90, 90, 90)
 
 # ---------------------------------------------------------------------------
 # 5×7 비트맵 폰트 (uppercase — _text가 upper()로 정규화한다)
@@ -166,7 +185,6 @@ def _class_color(class_id: int) -> tuple[int, int, int]:
 
 
 _HAND_COLOR = (255, 255, 255)  # 흰색 (BGR)
-_CUT_COLOR = (140, 140, 140)  # 필터 탈락 회색
 _TEXT_BG = (0, 0, 0)
 
 
@@ -194,13 +212,20 @@ def _pick_codec() -> str:
 class FfmpegSink:
     """프레임(bgr24 ndarray)을 받아 mp4 1개 또는 jpg 시퀀스로 쓴다."""
 
-    def __init__(self, dest: Path, fmt: str, fps: float, size: int = FRAME_SIZE):
+    def __init__(
+        self,
+        dest: Path,
+        fmt: str,
+        fps: float,
+        width: int = CANVAS_W,
+        height: int = CANVAS_H,
+    ):
         self._dest = dest
         dest.parent.mkdir(parents=True, exist_ok=True)
         cmd = [
             "ffmpeg", "-hide_banner", "-v", "error", "-y",
             "-f", "rawvideo", "-pix_fmt", "bgr24",
-            "-s", f"{size}x{size}", "-framerate", f"{fps}",
+            "-s", f"{width}x{height}", "-framerate", f"{fps}",
             "-i", "-",
         ]
         if fmt == "mp4":
@@ -277,42 +302,68 @@ def _judgment_line(trigger: dict) -> str:
     return line
 
 
-def _draw_overlays(frame, record: dict | None, header: list[str], pos: int) -> None:
-    """프레임 1장에 헤더 + bbox를 그린다. record=None이면 미추론 프레임."""
-    for d in (record or {}).get("detections", ()):  # bbox 먼저, 헤더가 위에 오게
+def _influential(record: dict | None) -> list[dict]:
+    """레코드의 판정 기여 검출 목록 — 신 스키마는 전부, 구 스키마(kept 병기)
+    는 kept=False(필터/진입 컷 탈락분)를 제외한다."""
+    return [
+        d for d in (record or {}).get("detections", ())
+        if d.get("kept") is not False
+    ]
+
+
+def _compose_frame(frame, record: dict | None, header: list[str], pos: int):
+    """카메라 프레임 1장을 여백 캔버스에 얹고 헤더 + bbox를 그린다.
+
+    헤더는 프레임 밖 상단 밴드(HEADER_H), 프레임은 (FRAME_X, FRAME_Y) —
+    bbox 라벨(y-16)이 프레임 위 경계를 넘으면 LABEL_GAP 띠에 그려져
+    잘리지도, 헤더를 가리지도 않는다. record=None이면 미추론 프레임."""
+    import numpy as np  # lazy
+
+    canvas = np.empty((CANVAS_H, CANVAS_W, 3), dtype=frame.dtype)
+    canvas[:, :] = _CANVAS_BG
+    # 카메라 프레임 경계 테두리 — 여백과 실제 시야의 구분선
+    _rect(
+        canvas,
+        (FRAME_X - 2, FRAME_Y - 2, FRAME_X + FRAME_SIZE + 1, FRAME_Y + FRAME_SIZE + 1),
+        _FRAME_BORDER,
+        thickness=1,
+    )
+    canvas[FRAME_Y : FRAME_Y + FRAME_SIZE, FRAME_X : FRAME_X + FRAME_SIZE] = frame
+
+    for d in _influential(record):
         bbox = d.get("bbox") or (0, 0, 0, 0)
         if tuple(bbox) == (0, 0, 0, 0):
             continue  # 공간 정보 없는 검출 (테스트 더미 등)
-        kept = d.get("kept", True)
+        cb = (
+            FRAME_X + bbox[0], FRAME_Y + bbox[1],
+            FRAME_X + bbox[2], FRAME_Y + bbox[3],
+        )
         if d.get("hand"):
             color = _HAND_COLOR
             label = f"HAND {d.get('conf', 0):.2f}"
-        elif kept:
+        else:
             color = _class_color(int(d.get("class_id", 0)))
             label = f"{d.get('class_id')} {d.get('conf', 0):.2f}"
-        else:
-            color = _CUT_COLOR
-            label = f"{d.get('class_id')} CUT"
-        _rect(frame, bbox, color, thickness=2 if kept else 1)
-        lx, ly = int(bbox[0]), max(int(bbox[1]) - 16, 0)
-        _fill(frame, lx, ly, lx + 12 * len(label) + 4, ly + 16, _TEXT_BG)
-        _text(frame, lx + 2, ly + 1, label, color, scale=2)
+        _rect(canvas, cb, color, thickness=2)
+        # 라벨은 박스 위 — 여백 덕에 프레임 밖으로 나가도 보인다. 헤더
+        # 밴드 아래로는 클램프해 실험 정보와 절대 겹치지 않는다.
+        lx = int(cb[0])
+        ly = max(int(cb[1]) - 18, HEADER_H + 2)
+        _fill(canvas, lx, ly, lx + 12 * len(label) + 4, ly + 16, _TEXT_BG)
+        _text(canvas, lx + 2, ly + 1, label, color, scale=2)
 
     y = 4
     for line in header:
-        _fill(frame, 0, y - 2, 12 * len(line) + 6, y + 16, _TEXT_BG)
-        _text(frame, 3, y, line, (0, 255, 255), scale=2)
+        _text(canvas, 3, y, line, (0, 255, 255), scale=2)
         y += 18
     if record is None:
         status = f"POS {pos:03d} SKIP"
         color = (160, 160, 160)
     else:
-        dets = record.get("detections", ())
-        kept_n = sum(1 for d in dets if d.get("kept", True))
-        status = f"POS {pos:03d} INFER {kept_n}/{len(dets)}"
+        status = f"POS {pos:03d} INFER {len(_influential(record))}"
         color = (0, 255, 0)
-    _fill(frame, 0, y - 2, 12 * len(status) + 6, y + 16, _TEXT_BG)
-    _text(frame, 3, y, status, color, scale=2)
+    _text(canvas, 3, y, status, color, scale=2)
+    return canvas
 
 
 def _remap(path: str, mappings: list[tuple[str, str]]) -> str:
@@ -334,7 +385,8 @@ def render_trigger(
     cameras: list[str] | None,
 ) -> list[Path]:
     """트리거 1건의 카메라별 오버레이 영상 생성 — 출력 경로 목록 반환."""
-    records = (trigger.get("trace") or {}).get("frame_detections")
+    trace = trigger.get("trace") or {}
+    records = trace.get("frame_detections")
     if records is None:
         print(
             f"  [trig {index}] frame_detections 없음 — "
@@ -342,6 +394,9 @@ def render_trigger(
             file=sys.stderr,
         )
         return []
+    # 좌표계 계약: 기록 당시의 크롭 원점(냉장 side=left 등)으로 디코드해야
+    # bbox가 맞는다. 스탬프 없는 구 아카이브는 center (구 동작).
+    crops = trace.get("camera_crops") or {}
     by_camera: dict[str, dict[int, dict]] = {}
     for r in records:
         by_camera.setdefault(r["camera"], {})[int(r["pos"])] = r
@@ -365,13 +420,15 @@ def render_trigger(
             out_dir / f"trig{index}_{camera}.mp4"
         )
         sink = FfmpegSink(dest, fmt, cam_fps)
-        header = header_base + [f"CAM {camera}"]
+        crop = crops.get(camera, "center")
+        header = header_base + [f"CAM {camera} ({crop})"]
         ok = False
         try:
-            for pos, bundle in enumerate(decode_avi(path)):
-                frame = bundle.full.copy()
-                _draw_overlays(frame, by_camera.get(camera, {}).get(pos), header, pos)
-                sink.write(frame)
+            for pos, bundle in enumerate(decode_avi(path, crop=crop)):
+                canvas = _compose_frame(
+                    bundle.full, by_camera.get(camera, {}).get(pos), header, pos
+                )
+                sink.write(canvas)
             ok = True
         except OSError as exc:
             # 카메라 1개의 디코드/인코드 실패가 나머지 렌더를 막지 않는다

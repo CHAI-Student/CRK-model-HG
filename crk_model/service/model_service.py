@@ -104,11 +104,16 @@ class ModelService:
             dict(profiles) if profiles is not None else _profiles_from_settings(self.settings)
         )
         self._default_profile = _default_profile_from_settings(self.settings)
+        # 카메라별 디코드 크롭 원점 (MODEL__VIDEO__SIDE_CROP) — 어댑터의
+        # LazyAviFrames 구성과 아카이브(camera_crops) 기록의 단일 소스.
+        # top은 항상 center, 냉장 side만 left로 전환한다 (config.py 참조).
+        self.camera_crops = {"top": "center", "side": self.settings.side_camera_crop}
         logger.info(
             "[CONFIG] cabinet_type=%s default_profile=%s freezer_zones=%s "
-            "camera_layout=%s",
+            "camera_layout=%s side_crop=%s",
             self.settings.cabinet_type, self._default_profile.name,
             self.settings.freezer_zones, self.settings.camera_layout,
+            self.settings.side_camera_crop,
         )
         self.snapshots = ActiveProductStore()
         self.event_log = EventLog()
@@ -275,7 +280,9 @@ class ModelService:
             segment_retry_gap_grams=self.settings.segment_retry_gap_grams,
             # 프레임별 bbox 기록 (MODEL__SESSION__SAVE_DETECTIONS) — 아카이브
             # 동봉 후 render-session CLI가 오버레이 영상으로 재구성한다.
+            # camera_crops는 렌더가 동일 크롭 기하를 재현하기 위한 좌표계 스탬프.
             save_detections=self.settings.save_detections,
+            camera_crops=self.camera_crops,
         )
         # 동시성: FastAPI sync 엔드포인트(threadpool)와 워커 스레드가 게이트웨이·
         # 이벤트로그·스냅샷을 동시에 건드릴 수 있어 단일 RLock으로 코스 그레인

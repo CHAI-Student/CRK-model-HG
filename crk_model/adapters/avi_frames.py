@@ -6,6 +6,10 @@
   피한다 — conf 하락과 bbox 좌표계 왜곡(ROI/hand_margin 상수 어긋남)을 낳기
   때문. 크롭 후 크기가 부족한 소형 소스(테스트 픽스처 등)만 리사이즈로
   보정한다 (운영 640×480에서는 무손실 크롭만 발생).
+- 크롭 원점 (2026-07-28, 냉장 실기): crop="center"(기본) | "left" —
+  냉장 side 카메라는 존이 화면 왼쪽에 있어 left-crop(x=0..480, 원본 엔진과
+  동일 좌표계)을 쓴다. 카메라별 선택은 LazyAviFrames(crop_by_camera=...)
+  로 주입 (MODEL__VIDEO__SIDE_CROP → ModelService 배선).
 - 디코드는 워커 스레드에서 lazy로 일어난다 (LazyAviFrames): /trigger 응답은
   202 의미론대로 즉시 반환되고, 무거운 작업은 단일 워커(I7)가 순차 수행.
 - 스트리밍: 480×480×3 bytes 프레임 ~400장을 리스트로 상주시키면 카메라당
@@ -78,17 +82,24 @@ def decode_avi(
     *,
     size: int = 480,
     gate_size: int = 120,
+    crop: str = "center",
 ) -> Iterator[FrameBundle]:
     """AVI를 프레임 단위로 디코드해 FrameBundle을 yield하는 스트리밍 이터레이터.
+
+    crop: "center"(기본) | "left" — 크롭 원점 (모듈 docstring 기하 계약).
 
     I1: 열기 실패·0프레임 디코드는 조용한 무검출이 아니라 IOError로 전파
     (파이프라인이 error 이벤트화). "0프레임" 판정은 첫 next() 시점에 이뤄진다.
     """
+    if crop not in ("center", "left"):
+        # cabinet_type과 동일한 fail-closed: 오타가 조용히 center가 되면
+        # bbox 좌표계가 80px 어긋난 채 운영되고 있음을 알 수 없다.
+        raise ValueError(f"Invalid crop: {crop}")
     decoder = _select_decoder()
     if decoder == "ffmpeg":
-        gen = _decode_avi_ffmpeg(path, size=size, gate_size=gate_size)
+        gen = _decode_avi_ffmpeg(path, size=size, gate_size=gate_size, crop=crop)
     else:
-        gen = _decode_avi_opencv(path, size=size, gate_size=gate_size)
+        gen = _decode_avi_opencv(path, size=size, gate_size=gate_size, crop=crop)
 
     # 첫 프레임을 미리 당겨서 "0프레임" 여부를 즉시 판정 (I1) — 이후 프레임은
     # 정상적으로 지연 방출.
@@ -108,7 +119,7 @@ def decode_avi(
 
 
 def _decode_avi_opencv(
-    path: str, *, size: int, gate_size: int
+    path: str, *, size: int, gate_size: int, crop: str = "center"
 ) -> Iterator[FrameBundle]:
     import cv2  # lazy
 
@@ -121,12 +132,13 @@ def _decode_avi_opencv(
             ok, img = cap.read()
             if not ok:
                 break
-            # center-crop 우선 (모듈 docstring 기하 계약): 640×480 → 480×480.
+            # 크롭 우선 (모듈 docstring 기하 계약): 640×480 → 480×480.
+            # x 원점은 crop 모드(center: 좌우 균등 / left: 0)로 결정.
             # 크롭 후에도 목표에 못 미치는 소형 소스만 리사이즈 보정.
             h, w = img.shape[:2]
             if w > size or h > size:
                 y0 = max((h - size) // 2, 0)
-                x0 = max((w - size) // 2, 0)
+                x0 = 0 if crop == "left" else max((w - size) // 2, 0)
                 img = img[y0 : y0 + size, x0 : x0 + size]
             if img.shape[0] != size or img.shape[1] != size:
                 img = cv2.resize(img, (size, size))
@@ -138,7 +150,7 @@ def _decode_avi_opencv(
 
 
 def _decode_avi_ffmpeg(
-    path: str, *, size: int, gate_size: int
+    path: str, *, size: int, gate_size: int, crop: str = "center"
 ) -> Iterator[FrameBundle]:
     """ffmpeg 디코드 진입점 — hwaccel 시도 후 실패(0프레임) 시 CPU 1회 재시도.
 
@@ -150,7 +162,7 @@ def _decode_avi_ffmpeg(
         got_frame = False
         try:
             for bundle in _decode_avi_ffmpeg_cmd(
-                path, size=size, gate_size=gate_size, hwaccel=True
+                path, size=size, gate_size=gate_size, hwaccel=True, crop=crop
             ):
                 got_frame = True
                 yield bundle
@@ -158,11 +170,13 @@ def _decode_avi_ffmpeg(
         except OSError:
             if got_frame:
                 raise
-    yield from _decode_avi_ffmpeg_cmd(path, size=size, gate_size=gate_size, hwaccel=False)
+    yield from _decode_avi_ffmpeg_cmd(
+        path, size=size, gate_size=gate_size, hwaccel=False, crop=crop
+    )
 
 
 def _decode_avi_ffmpeg_cmd(
-    path: str, *, size: int, gate_size: int, hwaccel: bool
+    path: str, *, size: int, gate_size: int, hwaccel: bool, crop: str = "center"
 ) -> Iterator[FrameBundle]:
     import numpy as np  # lazy
 
@@ -170,13 +184,15 @@ def _decode_avi_ffmpeg_cmd(
     cmd = ["ffmpeg"]
     if hwaccel:
         cmd.extend(["-hwaccel", "cuda"])
-    # center-crop 우선 (모듈 docstring 기하 계약): min(iw,size) 크롭 후 scale은
+    # 크롭 우선 (모듈 docstring 기하 계약): min(iw,size) 크롭 후 scale은
     # 640×480 운영 소스에서 1:1 통과(no-op), 소형 소스에서만 확대 보정.
-    # x/y는 (iw-ow)/(ih-oh)의 절반 — ffmpeg crop 필터의 ow/oh는 계산된 출력
-    # 크기(=min(iw,size)/min(ih,size))를 가리키는 내장 변수.
-    # ffmpeg 필터 표현식 내 콤마는 인자 구분자와 겹치므로 \, 로 이스케이프.
+    # x 원점은 crop 모드로 결정 — center는 (iw-ow)/2, left는 0. ow/oh는
+    # ffmpeg crop 필터가 계산한 출력 크기(=min(iw,size)/min(ih,size))를
+    # 가리키는 내장 변수. 필터 표현식 내 콤마는 인자 구분자와 겹치므로
+    # \, 로 이스케이프.
+    crop_x = "0" if crop == "left" else "(iw-ow)/2"
     vf = (
-        f"crop=min(iw\\,{size}):min(ih\\,{size}):(iw-ow)/2:(ih-oh)/2,"
+        f"crop=min(iw\\,{size}):min(ih\\,{size}):{crop_x}:(ih-oh)/2,"
         f"scale={size}:{size}"
     )
     cmd.extend(
@@ -270,16 +286,30 @@ class LazyAviFrames(Mapping):
     스트리밍화: 각 __getitem__ 호출은 새 디코드 스트림(제너레이터)을 연다.
     소비처(pipeline._run_vision)는 카메라당 정확히 1회만 순회하므로 캐시 없이도
     재호출 시 재디코드 비용만 감수하면 되고, 대신 프레임 전체 상주를 피한다.
+
+    crop_by_camera: 카메라별 크롭 원점 오버라이드 (예: 냉장 side left-crop —
+    MODEL__VIDEO__SIDE_CROP). 미지정 카메라는 center (기존 동작).
     """
 
-    def __init__(self, video_paths: Mapping[str, str], **decode_kwargs):
+    def __init__(
+        self,
+        video_paths: Mapping[str, str],
+        *,
+        crop_by_camera: Mapping[str, str] | None = None,
+        **decode_kwargs,
+    ):
         self._paths = dict(video_paths)
+        self._crops = dict(crop_by_camera or {})
         self._kwargs = decode_kwargs
 
     def __getitem__(self, camera: str) -> Iterator[FrameBundle]:
         if camera not in self._paths:
             raise KeyError(camera)
-        return decode_avi(self._paths[camera], **self._kwargs)
+        return decode_avi(
+            self._paths[camera],
+            crop=self._crops.get(camera, "center"),
+            **self._kwargs,
+        )
 
     def __iter__(self) -> Iterator[str]:
         return iter(self._paths)

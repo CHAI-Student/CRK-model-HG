@@ -70,10 +70,14 @@ def _trace_to_dict(trace: TriggerTrace | None) -> dict:
         "likelihood_shadow": trace.likelihood_shadow,
     }
     # 프레임별 bbox 기록 (MODEL__SESSION__SAVE_DETECTIONS opt-in) — off일 때는
-    # 키 자체를 넣지 않아 기존 아카이브 포맷을 그대로 유지한다.
-    # render-session CLI가 video_paths의 AVI 위에 오버레이해 시각 검증한다.
+    # 키 자체를 넣지 않아 기존 아카이브 포맷을 그대로 유지한다. 판정 기여
+    # 검출(진입 conf 통과)만 담긴다 — render-session CLI가 video_paths의
+    # AVI 위에 오버레이해 시각 검증한다. camera_crops는 기록 당시의 디코드
+    # 크롭 원점(좌표계 계약) — 렌더가 같은 기하로 재현해야 bbox가 맞는다.
     if trace.frame_detections is not None:
         out["frame_detections"] = list(trace.frame_detections)
+        if trace.camera_crops is not None:
+            out["camera_crops"] = dict(trace.camera_crops)
     return out
 
 

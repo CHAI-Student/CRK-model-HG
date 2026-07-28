@@ -15,7 +15,7 @@ import subprocess
 
 import pytest
 
-from crk_model.adapters.render_cli import _remap, main
+from crk_model.adapters.render_cli import _influential, _remap, main
 
 HAVE_FFMPEG = shutil.which("ffmpeg") is not None
 try:
@@ -37,12 +37,12 @@ def _pin_decoder(monkeypatch):
     monkeypatch.setenv("MODEL__VIDEO__DECODER", "ffmpeg")
 
 
-def _make_test_avi(path) -> str:
-    """ffmpeg testsrc로 480x480 6프레임짜리 소형 avi를 만든다."""
+def _make_test_avi(path, size="480x480") -> str:
+    """ffmpeg testsrc로 6프레임짜리 소형 avi를 만든다."""
     subprocess.run(
         [
             "ffmpeg", "-y", "-f", "lavfi",
-            "-i", "testsrc=size=480x480:rate=6:duration=1",
+            "-i", f"testsrc=size={size}:rate=6:duration=1",
             str(path),
         ],
         check=True,
@@ -51,10 +51,13 @@ def _make_test_avi(path) -> str:
     return str(path)
 
 
-def _archive_doc(session_id, video_path, frame_detections):
+def _archive_doc(session_id, video_path, frame_detections, camera_crops=None,
+                 camera="top"):
     trace = {"yolo_calls": 2, "reason_codes": []}
     if frame_detections is not None:
         trace["frame_detections"] = frame_detections
+    if camera_crops is not None:
+        trace["camera_crops"] = camera_crops
     return {
         "session_id": session_id,
         "status": "finalized",
@@ -68,7 +71,7 @@ def _archive_doc(session_id, video_path, frame_detections):
                     "status": "complete",
                     "products": [{"class_id": 27, "count": 1}],
                 },
-                "video_paths": {"top": video_path},
+                "video_paths": {camera: video_path},
                 "trace": trace,
             }
         ],
@@ -88,12 +91,12 @@ RECORDS = [
         "camera": "top",
         "pos": 0,
         "detections": [
-            {"class_id": 27, "conf": 0.86, "bbox": [50, 60, 120, 140], "hand": False,
-             "kept": True},
+            # 신 스키마: 판정 기여 검출만, kept 필드 없음
+            {"class_id": 27, "conf": 0.86, "bbox": [50, 60, 120, 140], "hand": False},
+            # 구 스키마 하위호환: kept=False(필터/진입 컷 탈락분)는 그리지 않는다
             {"class_id": 13, "conf": 0.41, "bbox": [420, 60, 470, 140], "hand": False,
              "kept": False},
-            {"class_id": 0, "conf": 0.9, "bbox": [200, 200, 300, 300], "hand": True,
-             "kept": True},
+            {"class_id": 0, "conf": 0.9, "bbox": [200, 200, 300, 300], "hand": True},
         ],
     },
     {"camera": "top", "pos": 2, "detections": []},  # 추론했으나 무검출
@@ -152,6 +155,78 @@ class TestRenderEndToEnd:
         rc = main(["ses-r5", "--dir", str(sessions), "--out", str(tmp_path / "o")])
         assert rc == 1
         assert "영상 없음" in capsys.readouterr().err
+
+    def test_left_crop_stamp_applied(self, tmp_path):
+        """냉장 side left-crop 세션: 아카이브 camera_crops 스탬프로 디코드."""
+        avi = _make_test_avi(tmp_path / "side.avi", size="640x480")
+        records = [{
+            "camera": "side", "pos": 0,
+            "detections": [
+                {"class_id": 7, "conf": 0.9, "bbox": [10, 60, 90, 140], "hand": False},
+            ],
+        }]
+        sessions = _write_archive(
+            tmp_path,
+            _archive_doc(
+                "ses-r6", avi, records,
+                camera_crops={"top": "center", "side": "left"}, camera="side",
+            ),
+        )
+        out = tmp_path / "render"
+        rc = main(["ses-r6", "--dir", str(sessions), "--out", str(out)])
+        assert rc == 0
+        assert (out / "ses-r6" / "trig0_side.mp4").exists()
+
+
+class TestInfluentialFilter:
+    def test_legacy_kept_false_is_skipped(self):
+        rec = {"detections": [
+            {"class_id": 1, "conf": 0.9, "bbox": [0, 0, 1, 1], "hand": False},
+            {"class_id": 2, "conf": 0.4, "bbox": [0, 0, 1, 1], "hand": False,
+             "kept": False},
+            {"class_id": 3, "conf": 0.8, "bbox": [0, 0, 1, 1], "hand": False,
+             "kept": True},
+        ]}
+        assert [d["class_id"] for d in _influential(rec)] == [1, 3]
+        assert _influential(None) == []
+
+
+class TestDecodeCropOrigin:
+    """decode_avi crop="left" 기하: 640×480에서 x=0..480 (center는 80..560)."""
+
+    def _striped_avi(self, path):
+        # 왼쪽 160px 빨강 + 오른쪽 480px 파랑 — 크롭 원점에 따라 x=100의
+        # 색이 달라진다 (left: 빨강 / center: 소스 x=180 → 파랑).
+        subprocess.run(
+            [
+                "ffmpeg", "-y",
+                "-f", "lavfi", "-i", "color=red:size=160x480:rate=5:duration=1",
+                "-f", "lavfi", "-i", "color=blue:size=480x480:rate=5:duration=1",
+                "-filter_complex", "hstack",
+                str(path),
+            ],
+            check=True,
+            capture_output=True,
+        )
+        return str(path)
+
+    def test_left_vs_center_geometry(self, tmp_path, monkeypatch):
+        from crk_model.adapters.avi_frames import decode_avi
+
+        avi = self._striped_avi(tmp_path / "striped.avi")
+        first_left = next(iter(decode_avi(avi, crop="left"))).full
+        first_center = next(iter(decode_avi(avi, crop="center"))).full
+        # BGR — mjpeg 손실 압축 감안해 채널 우위로 판정
+        b, g, r = first_left[240, 100]
+        assert r > 150 and b < 100  # left-crop: x=100은 빨강 띠 안
+        b, g, r = first_center[240, 100]
+        assert b > 150 and r < 100  # center-crop: 소스 x=180 → 파랑
+
+    def test_invalid_crop_fail_closed(self, tmp_path):
+        from crk_model.adapters.avi_frames import decode_avi
+
+        with pytest.raises(ValueError):
+            decode_avi("whatever.avi", crop="right")
 
 
 class TestDrawingPrimitives:
