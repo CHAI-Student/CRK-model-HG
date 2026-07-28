@@ -97,6 +97,12 @@ class TriggerTrace:
     # 판정 미사용 — 이벤트(트레이)별 score 순위와 현행 판정의 diff 기록.
     # mismatch=true 세션을 아카이브에서 수집해 승격(Phase 2/3)을 결정한다.
     likelihood_shadow: list[dict] | None = None
+    # 프레임별 bbox 기록 (render-session 시각 검증용, MODEL__SESSION__
+    # SAVE_DETECTIONS opt-in): 추론이 실행된 프레임마다 {camera, pos,
+    # detections[{class_id, conf, bbox, hand, kept}]} — raw 검출 전체에
+    # 필터 통과 여부(kept)를 병기해 "검출됐지만 필터에서 죽었다"까지
+    # 오버레이로 재구성한다. None = 미기록(기본, 아카이브 포맷 불변).
+    frame_detections: list[dict] | None = None
 
 
 @dataclass(frozen=True)
@@ -158,6 +164,11 @@ class TriggerPipeline:
         # 수명(OPEN 리셋)을 관리하며 주입. None이면 기록·prior 모두 비활성
         # (라이브러리 기본, 하위호환). Phase 1: likelihood shadow의
         # log_p_tray 항으로만 소비 — 판정·정산 무변경.
+        save_detections: bool = False,
+        # 프레임별 bbox 기록 (MODEL__SESSION__SAVE_DETECTIONS): 추론 프레임의
+        # raw 검출 + 필터 통과 여부를 trace.frame_detections에 남긴다 —
+        # 아카이브 동봉 후 render-session CLI가 AVI 위에 오버레이한다.
+        # 판정 무변경(관측 전용), 기본 off (아카이브 용량·성능 영향 차단).
     ):
         self._detector = detector
         self._profiles = dict(profiles)
@@ -179,6 +190,7 @@ class TriggerPipeline:
             else None
         )
         self._tray_memory = tray_memory
+        self._save_detections = save_detections
 
     def process(self, session_id: str, req: TriggerRequest) -> TriggerOutcome:
         try:
@@ -620,6 +632,12 @@ class TriggerPipeline:
                     detections = self._filters.apply(camera, raw)
                     camera_filtered_out += len(raw) - len(detections)
                     trace.yolo_calls += 1
+                    if self._save_detections:
+                        # 검출 0 프레임도 기록한다 — 렌더에서 "게이트 스킵"과
+                        # "추론했으나 무검출"을 구분할 유일한 근거.
+                        self._record_frame_detections(
+                            trace, camera, pos, raw, detections
+                        )
                     tids = (
                         # pos 전달 = T1 트랙별 위치 계측 (motion_evidence.py)
                         evidence.observe(camera, detections, pos=pos)
@@ -669,6 +687,36 @@ class TriggerPipeline:
             "tube_shadow": _with_tubes(voting.tube_summary(), evidence),
         }
         return voting.combine()
+
+    @staticmethod
+    def _record_frame_detections(
+        trace: TriggerTrace, camera: str, pos: int, raw, kept
+    ) -> None:
+        """추론 프레임 1장의 bbox 기록 (save_detections 탭).
+
+        raw 전체를 남기고 필터 통과분은 kept=True로 표시한다 — 동일 객체가
+        필터를 그대로 통과하므로(filters.apply는 복사하지 않는다) id 비교로
+        충분하다. bbox는 detect 입력 프레임(center-crop 480×480) 좌표계
+        그대로 — render-session이 같은 decode_avi 기하로 재현한다."""
+        if trace.frame_detections is None:
+            trace.frame_detections = []
+        kept_ids = {id(d) for d in kept}
+        trace.frame_detections.append(
+            {
+                "camera": camera,
+                "pos": pos,
+                "detections": [
+                    {
+                        "class_id": d.class_id,
+                        "conf": round(d.confidence, 4),
+                        "bbox": [round(float(v), 1) for v in d.bbox],
+                        "hand": d.is_hand,
+                        "kept": id(d) in kept_ids,
+                    }
+                    for d in raw
+                ],
+            }
+        )
 
     @staticmethod
     def _outcome(

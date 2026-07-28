@@ -856,3 +856,79 @@ class TestSegmentTargetRetry:
         assert "segment_target_retry" in outcome.trace.reason_codes  # 시도는 기록
         assert "+segment_target_retry" not in j.reason  # 채택은 안 됨
         assert j.status is not JudgmentStatus.COMPLETE
+
+
+class TestSaveDetectionsTap:
+    """프레임별 bbox 기록 (MODEL__SESSION__SAVE_DETECTIONS) — render-session
+    시각 검증의 데이터 소스. 판정 무변경 관측 전용이어야 한다."""
+
+    def _pipe(self, cola, save_detections):
+        detector = FakeDetector(detections=[
+            Detection(1, 0.8, bbox=(50.0, 50.0, 100.0, 100.0)),
+            # side ROI(center_x >= 400) 탈락 재현용 — kept=False 기록 검증
+            Detection(1, 0.6, bbox=(400.0, 50.0, 470.0, 100.0)),
+        ])
+        store = ActiveProductStore()
+        store.update([cola])
+        # 조기 종료 off: top에서 합의가 서면 side가 아예 안 돌아 side ROI
+        # 탈락(kept=False) 기록을 검증할 수 없다 — 여기서는 전 카메라 순회 고정.
+        return TriggerPipeline(
+            detector, {1: REFRIGERATOR}, store,
+            save_detections=save_detections, early_termination_enabled=False,
+        )
+
+    def test_off_by_default_records_nothing(self, cola):
+        pipe = self._pipe(cola, save_detections=False)
+        outcome = pipe.process(
+            "s1",
+            TriggerRequest(
+                1,
+                {"top": moving_frames(8), "side": moving_frames(8)},
+                samples(500, 400),
+                1.0,
+            ),
+        )
+        assert outcome.trace.frame_detections is None
+
+    def test_records_raw_detections_with_kept_flag(self, cola):
+        pipe = self._pipe(cola, save_detections=True)
+        outcome = pipe.process(
+            "s1",
+            TriggerRequest(
+                1,
+                {"top": moving_frames(8), "side": moving_frames(8)},
+                samples(500, 400),
+                1.0,
+            ),
+        )
+        records = outcome.trace.frame_detections
+        assert records  # 추론이 1회 이상 실행됐고 전부 기록됨
+        assert len(records) == outcome.trace.yolo_calls
+        for rec in records:
+            assert rec["camera"] in ("top", "side")
+            assert isinstance(rec["pos"], int)
+            for d in rec["detections"]:
+                assert set(d) == {"class_id", "conf", "bbox", "hand", "kept"}
+                assert len(d["bbox"]) == 4
+        # raw 전체 보존: 필터 탈락(side ROI) 검출도 kept=False로 남는다
+        side = [d for r in records if r["camera"] == "side" for d in r["detections"]]
+        assert any(not d["kept"] for d in side)
+        assert any(d["kept"] for d in side)
+        # 판정 무변경 (관측 전용): off 파이프라인과 동일 결과
+        base = self._pipe(cola, save_detections=False).process(
+            "s1",
+            TriggerRequest(
+                1,
+                {"top": moving_frames(8), "side": moving_frames(8)},
+                samples(500, 400),
+                1.0,
+            ),
+        )
+        assert base.event.judgment == outcome.event.judgment
+
+    def test_settings_env_wiring(self, monkeypatch):
+        from crk_model.core.config import Settings as S
+
+        assert S().save_detections is False
+        monkeypatch.setenv("MODEL__SESSION__SAVE_DETECTIONS", "1")
+        assert S.from_env().save_detections is True

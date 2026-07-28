@@ -273,6 +273,9 @@ class ModelService:
             held_track_min_head=self.settings.held_track_min_head,
             track_max_gap=self.settings.track_max_gap,
             segment_retry_gap_grams=self.settings.segment_retry_gap_grams,
+            # 프레임별 bbox 기록 (MODEL__SESSION__SAVE_DETECTIONS) — 아카이브
+            # 동봉 후 render-session CLI가 오버레이 영상으로 재구성한다.
+            save_detections=self.settings.save_detections,
         )
         # 동시성: FastAPI sync 엔드포인트(threadpool)와 워커 스레드가 게이트웨이·
         # 이벤트로그·스냅샷을 동시에 건드릴 수 있어 단일 RLock으로 코스 그레인

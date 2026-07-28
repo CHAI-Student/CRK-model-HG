@@ -397,3 +397,45 @@ class TestGroundTruthLabel:
         assert rc == 0
         text = path.read_text(encoding="utf-8")
         assert "연속 취출" in text and ("class_id: 27" in text or '"class_id": 27' in text)
+
+
+class TestFrameDetectionsArchive:
+    """프레임별 bbox 기록의 아카이브 동봉 (MODEL__SESSION__SAVE_DETECTIONS).
+
+    off(기본)면 키 자체가 없어야 한다 — 기존 아카이브 포맷 불변.
+    on이면 trace.frame_detections가 render-session이 읽을 스키마로 남는다."""
+
+    def _finalized_doc(self, tmp_path, cola, save_detections):
+        archive = SessionArchive(
+            str(tmp_path / "sessions"), today=lambda: datetime.date(2026, 2, 4)
+        )
+        svc = ModelService(
+            FakeDetector(),
+            profiles={1: REFRIGERATOR},
+            clock=FakeClock(),
+            archive=archive,
+            settings=Settings(close_grace_s=0.0, save_detections=save_detections),
+        )
+        svc.handle_multi_zone(open_payload(cola))
+        svc.handle_trigger(trigger_payload())
+        svc.process_pending()
+        svc.handle_multi_zone({"state": "CLOSE"})
+        import yaml
+
+        files = list((tmp_path / "sessions" / "2026-02-04").glob("*.yaml"))
+        assert len(files) == 1
+        return yaml.safe_load(files[0].read_text(encoding="utf-8"))
+
+    def test_off_by_default_key_absent(self, tmp_path, cola):
+        doc = self._finalized_doc(tmp_path, cola, save_detections=False)
+        assert "frame_detections" not in doc["triggers"][0]["trace"]
+
+    def test_on_embeds_frame_records(self, tmp_path, cola):
+        doc = self._finalized_doc(tmp_path, cola, save_detections=True)
+        trig = doc["triggers"][0]
+        records = trig["trace"]["frame_detections"]
+        assert records and len(records) == trig["trace"]["yolo_calls"]
+        rec = records[0]
+        assert rec["camera"] in ("top", "side")
+        det = rec["detections"][0]
+        assert set(det) == {"class_id", "conf", "bbox", "hand", "kept"}

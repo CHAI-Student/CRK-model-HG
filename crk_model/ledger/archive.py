@@ -60,7 +60,7 @@ def _load_document(path: Path) -> dict:
 def _trace_to_dict(trace: TriggerTrace | None) -> dict:
     if trace is None:
         return {}
-    return {
+    out = {
         "yolo_calls": trace.yolo_calls,
         "processed_frames": dict(trace.processed_frames),
         "gate_skipped_frames": dict(trace.gate_skipped_frames),
@@ -69,6 +69,12 @@ def _trace_to_dict(trace: TriggerTrace | None) -> dict:
         "vote_summary": dict(trace.vote_summary) if trace.vote_summary else {},
         "likelihood_shadow": trace.likelihood_shadow,
     }
+    # 프레임별 bbox 기록 (MODEL__SESSION__SAVE_DETECTIONS opt-in) — off일 때는
+    # 키 자체를 넣지 않아 기존 아카이브 포맷을 그대로 유지한다.
+    # render-session CLI가 video_paths의 AVI 위에 오버레이해 시각 검증한다.
+    if trace.frame_detections is not None:
+        out["frame_detections"] = list(trace.frame_detections)
+    return out
 
 
 def _event_to_dict(

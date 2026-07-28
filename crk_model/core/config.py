@@ -125,6 +125,10 @@ class Settings:
     # 세션 YAML 아카이브 (issue #6: 오판정 사후 분석용) — 빈 문자열이면 비활성.
     session_archive_dir: str = "data/sessions"
     session_archive_retention_days: int = 14
+    # 프레임별 bbox 기록 (render-session 시각 검증용): 추론 프레임의 raw 검출
+    # + 필터 통과 여부를 아카이브 trace.frame_detections에 동봉한다. 기본 off
+    # — 실기 품질 확인 기간에만 켠다 (아카이브 용량 증가: 트리거당 수십~수백 KB).
+    save_detections: bool = False
     # ---- 비전 투표 튜닝 (issue #6 2차: 실기 vote_summary로 conf_floor 전멸 확정) ----
     # 카메라별 투표 진입 임계 — 원본 top/side_confidence_threshold 대응 (코드 기본
     # 0.70, 원본 운영 .env.example은 0.50). 이 값 미만 검출은 투표에 진입하지 못해
@@ -327,6 +331,7 @@ class Settings:
             session_archive_retention_days=_env_int(
                 "MODEL__SESSION__ARCHIVE_RETENTION_DAYS", 14
             ),
+            save_detections=_env_bool("MODEL__SESSION__SAVE_DETECTIONS", False),
             top_confidence_threshold=_env_float(
                 "MODEL__VISION__TOP_CONFIDENCE_THRESHOLD", 0.70
             ),
