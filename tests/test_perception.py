@@ -249,6 +249,34 @@ class TestEarlyTermination:
             frames_since_hand_exit=6,
         )
 
+    def test_lazy_candidates_not_evaluated_when_gated(self, cola):
+        """T1-1 (0728 리서치): combine()은 값싼 가드 통과 후에만 평가된다 —
+        냉동(I15)·반품·손 미퇴장 프레임에서 콜러블이 호출되면 회귀."""
+        calls = []
+
+        def lazy():
+            calls.append(1)
+            return [cand(1, votes=10)]
+
+        # 냉동 금지 — 콜러블 미호출
+        assert not self._terminator(FREEZER).should_stop(
+            delta_weight=-100.0, candidates=lazy,
+            active_products=[cola], frames_since_hand_exit=6,
+        )
+        # 손 미퇴장 — 콜러블 미호출
+        assert not self._terminator().should_stop(
+            delta_weight=-100.0, candidates=lazy,
+            active_products=[cola], frames_since_hand_exit=2,
+        )
+        assert calls == []
+        # 가드 전부 통과 — 콜러블 1회 평가 후 기존과 동일 판정
+        assert self._terminator().should_stop(
+            delta_weight=-100.0, candidates=lazy,
+            active_products=[cola], frames_since_hand_exit=6,
+        )
+        assert calls == [1]
+
+
 
 class TestMotionEvidence:
     """모션 변위 증거 (issue #16 후속, 원본 변위 필터 이식): "집어간 상품은

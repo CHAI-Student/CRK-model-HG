@@ -657,9 +657,12 @@ class TriggerPipeline:
                     )
                     voting.add_frame(camera, detections, track_ids=tids, pos=pos)
                     latch.update_after_inference(any(d.is_hand for d in detections))
+                    # combine은 지연 콜러블로 — 냉동(I15)·반품·손 미퇴장
+                    # 프레임에서는 O(누적 표²) 결합이 아예 실행되지 않는다
+                    # (docs/0728_freezer_latency_research.md T1-1).
                     if terminator.should_stop(
                         delta_weight=delta,
-                        candidates=voting.combine(),
+                        candidates=voting.combine,
                         active_products=snapshot.products,
                         frames_since_hand_exit=latch.frames_since_exit,
                     ):

@@ -286,3 +286,30 @@ class TestPipelineWithGeneratorFrames:
         assert outcome.event.status != "error"
         # 제너레이터는 소진됨
         assert list(gen_top) == []
+
+
+class TestGateViewOrder:
+    """T1-2 (0728 리서치): gate_view는 '다운샘플 후 채널 평균'로 생성 —
+    종전('풀 프레임 평균 후 다운샘플')과 비트 동일해야 한다."""
+
+    @pytest.mark.skipif(not HAVE_NUMPY, reason="numpy 미설치")
+    def test_bit_identical_to_legacy_order(self):
+        from crk_model.adapters.avi_frames import _gate_view
+
+        rng = np.random.default_rng(7)
+        full = rng.integers(0, 256, size=(480, 480, 3), dtype=np.uint8)
+        # 종전 구현: 풀 프레임 float 평균 → uint8 절삭 → nearest 다운샘플
+        legacy_gray = full.mean(axis=2).astype(np.uint8)
+        idx = np.arange(120) * 480 // 120
+        legacy = legacy_gray[idx][:, idx]
+        assert np.array_equal(_gate_view(full, 120), legacy)
+
+    @pytest.mark.skipif(not HAVE_NUMPY, reason="numpy 미설치")
+    def test_non_square_source_uses_both_axes(self):
+        from crk_model.adapters.avi_frames import _gate_view
+
+        full = np.zeros((240, 480, 3), dtype=np.uint8)
+        full[:, 240:, :] = 200  # 오른쪽 절반 밝음
+        view = _gate_view(full, 120)
+        assert view.shape == (120, 120)
+        assert view[:, :60].max() == 0 and view[:, 60:].min() == 200

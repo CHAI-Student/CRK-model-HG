@@ -9,7 +9,7 @@ StrictWeightMatcher + SensorProfile.tolerance_grams 단일 소스를 공유한�
 """
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 from crk_model.core.profiles import SensorProfile
@@ -42,16 +42,25 @@ class EarlyTerminator:
         self,
         *,
         delta_weight: float,
-        candidates: Sequence[VisionCandidate],
+        candidates: Sequence[VisionCandidate] | Callable[[], Sequence[VisionCandidate]],
         active_products: Sequence[ActiveProduct],
         frames_since_hand_exit: int,
     ) -> bool:
+        """candidates는 시퀀스 또는 **지연 콜러블**(voting.combine 등).
+
+        콜러블은 값싼 가드(I15 냉동/반품 금지, 손 퇴장 대기)를 전부 통과한
+        뒤에만 호출된다 — 종전에는 호출측이 combine()을 인자 평가로 매 추론
+        프레임 실행해, 반환값이 무조건 False인 냉동에서 O(누적 표²) 비용을
+        100% 폐기하고 있었다 (0723 비용 문서 §ET 핫패스, 0728 리서치 T1-1).
+        판정 무변경: 평가 시점만 늦출 뿐 통과 시 동일한 결합 결과를 쓴다."""
         if not (self._enabled and self._profile.early_termination_allowed):
             return False  # I15: freezer 금지
         if delta_weight >= 0:
             return False  # I15: 반품(+delta) 금지
         if frames_since_hand_exit < self._config.hand_exit_frames:
             return False
+        if callable(candidates):
+            candidates = candidates()
         ranked = sorted(candidates, key=lambda c: -c.vote_count)
         if not ranked or ranked[0].vote_count < self._config.min_lead_votes:
             return False

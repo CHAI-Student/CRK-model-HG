@@ -221,8 +221,7 @@ def _decode_avi_ffmpeg_cmd(
             if buf is None:
                 break
             full = np.frombuffer(buf, dtype=np.uint8).reshape((size, size, 3)).copy()
-            gray = full.mean(axis=2).astype(np.uint8)
-            gate_view = _downsample_gray(gray, gate_size)
+            gate_view = _gate_view(full, gate_size)
             decoded += 1
             yield FrameBundle(full=full, gate_view=gate_view)
         proc.stdout.close()
@@ -256,18 +255,21 @@ def _read_exact(stream, n: int) -> bytes | None:
     return b"".join(chunks)
 
 
-def _downsample_gray(gray, gate_size: int):
-    """numpy 그레이 배열을 gate_size×gate_size로 최근접 다운샘플 (cv2 없이)."""
-    h, w = gray.shape
-    row_idx = (_arange(gate_size) * h // gate_size)
-    col_idx = (_arange(gate_size) * w // gate_size)
-    return gray[row_idx][:, col_idx]
+def _gate_view(full, gate_size: int):
+    """풀 프레임(H×W×3 uint8)에서 게이트 뷰(gate_size² 그레이) 생성 —
+    **nearest 다운샘플 후 채널 평균** (cv2 없이).
 
-
-def _arange(n: int):
+    종전(풀 프레임 전체를 float 평균 → 다운샘플)과 결과가 **비트 동일**하면서
+    평균 연산 픽셀이 16배 적다 (480²=230,400 → 120²=14,400): nearest는 픽셀
+    '선택'이라 채널 평균과 순서 교환이 가능하고, 같은 픽셀의 float 평균값에
+    같은 astype(uint8) 절삭이 적용된다 (docs/0728_freezer_latency_research.md
+    T1-2 — 트리거당 0.5~1.5s 절감 실측 대상)."""
     import numpy as np  # lazy
 
-    return np.arange(n)
+    h, w = full.shape[:2]
+    row_idx = np.arange(gate_size) * h // gate_size
+    col_idx = np.arange(gate_size) * w // gate_size
+    return full[row_idx][:, col_idx].mean(axis=2).astype(np.uint8)
 
 
 def _stderr_tail(proc, limit: int = 240) -> str:
