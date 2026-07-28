@@ -100,8 +100,12 @@ class Settings:
     # 14차: 게이트 안 스냅을 콤보가 뒤집으려면 존 판정 conf가 이 값 미만
     # (확신 스냅 존중 — 오버라이드 오답 6건 전부 conf 0.96~1.0). >1로 비활성.
     close_combo_override_max_conf: float = 0.95
-    # D8: 기본 OFF
+    # D8/T2-2: 게이트 통과 프레임 마이크로배치 크기. 기본 OFF(1) — >1은
+    # 정적 batch 엔진 재수출(scripts/convert_engine.sh BATCH=N) 전제.
     batch_size: int = 1
+    # T2-3: 카메라별 백그라운드 선행 디코드 깊이 (0 = 비활성 — 현행 직렬).
+    # 활성 시 top 추론 중 side 디코드가 은닉된다. 메모리 depth×691KB/카메라.
+    prefetch_depth: int = 0
     # freezer 프로파일을 적용할 존 목록 (예: "9,10") — cabinet_type이 정하는
     # 기본 프로파일에 대한 존 단위 오버라이드로만 쓰인다 (freezer 기기에서
     # 특정 존만 냉장인 경우 등은 현재 스코프 밖).
@@ -325,6 +329,7 @@ class Settings:
                 "MODEL__CLOSE__COMBO_OVERRIDE_MAX_CONF", 0.95
             ),
             batch_size=_env_int("MODEL__VISION__BATCH_SIZE", 1),
+            prefetch_depth=_env_int("MODEL__VIDEO__PREFETCH", 0),
             freezer_zones=_env_zones("MODEL__ZONES__FREEZER"),
             cabinet_type=_env_cabinet_type("MODEL__MACHINE__CABINET_TYPE", "refrigerated"),
             error_policy=ErrorSessionPolicy(policy_raw),

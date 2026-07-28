@@ -24,6 +24,7 @@ from crk_model.core.types import (
     VisionCandidate,
 )
 from crk_model.frames.motion_gate import Frame, HandLatch, MotionGate
+from crk_model.frames.prefetch import PrefetchFrames
 from crk_model.ingest.loadcell import (
     ChannelWeightEvent,
     LoadcellAnalyzer,
@@ -179,6 +180,18 @@ class TriggerPipeline:
         # 카메라별 디코드 크롭 원점 (MODEL__VIDEO__SIDE_CROP 배선) — 파이프라인
         # 자체는 디코드하지 않으므로 판정에는 무영향. save_detections 시
         # trace에 스탬프해 렌더가 동일 기하를 재현하게 하는 좌표계 계약이다.
+        batch_size: int = 1,
+        # T2-2 (D8 배선, MODEL__VISION__BATCH_SIZE): 게이트 통과 프레임을
+        # batch_size장 모아 detector.detect_batch 1회로 추론. 검출기가
+        # detect_batch를 제공하지 않으면 자동으로 프레임별 경로 유지.
+        # 정확도 트레이드오프 (0728 리서치 §T2-2): 손 래치(I16) 갱신이 최대
+        # batch_size-1 프레임 지연 — keepalive가 강제 추론 상한이라 위험 창은
+        # 유계이나, 승격 전 G2 재생(과금 diff)으로 검증할 것.
+        prefetch_depth: int = 0,
+        # T2-3 (MODEL__VIDEO__PREFETCH): 카메라별 백그라운드 선행 디코드 깊이.
+        # 0 = 비활성(현행). 활성 시 트리거 시작 시점에 전 카메라 스트림을
+        # 함께 열어 top 추론 중 side 디코드가 은닉된다 — side 디코드 실패가
+        # 조기 종료보다 먼저 드러날 수 있다 (I1 fail-closed 방향이라 허용).
     ):
         self._detector = detector
         self._profiles = dict(profiles)
@@ -202,6 +215,8 @@ class TriggerPipeline:
         self._tray_memory = tray_memory
         self._save_detections = save_detections
         self._camera_crops = dict(camera_crops) if camera_crops else None
+        self._batch_size = max(int(batch_size), 1)
+        self._prefetch_depth = max(int(prefetch_depth), 0)
 
     def process(self, session_id: str, req: TriggerRequest) -> TriggerOutcome:
         try:
@@ -614,69 +629,142 @@ class TriggerPipeline:
         self._filters.reset_trigger_state()
         # top ROI 방향 게이트 (P1-5): delta가 0이면 top ROI 미적용 (원본 동형)
         self._filters.set_trigger_delta(delta)
-        for camera in CAMERAS:
-            frames = req.frames.get(camera)
-            if frames is None:
-                continue  # 빈 스트림(list)/미제공 모두 아래 for가 0회 순회
-            latch = HandLatch()  # 카메라별 래치 (hand-path는 카메라별, L3 계약과 동형)
-            gate = MotionGate(profile, latch)
-            frame_iter = iter(frames)
-            camera_filtered_out = 0
-            pos = -1  # held-object A-1 계측: 게이트 스킵 포함 디코드 위치
-            try:
-                for frame in frame_iter:
-                    pos += 1
-                    if stopped:
-                        break  # L2: 추론만 중단 (프레임 공급은 이미 완료 상태)
-                    # FrameBundle이면 게이트는 다운스케일 뷰, 검출기는 풀 프레임
-                    decision = gate.evaluate(getattr(frame, "gate_view", frame))
-                    if not decision.infer:
-                        continue
-                    raw = list(
-                        self._detector.detect(
-                            getattr(frame, "full", frame),
-                            allowed_class_ids=allowed_by_camera.get(
-                                camera, tuple(product_ids)
-                            ),
-                        )
+        def consume(camera: str, pos: int, raw: list, latch: HandLatch) -> tuple[int, bool]:
+            """추론 1프레임 결과 소비 — 필터→기록→증거→투표→래치→조기종료.
+
+            배치/비배치 공통 단일 경로: 순서·의미가 프레임별 detect와 동일해야
+            배치 활성화가 판정을 바꾸지 않는다 (T2-2 승인 조건)."""
+            detections = self._filters.apply(camera, raw)
+            trace.yolo_calls += 1
+            if self._save_detections:
+                # 검출 0 프레임도 기록한다 — 렌더에서 "게이트 스킵"과
+                # "추론했으나 무검출"을 구분할 유일한 근거.
+                self._record_frame_detections(trace, camera, pos, detections)
+            tids = (
+                # pos 전달 = T1 트랙별 위치 계측 (motion_evidence.py)
+                evidence.observe(camera, detections, pos=pos)
+                if evidence is not None
+                else None
+            )
+            voting.add_frame(camera, detections, track_ids=tids, pos=pos)
+            latch.update_after_inference(any(d.is_hand for d in detections))
+            # combine은 지연 콜러블로 — 냉동(I15)·반품·손 미퇴장
+            # 프레임에서는 O(누적 표²) 결합이 아예 실행되지 않는다
+            # (docs/0728_freezer_latency_research.md T1-1).
+            stop = terminator.should_stop(
+                delta_weight=delta,
+                candidates=voting.combine,
+                active_products=snapshot.products,
+                frames_since_hand_exit=latch.frames_since_exit,
+            )
+            return len(raw) - len(detections), stop
+
+        # T2-2: batch_size > 1 이고 검출기가 detect_batch를 제공할 때만 배치
+        # 경로 (BatchDetector duck-typing — 기존 검출기/페이크 무변경).
+        batch_detect = (
+            getattr(self._detector, "detect_batch", None)
+            if self._batch_size > 1
+            else None
+        )
+        streams: dict[str, object] = {}
+        try:
+            # T2-3: 프리페치 활성 시 전 카메라 스트림을 트리거 시작 시점에
+            # 함께 연다 — top 추론 중 side 디코드가 백그라운드에서 진행된다.
+            # 구축 도중 디코드 실패(I1)도 outer finally가 앞서 만든 프리페처를
+            # 정리한 뒤 전파된다.
+            for camera in CAMERAS:
+                frames = req.frames.get(camera)
+                if frames is None:
+                    continue  # 빈 스트림(list)/미제공 모두 아래 for가 0회 순회
+                streams[camera] = (
+                    PrefetchFrames(iter(frames), depth=self._prefetch_depth)
+                    if self._prefetch_depth > 0
+                    else iter(frames)
+                )
+            for camera, frame_iter in streams.items():
+                latch = HandLatch()  # 카메라별 래치 (hand-path는 카메라별, L3 계약과 동형)
+                gate = MotionGate(profile, latch)
+                camera_filtered_out = 0
+                pos = -1  # held-object A-1 계측: 게이트 스킵 포함 디코드 위치
+                allowed = allowed_by_camera.get(camera, tuple(product_ids))
+                pending: list[tuple[int, object]] = []  # 배치 대기 (pos, full)
+
+                def flush_pending(
+                    # B023 대응: 루프 변수는 기본 인자로 바인딩 — 정의 시점
+                    # 값으로 고정해 카메라 반복 간 오염 가능성을 원천 차단.
+                    *,
+                    _camera=camera,
+                    _latch=latch,
+                    _allowed=allowed,
+                    _pending=pending,
+                ) -> None:
+                    """대기 배치 1회 추론 후 프레임별 순차 소비 (T2-2).
+
+                    조기 종료가 배치 중간 프레임에서 발동하면 **잔여 결과를
+                    폐기**한다 — 추론 비용은 이미 지불했지만 투표에 넣지 않아
+                    비배치 판정과의 동등성을 지킨다 (yolo_calls도 소비분만
+                    집계 — 40ms×yolo_calls 비용 모델의 오차 요인으로 기록)."""
+                    nonlocal camera_filtered_out, stopped
+                    results = batch_detect(
+                        [f for _, f in _pending], allowed_class_ids=_allowed
                     )
-                    detections = self._filters.apply(camera, raw)
-                    camera_filtered_out += len(raw) - len(detections)
-                    trace.yolo_calls += 1
-                    if self._save_detections:
-                        # 검출 0 프레임도 기록한다 — 렌더에서 "게이트 스킵"과
-                        # "추론했으나 무검출"을 구분할 유일한 근거.
-                        self._record_frame_detections(
-                            trace, camera, pos, detections
-                        )
-                    tids = (
-                        # pos 전달 = T1 트랙별 위치 계측 (motion_evidence.py)
-                        evidence.observe(camera, detections, pos=pos)
-                        if evidence is not None
-                        else None
-                    )
-                    voting.add_frame(camera, detections, track_ids=tids, pos=pos)
-                    latch.update_after_inference(any(d.is_hand for d in detections))
-                    # combine은 지연 콜러블로 — 냉동(I15)·반품·손 미퇴장
-                    # 프레임에서는 O(누적 표²) 결합이 아예 실행되지 않는다
-                    # (docs/0728_freezer_latency_research.md T1-1).
-                    if terminator.should_stop(
-                        delta_weight=delta,
-                        candidates=voting.combine,
-                        active_products=snapshot.products,
-                        frames_since_hand_exit=latch.frames_since_exit,
-                    ):
-                        stopped = True
-            finally:
-                # 조기 종료로 스트림을 버릴 때도 cv2/subprocess 리소스가 즉시
-                # 해제되도록 제너레이터를 명시적으로 닫는다 (list 등 close 없는
-                # 이터레이터는 getattr로 안전 무시).
-                closer = getattr(frame_iter, "close", None)
+                    for (bpos, _), raw in zip(_pending, results, strict=True):
+                        dropped, stop = consume(_camera, bpos, list(raw), _latch)
+                        camera_filtered_out += dropped
+                        if stop:
+                            stopped = True
+                            break
+                    _pending.clear()
+
+                try:
+                    for frame in frame_iter:
+                        pos += 1
+                        if stopped:
+                            break  # L2: 추론만 중단 (프레임 공급은 이미 완료 상태)
+                        # FrameBundle이면 게이트는 다운스케일 뷰, 검출기는 풀 프레임
+                        decision = gate.evaluate(getattr(frame, "gate_view", frame))
+                        if not decision.infer:
+                            continue
+                        if batch_detect is None:
+                            raw = list(
+                                self._detector.detect(
+                                    getattr(frame, "full", frame),
+                                    allowed_class_ids=allowed,
+                                )
+                            )
+                            dropped, stop = consume(camera, pos, raw, latch)
+                            camera_filtered_out += dropped
+                            if stop:
+                                stopped = True
+                        else:
+                            # I16 주의: 배치 대기 중에는 래치 갱신이 늦으므로
+                            # 게이트가 최대 batch-1 프레임을 구식 래치로 판단
+                            # 한다 — keepalive가 강제 추론 상한 (ctor 주석).
+                            pending.append((pos, getattr(frame, "full", frame)))
+                            if len(pending) >= self._batch_size:
+                                flush_pending()
+                    if pending and not stopped:
+                        flush_pending()  # 잔여분 — 어댑터가 배치 크기로 패딩
+                finally:
+                    # 조기 종료로 스트림을 버릴 때도 cv2/subprocess 리소스가 즉시
+                    # 해제되도록 제너레이터를 명시적으로 닫는다 (list 등 close 없는
+                    # 이터레이터는 getattr로 안전 무시).
+                    closer = getattr(frame_iter, "close", None)
+                    if closer is not None:
+                        closer()
+                trace.processed_frames[camera] = gate.processed_frames
+                trace.gate_skipped_frames[camera] = gate.gate_skipped_frames
+                filtered_out[camera] = camera_filtered_out
+        finally:
+            # 프리페처 백그라운드 스레드 정리 — 조기 종료로 아예 순회하지 않은
+            # 카메라(side 등)의 선행 디코드도 여기서 멈춘다 (close 멱등).
+            for stream in streams.values():
+                closer = getattr(stream, "close", None)
                 if closer is not None:
-                    closer()
-            trace.processed_frames[camera] = gate.processed_frames
-            trace.gate_skipped_frames[camera] = gate.gate_skipped_frames
-            filtered_out[camera] = camera_filtered_out
+                    try:
+                        closer()
+                    except Exception:  # noqa: BLE001 — 정리 실패는 비치명
+                        pass
         trace.early_terminated = stopped
         if stopped:
             trace.reason_codes.append("early_terminated")

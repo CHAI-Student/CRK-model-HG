@@ -82,6 +82,20 @@ TensorRT 커널 자체는 소수다. **"모델이 느리다"가 아니라 "모�
 Tier 0+1+2 합산 기대: **40ms/call → 15~20ms/call, 냉동 13.7s → 5~7s** (가설
 — 0-4 계측과 G2 재생으로 확정).
 
+**T2 구현 상태 (2026-07-28)**: 브랜치 `perf/t2-batch-pipeline`에 2-1/2-2/2-3
+전부 구현 — 기본값(BATCH_SIZE=1, PREFETCH=0)이면 기존 경로와 동일, 페이크
+기반 판정 동등성 테스트(배치4 vs 비배치, ET 중간 발동, 프리페치) 포함.
+기기 활성화 절차:
+```bash
+git fetch && git checkout perf/t2-batch-pipeline
+BATCH=4 bash scripts/convert_engine.sh        # 정적 batch-4 엔진 재수출
+# .env: MODEL__VISION__BATCH_SIZE=4, MODEL__VIDEO__PREFETCH=4
+# 기동 프로브가 detect_batch를 1회 실행 — 엔진/텐서 불일치는 기동 실패로 드러남
+```
+기기 검증 체크리스트: ① 기동 프로브 통과 ② 동일 AVI 재생에서 비배치와
+과금 diff 0 (SAVE_DETECTIONS+render로 bbox 좌표 육안 대조 — 텐서 입력은
+letterbox 생략이라 좌표계 등식이 어댑터 가정) ③ processing_time_ms 전후 비교.
+
 ### Tier 3 — 냉동 게이트 정상화 (추론 수 자체 감축, 판정 변경 가능 → G2 필수)
 
 | # | 작업 | 기대 | 리스크 |

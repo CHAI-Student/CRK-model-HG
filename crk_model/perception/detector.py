@@ -33,3 +33,15 @@ class Detector(Protocol):
     def detect(
         self, frame, allowed_class_ids: Sequence[int] | None = None
     ) -> Sequence[Detection]: ...
+
+
+class BatchDetector(Protocol):
+    """선택 확장 (T2-2, D8): 게이트 통과 프레임 묶음을 1회 predict로 처리.
+
+    파이프라인은 batch_size > 1이고 검출기가 detect_batch를 제공할 때만
+    이 경로를 쓴다 (duck-typing — 기존 Detector 구현/페이크는 무변경).
+    반환은 입력 프레임 순서와 정렬된 프레임별 검출 목록이어야 한다."""
+
+    def detect_batch(
+        self, frames: Sequence, allowed_class_ids: Sequence[int] | None = None
+    ) -> Sequence[Sequence[Detection]]: ...

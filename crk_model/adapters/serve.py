@@ -47,7 +47,9 @@ def main() -> None:
     model_path = os.environ.get(
         "MODEL__VISION__YOLO_MODEL_PATH", "models/set9_doorfas_0323_imbal.engine"
     )
-    detector = UltralyticsEngineDetector(model_path)
+    # batch는 detect_batch의 패딩 목표 (T2-2) — batch_size>1이면 같은 크기로
+    # 재수출된 정적 batch 엔진이 전제다 (scripts/convert_engine.sh BATCH=N).
+    detector = UltralyticsEngineDetector(model_path, batch=settings.batch_size)
     # issue #6: 상품명→YOLO class_id 매핑 — hand(0)은 제외한다(원본 manager.py와
     # 동일 원칙). 제외하지 않으면 매핑 실패 상품이 이름 경합으로 hand에 붙을 수 있다.
     yolo_name_to_id = {
