@@ -504,7 +504,7 @@ class TestCli:
         (day / "ses-2-1784800000.json").write_text(json.dumps(new), encoding="utf-8")
         assert main(["--dir", str(tmp_path), "--since", "1784750000"]) == 0
         out = capsys.readouterr().out
-        assert "1/2 세션" in out
+        assert "이후 1 세션" in out
         assert "ses-1-1784700000" not in out  # 구 세션 mismatch가 안 섞임
 
     def test_since_accepts_iso_datetime(self, tmp_path, capsys):
@@ -524,3 +524,51 @@ class TestCli:
         (day / "bad.json").write_text("{not json", encoding="utf-8")
         docs = load_documents(tmp_path)
         assert docs and "_load_error" in docs[0]
+
+    def _count_loads(self, monkeypatch):
+        """analyze_cli._load_document 호출을 세는 래퍼 — 전량 로드 우회 검증."""
+        import crk_model.adapters.analyze_cli as mod
+
+        calls: list[str] = []
+        real = mod._load_document
+
+        def counting(path):
+            calls.append(path.name)
+            return real(path)
+
+        monkeypatch.setattr(mod, "_load_document", counting)
+        return calls
+
+    def test_session_lookup_parses_only_target_file(self, tmp_path, capsys, monkeypatch):
+        # 단건 조회가 O(아카이브 전체)로 늘어나던 원인 수정: --session은
+        # find()로 해당 파일만 파싱한다 — SAVE_DETECTIONS 대형 YAML이 쌓여도
+        # 다른 세션 파일은 열지 않는다.
+        day = tmp_path / "2026-07-23"
+        day.mkdir()
+        for sid in ("ses-1", "ses-2", "ses-3"):
+            (day / f"{sid}.json").write_text(
+                json.dumps(_doc(sid, triggers=[_trigger()])), encoding="utf-8"
+            )
+        calls = self._count_loads(monkeypatch)
+        assert main(["--dir", str(tmp_path), "--session", "ses-2"]) == 0
+        assert calls == ["ses-2.json"]
+
+    def test_session_lookup_broken_file_reports_error(self, tmp_path, capsys):
+        day = tmp_path / "2026-07-23"
+        day.mkdir()
+        (day / "ses-x.json").write_text("{not json", encoding="utf-8")
+        assert main(["--dir", str(tmp_path), "--session", "ses-x"]) == 1
+        assert "파싱 실패" in capsys.readouterr().err
+
+    def test_since_prefilter_skips_parsing_old_files(self, tmp_path, capsys, monkeypatch):
+        # --since는 파일명 epoch(stem == session_id 계약)으로 파싱 전에
+        # 거른다 — 대상 밖 대형 YAML의 로드 비용 자체를 없앤다.
+        day = tmp_path / "2026-07-23"
+        day.mkdir()
+        for sid in ("ses-1-1784700000", "ses-2-1784800000"):
+            (day / f"{sid}.json").write_text(
+                json.dumps(_doc(sid, triggers=[_trigger()])), encoding="utf-8"
+            )
+        calls = self._count_loads(monkeypatch)
+        assert main(["--dir", str(tmp_path), "--since", "1784750000"]) == 0
+        assert calls == ["ses-2-1784800000.json"]

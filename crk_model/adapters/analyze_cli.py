@@ -133,7 +133,27 @@ def parse_since(raw: str) -> float:
     return datetime.datetime.fromisoformat(raw).timestamp()
 
 
-def load_documents(archive_dir: str | Path) -> list[dict]:
+def _path_epoch(path: Path) -> float | None:
+    """파싱 없이 파일만으로 세션 시각 추정 — 파일명 stem == session_id
+    (SessionArchive._write 계약)이므로 _session_epoch과 같은 규칙을
+    파일명에 적용한다. --since 프리필터용 (대상 밖 대형 YAML의 파싱 자체를
+    건너뛰는 게 목적)."""
+    tail = path.stem.rsplit("-", 1)[-1]
+    if tail.isdigit() and len(tail) >= 9:  # epoch초(10자리대)만 신뢰
+        return float(tail)
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return None
+
+
+def load_documents(
+    archive_dir: str | Path, *, since: float | None = None
+) -> list[dict]:
+    """아카이브 전량 로드. since가 주어지면 파일명 epoch 기준으로 그 이전
+    세션의 **파싱을 건너뛴다** — SAVE_DETECTIONS 세션은 수백 KB짜리 YAML이라
+    파싱이 지배 비용이다 (시각 미상 파일은 보수적으로 파싱, doc 레벨
+    --since 필터가 최종 판정)."""
     root = Path(archive_dir)
     if not root.exists():
         return []
@@ -142,6 +162,10 @@ def load_documents(archive_dir: str | Path) -> list[dict]:
         for path in sorted(date_dir.iterdir()):
             if path.suffix not in (".yaml", ".json"):
                 continue
+            if since is not None:
+                ep = _path_epoch(path)
+                if ep is not None and ep < since:
+                    continue
             try:
                 doc = _load_document(path)
             except Exception as exc:  # noqa: BLE001 — 손상 파일은 건너뛰고 보고
@@ -1050,17 +1074,42 @@ def main(argv: list[str] | None = None) -> int:
     if not archive.enabled:
         print("아카이브 디렉토리가 지정되지 않았습니다", file=sys.stderr)
         return 1
-    docs = load_documents(args.dir)
-    if not docs:
-        print(f"아카이브가 비어 있습니다: {args.dir}", file=sys.stderr)
-        return 1
+    if args.session:
+        # 단건 조회는 전량 로드를 우회한다 — 파일명 stem == session_id
+        # (SessionArchive._write 계약)라 find()로 해당 파일만 파싱하면 되고,
+        # 전량 로드는 SAVE_DETECTIONS 대형 YAML이 쌓일수록 O(아카이브 전체
+        # 바이트)로 늘어난다 (실측: 세션 단건 조회가 분 단위까지 악화).
+        path = archive.find(args.session)
+        if path is None:
+            print(f"세션을 찾을 수 없습니다: {args.session}", file=sys.stderr)
+            return 1
+        try:
+            doc = _load_document(path)
+        except Exception as exc:  # noqa: BLE001 — 손상 파일 명시 보고
+            print(f"세션 파일 파싱 실패: {path} ({type(exc).__name__})", file=sys.stderr)
+            return 1
+        doc["_path"] = str(path)
+        if args.json:
+            print(json.dumps(doc, ensure_ascii=False, indent=2, default=str))
+        else:
+            print(render_session(doc, full=args.full))
+        return 0
+    cutoff = None
     if args.since:
         try:
             cutoff = parse_since(args.since)
         except ValueError:
             print(f"--since 형식 오류: {args.since}", file=sys.stderr)
             return 1
-        total = len(docs)
+    docs = load_documents(args.dir, since=cutoff)
+    if not docs:
+        if args.since:
+            print(f"--since {args.since} 이후 세션이 없습니다", file=sys.stderr)
+        else:
+            print(f"아카이브가 비어 있습니다: {args.dir}", file=sys.stderr)
+        return 1
+    if cutoff is not None:
+        # 프리필터(파일명 epoch)가 못 거른 시각 미상 파일의 최종 판정
         docs = [
             d for d in docs
             if (ep := _session_epoch(d)) is not None and ep >= cutoff
@@ -1068,17 +1117,7 @@ def main(argv: list[str] | None = None) -> int:
         if not docs:
             print(f"--since {args.since} 이후 세션이 없습니다", file=sys.stderr)
             return 1
-        print(f"(대상: --since {args.since} 이후 {len(docs)}/{total} 세션)")
-    if args.session:
-        matches = [d for d in docs if d.get("session_id") == args.session]
-        if not matches:
-            print(f"세션을 찾을 수 없습니다: {args.session}", file=sys.stderr)
-            return 1
-        if args.json:
-            print(json.dumps(matches[0], ensure_ascii=False, indent=2, default=str))
-        else:
-            print(render_session(matches[0], full=args.full))
-        return 0
+        print(f"(대상: --since {args.since} 이후 {len(docs)} 세션)")
     report = analyze(docs)
     if args.json:
         print(json.dumps(report, ensure_ascii=False, indent=2))

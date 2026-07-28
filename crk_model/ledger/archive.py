@@ -54,7 +54,12 @@ def _load_document(path: Path) -> dict:
         return json.loads(path.read_text(encoding="utf-8"))
     import yaml
 
-    return yaml.safe_load(path.read_text(encoding="utf-8"))
+    # libyaml C 로더 우선 (가용 시): SAVE_DETECTIONS 동봉 세션은 수백 KB라
+    # 순수 파이썬 SafeLoader(수 MB/s)로는 아카이브가 쌓일수록 analyze-sessions
+    # 전량 로드가 분 단위로 늘어난다. CSafeLoader는 SafeLoader와 동일 의미의
+    # C 구현 — 없으면(휠에 libyaml 미포함) 기존 로더 그대로.
+    loader = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
+    return yaml.load(path.read_text(encoding="utf-8"), Loader=loader)
 
 
 def _trace_to_dict(trace: TriggerTrace | None) -> dict:
@@ -328,8 +333,14 @@ class SessionArchive:
             return path
 
         path = date_dir / f"{session_id}.yaml"
+        # C 더머 우선 (가용 시): SAVE_DETECTIONS 세션의 대형 문서 직렬화가
+        # finalize 경로(워커 락 안)에서 CLOSE 응답을 지연시키지 않게 한다.
+        dumper = getattr(yaml, "CDumper", yaml.Dumper)
         path.write_text(
-            yaml.dump(doc, default_flow_style=False, allow_unicode=True, sort_keys=False),
+            yaml.dump(
+                doc, Dumper=dumper,
+                default_flow_style=False, allow_unicode=True, sort_keys=False,
+            ),
             encoding="utf-8",
         )
         return path
@@ -391,8 +402,12 @@ class SessionArchive:
             return
         import yaml  # yaml 파일이 존재한다 = PyYAML로 저장됐다 (폴백 규칙)
 
+        dumper = getattr(yaml, "CDumper", yaml.Dumper)
         path.write_text(
-            yaml.dump(doc, default_flow_style=False, allow_unicode=True, sort_keys=False),
+            yaml.dump(
+                doc, Dumper=dumper,
+                default_flow_style=False, allow_unicode=True, sort_keys=False,
+            ),
             encoding="utf-8",
         )
 
