@@ -278,3 +278,34 @@ class TestStreamOpenTiming:
         )
         _pipe(cola, FakeDetector(), prefetch_depth=2).process("s1", req)
         assert events[:2] == [("open", "top"), ("open", "side")]
+
+
+class TestTensorInputSwitch:
+    """T2-1 단독 스위치 (MODEL__VISION__TENSOR_INPUT): batch_size=1이어도
+    detect_batch(1프레임) 경로로 — GPU 전처리 효과를 배치와 분리 측정."""
+
+    def test_routes_through_batch_path_with_batch1(self, cola):
+        detector = FakeBatchDetector()
+        outcome = _pipe(cola, detector, tensor_input=True).process(
+            "s1", _request()
+        )
+        # 배치 경로가 쓰였고, 전부 1프레임 배치다 (batch-1 엔진 호환)
+        assert detector.batch_sizes and set(detector.batch_sizes) == {1}
+        # 판정은 프레임별 경로와 동일
+        base = _pipe(cola, FakeBatchDetector()).process("s1", _request())
+        assert outcome.event.judgment == base.event.judgment
+        assert outcome.trace.yolo_calls == base.trace.yolo_calls
+
+    def test_ignored_without_detect_batch(self, cola):
+        outcome = _pipe(cola, FakeDetector(), tensor_input=True).process(
+            "s1", _request()
+        )
+        base = _pipe(cola, FakeDetector()).process("s1", _request())
+        assert outcome.event.judgment == base.event.judgment
+
+    def test_env_wiring(self, monkeypatch):
+        from crk_model.core.config import Settings
+
+        assert Settings().tensor_input is False
+        monkeypatch.setenv("MODEL__VISION__TENSOR_INPUT", "1")
+        assert Settings.from_env().tensor_input is True

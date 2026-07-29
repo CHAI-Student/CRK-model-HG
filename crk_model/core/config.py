@@ -106,6 +106,12 @@ class Settings:
     # T2-3: 카메라별 백그라운드 선행 디코드 깊이 (0 = 비활성 — 현행 직렬).
     # 활성 시 top 추론 중 side 디코드가 은닉된다. 메모리 depth×691KB/카메라.
     prefetch_depth: int = 0
+    # T2-1 단독 스위치: batch_size=1(기존 batch-1 엔진 그대로)에서도 추론을
+    # detect_batch 경로로 보내 **GPU 전처리만** 취한다 — (1,3,480,480) 텐서는
+    # batch-1 엔진과 shape이 맞아 재수출이 불필요. 배치 상각(T2-2)과 전처리
+    # 소멸(T2-1)의 효과를 기기에서 분리 측정하는 변인 스위치. batch_size>1
+    # 이면 배치 경로가 이미 텐서 투입이라 이 값은 무의미(중복).
+    tensor_input: bool = False
     # freezer 프로파일을 적용할 존 목록 (예: "9,10") — cabinet_type이 정하는
     # 기본 프로파일에 대한 존 단위 오버라이드로만 쓰인다 (freezer 기기에서
     # 특정 존만 냉장인 경우 등은 현재 스코프 밖).
@@ -330,6 +336,7 @@ class Settings:
             ),
             batch_size=_env_int("MODEL__VISION__BATCH_SIZE", 1),
             prefetch_depth=_env_int("MODEL__VIDEO__PREFETCH", 0),
+            tensor_input=_env_bool("MODEL__VISION__TENSOR_INPUT", False),
             freezer_zones=_env_zones("MODEL__ZONES__FREEZER"),
             cabinet_type=_env_cabinet_type("MODEL__MACHINE__CABINET_TYPE", "refrigerated"),
             error_policy=ErrorSessionPolicy(policy_raw),

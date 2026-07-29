@@ -97,6 +97,14 @@ BATCH=4 PT_FILE=<모델>.pt bash scripts/convert_engine.sh
 과금 diff 0 (SAVE_DETECTIONS+render로 bbox 좌표 육안 대조 — 텐서 입력은
 letterbox 생략이라 좌표계 등식이 어댑터 가정) ③ processing_time_ms 전후 비교.
 
+**효과 분리 측정 매트릭스** (`MODEL__VISION__TENSOR_INPUT` — 2026-07-29 추가):
+| 단계 | 구성 | 측정 대상 |
+|---|---|---|
+| A | 기본값 (batch-1 엔진) | 베이스라인 |
+| B | A + `TENSOR_INPUT=1` (엔진 재수출 불필요) | T2-1 GPU 전처리 소멸 단독 |
+| C | `_batch4.engine` + `BATCH_SIZE=4` | T2-2 배치 상각 추가분 |
+| D | + `PREFETCH=4` (어느 단이든 독립) | T2-3 디코드 은닉 |
+
 ### Tier 3 — 냉동 게이트 정상화 (추론 수 자체 감축, 판정 변경 가능 → G2 필수)
 
 | # | 작업 | 기대 | 리스크 |

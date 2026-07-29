@@ -98,11 +98,14 @@ class ModelService:
         if startup_probe_frame is not None:
             # 이관 리뷰 #1: YOLO 로드 실패 = 기동 실패 (예외 전파, 무증상 기동 금지)
             detector.detect(startup_probe_frame)
-            # T2-2 프로브: 배치 경로가 켜질 구성이면 detect_batch도 기동
+            # T2 프로브: 배치/텐서 경로가 켜질 구성이면 detect_batch도 기동
             # 시점에 1회 실행 — 엔진 batch/dtype 불일치를 첫 실트리거가 아닌
             # 배포 시점에 fail-fast로 드러낸다 (동일 원칙).
+            probe_settings = settings or Settings()
             batch_probe = getattr(detector, "detect_batch", None)
-            if batch_probe is not None and (settings or Settings()).batch_size > 1:
+            if batch_probe is not None and (
+                probe_settings.batch_size > 1 or probe_settings.tensor_input
+            ):
                 batch_probe([startup_probe_frame])
 
         self.settings = settings or Settings()
@@ -293,6 +296,7 @@ class ModelService:
             # + 선행 디코드. 기본값(1/0)이면 기존 경로와 동일.
             batch_size=self.settings.batch_size,
             prefetch_depth=self.settings.prefetch_depth,
+            tensor_input=self.settings.tensor_input,
         )
         # 동시성: FastAPI sync 엔드포인트(threadpool)와 워커 스레드가 게이트웨이·
         # 이벤트로그·스냅샷을 동시에 건드릴 수 있어 단일 RLock으로 코스 그레인

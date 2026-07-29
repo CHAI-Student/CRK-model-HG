@@ -192,6 +192,10 @@ class TriggerPipeline:
         # 0 = 비활성(현행). 활성 시 트리거 시작 시점에 전 카메라 스트림을
         # 함께 열어 top 추론 중 side 디코드가 은닉된다 — side 디코드 실패가
         # 조기 종료보다 먼저 드러날 수 있다 (I1 fail-closed 방향이라 허용).
+        tensor_input: bool = False,
+        # T2-1 단독 (MODEL__VISION__TENSOR_INPUT): batch_size=1이어도 추론을
+        # detect_batch(1프레임)로 보낸다 — GPU 전처리 효과만 분리 측정.
+        # batch-1 엔진과 호환(재수출 불필요), 판정 경로는 consume 공통.
     ):
         self._detector = detector
         self._profiles = dict(profiles)
@@ -217,6 +221,7 @@ class TriggerPipeline:
         self._camera_crops = dict(camera_crops) if camera_crops else None
         self._batch_size = max(int(batch_size), 1)
         self._prefetch_depth = max(int(prefetch_depth), 0)
+        self._tensor_input = bool(tensor_input)
 
     def process(self, session_id: str, req: TriggerRequest) -> TriggerOutcome:
         try:
@@ -659,11 +664,12 @@ class TriggerPipeline:
             )
             return len(raw) - len(detections), stop
 
-        # T2-2: batch_size > 1 이고 검출기가 detect_batch를 제공할 때만 배치
-        # 경로 (BatchDetector duck-typing — 기존 검출기/페이크 무변경).
+        # T2-2: batch_size > 1(마이크로배치) 또는 tensor_input(T2-1 단독 —
+        # 1프레임 배치로 GPU 전처리만)일 때 배치 경로. detect_batch를 제공하지
+        # 않는 검출기는 어느 쪽이든 프레임별 경로 유지 (duck-typing).
         batch_detect = (
             getattr(self._detector, "detect_batch", None)
-            if self._batch_size > 1
+            if (self._batch_size > 1 or self._tensor_input)
             else None
         )
         streams: dict[str, object] = {}
