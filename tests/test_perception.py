@@ -697,3 +697,45 @@ class TestSideHandConfFloor:
         out = f.apply("side", [hand, near, far])
         assert near in out and far not in out
         assert f.drop_stats["hand_path"]["side"] == 1
+
+
+class TestHandWindowRatio:
+    """vote_ratio 분모 hand_window 모드 (이슈 #18 후속 — 정답 클래스 ratio
+    희석 대응). 기본 gate 모드의 분모 의미는 TestVoting의
+    test_denominator_is_gate_passed_frames가 계약한다."""
+
+    def test_denominator_counts_hand_active_frames_only(self):
+        v = VotingEnsemble(
+            min_vote_count=1, conf_floor=0.0, ratio_denominator="hand_window"
+        )
+        for _ in range(20):  # 프리롤/포스트롤 — 손 없음, 분모 제외
+            v.add_frame("top", [], hand_active=False)
+        for _ in range(4):
+            v.add_frame("top", [Detection(1, 0.9)], hand_active=True)
+        (c,) = v.combine()
+        assert c.vote_ratio == 4 / 4  # gate 모드였다면 4/24
+
+    def test_camera_without_hand_falls_back_to_its_gate_frames(self):
+        # side hand 비활성 구성: side는 손을 못 보지만 표는 낼 수 있다 —
+        # 분모 0으로 ratio가 부풀지 않게 그 카메라는 게이트 통과 수 폴백.
+        v = VotingEnsemble(
+            min_vote_count=1, conf_floor=0.0, ratio_denominator="hand_window"
+        )
+        for _ in range(4):
+            v.add_frame("top", [Detection(1, 0.9)], hand_active=True)
+        for _ in range(6):
+            v.add_frame("side", [Detection(1, 0.9)], hand_active=False)
+        (c,) = v.combine()
+        assert c.vote_ratio == 10 / (4 + 6)
+
+    def test_gate_mode_ignores_hand_active(self):
+        v = VotingEnsemble(min_vote_count=1, conf_floor=0.0)  # 기본 gate
+        for _ in range(8):
+            v.add_frame("top", [], hand_active=True)
+        v.add_frame("top", [Detection(1, 0.9)], hand_active=True)
+        (c,) = v.combine()
+        assert c.vote_ratio == 1 / 9  # 분모 = 게이트 통과 프레임 전체
+
+    def test_invalid_denominator_mode_raises(self):
+        with pytest.raises(ValueError):
+            VotingEnsemble(ratio_denominator="hand")

@@ -270,6 +270,7 @@ class ModelService:
                 "entry_conf_top": self.settings.top_confidence_threshold,
                 "entry_conf_side": self.settings.side_confidence_threshold,
                 "min_vote_ratio": self.settings.min_vote_ratio,
+                "ratio_denominator": self.settings.vote_ratio_denominator,
                 "min_vote_count": self.settings.min_vote_count,
                 "min_vote_share": self.settings.min_vote_share,
                 "conf_floor": self.settings.vote_conf_floor,

@@ -148,6 +148,9 @@ class Settings:
     # 후보 채택 임계 — 원본 min_vote_ratio/min_vote_count 대응.
     min_vote_ratio: float = 0.05
     min_vote_count: int = 3
+    # vote_ratio 분모 정의 (이슈 #18 후속): "gate"(현행) | "hand_window"
+    # (손 활성 프레임 — 프리롤·포스트롤 희석 제거, voting.py 주석 참조).
+    vote_ratio_denominator: str = "gate"
     # 1위 후보 득표 대비 상대 하한 (이슈 #10): 절대 count(3)는 400프레임+
     # 영상에서 노이즈도 통과시켜 저득표 후보가 "무게 filler"로 채택되는
     # 사고(메로나 79g×3)의 원인이 됐다. votes < top×share 후보 제거.
@@ -366,6 +369,11 @@ class Settings:
             ),
             min_vote_ratio=_env_float("MODEL__VISION__MIN_VOTE_RATIO", 0.05),
             min_vote_count=_env_int("MODEL__VISION__MIN_VOTE_COUNT", 3),
+            vote_ratio_denominator=_env_choice(
+                "MODEL__VISION__VOTE_RATIO_DENOMINATOR",
+                "gate",
+                ("gate", "hand_window"),
+            ),
             min_vote_share=_env_float("MODEL__VISION__MIN_VOTE_SHARE", 0.1),
             vote_conf_floor=_env_float("MODEL__VISION__CONF_FLOOR", 0.0),
             conf_weight_top=_env_float("MODEL__VISION__CONF_WEIGHT_TOP", 0.60),

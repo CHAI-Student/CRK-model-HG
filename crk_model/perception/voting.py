@@ -98,6 +98,15 @@ class VotingEnsemble:
         # 단명 산탄 억제용이나 실패 방향이 fail-closed(단절된 진짜 상품
         # 트랙도 단명)라 기본 off — tube_summary의 short 계측(고정 probe 3)
         # 실측 후 env로만 켠다 (MODEL__VISION__TRACK_MIN_HITS).
+        ratio_denominator: str = "gate",
+        # vote_ratio 분모 정의 (이슈 #18 후속, MODEL__VISION__VOTE_RATIO_
+        # DENOMINATOR): "gate"(기본, 현행 단일 정의 = 전 카메라 게이트 통과
+        # 프레임 합) | "hand_window"(손 활성 프레임 합 — 카메라별로 손이 한
+        # 번도 안 보인 카메라는 자기 게이트 통과 수로 폴백). 근거: 분자
+        # (취출 순간의 표)는 영상 길이와 무관한데 분모는 프리롤·포스트롤·
+        # 타카메라 프레임까지 세서, 정답 클래스 ratio가 0.03~0.07로 플리커
+        # 수준까지 희석된다 (실기 ses-6: 49가 10표/186 = 0.054). 손 활성
+        # 창은 "취출이 보일 수 있었던 프레임"이라 길이 불변 밀도가 된다.
     ):
         for mode, name in (
             (held_demotion, "held_demotion"),
@@ -108,6 +117,8 @@ class VotingEnsemble:
                 # cabinet_type과 동일한 fail-closed — 오타가 조용히
                 # off가 되면 강등 없이 운영 중임을 알 수 없다.
                 raise ValueError(f"Invalid {name}: {mode}")
+        if ratio_denominator not in ("gate", "hand_window"):
+            raise ValueError(f"Invalid ratio_denominator: {ratio_denominator}")
         self._conf_floor = conf_floor
         self._min_ratio = min_vote_ratio
         self._min_count = min_vote_count
@@ -136,6 +147,11 @@ class VotingEnsemble:
             "side": defaultdict(list),
         }
         self.gate_passed_frames = 0  # 분모 (단일 정의)
+        self.ratio_denominator = ratio_denominator
+        # hand_window 분모 재료 — 카메라별 게이트 통과 수·손 활성 수.
+        # gate_passed_frames(합계)는 하위호환용 공개 필드로 그대로 둔다.
+        self._gate_frames = {"top": 0, "side": 0}
+        self._hand_frames = {"top": 0, "side": 0}
         self.entry_dropped = {"top": 0, "side": 0}  # 진단: 진입 컷 탈락 수
         # held-object A-1 계측: (camera, class)별 [first_pos, last_pos,
         # head_votes] + 카메라별 관측 프레임 수(게이트 스킵 포함 디코드 위치).
@@ -154,7 +170,7 @@ class VotingEnsemble:
 
     def add_frame(
         self, camera: str, detections: Sequence[Detection], track_ids=None,
-        pos: int | None = None,
+        pos: int | None = None, hand_active: bool = False,
     ) -> None:
         """게이트 통과(=추론된) 프레임에서만 호출.
 
@@ -165,8 +181,16 @@ class VotingEnsemble:
 
         pos: 이 프레임의 디코드 스트림 내 위치 (게이트 스킵 **포함** 카운트,
         0-기반) — held-object A-1 계측 입력 (0713 §3, F6 비저촉: 벽시계
-        환산 없이 스트림 상대 위치만 쓴다). None이면 계측 생략 (하위호환)."""
+        환산 없이 스트림 상대 위치만 쓴다). None이면 계측 생략 (하위호환).
+
+        hand_active: 이 프레임에서 손이 보이거나 래치(I16)가 열려 있었는지 —
+        ratio_denominator="hand_window"의 분모 재료. 기본 False(하위호환:
+        gate 모드에서는 미사용)."""
         self.gate_passed_frames += 1
+        if camera in self._gate_frames:
+            self._gate_frames[camera] += 1
+            if hand_active:
+                self._hand_frames[camera] += 1
         entry = self._entry_conf.get(camera, 0.0)
         tids = track_ids if track_ids is not None else [None] * len(detections)
         if pos is not None:
@@ -403,9 +427,25 @@ class VotingEnsemble:
             default=0,
         )
 
+    def _ratio_denominator(self) -> int:
+        """vote_ratio 분모 (combine/debug_summary 공유 — 이중 기준 금지).
+
+        hand_window: 카메라별 손 활성 프레임 합. 손이 전혀 안 보인 카메라는
+        자기 게이트 통과 수로 폴백한다 — 그 카메라의 표(예: side hand 비활성
+        구성의 side 표)가 0 분모로 ratio를 부풀리는 것을 막는다."""
+        if self.ratio_denominator == "hand_window":
+            return max(
+                1,
+                sum(
+                    self._hand_frames[c] if self._hand_frames[c] > 0 else self._gate_frames[c]
+                    for c in ("top", "side")
+                ),
+            )
+        return max(1, self.gate_passed_frames)
+
     def combine(self) -> tuple[VisionCandidate, ...]:
         classes = set(self._votes["top"]) | set(self._votes["side"])
-        denominator = max(1, self.gate_passed_frames)
+        denominator = self._ratio_denominator()
         vote_floor = self._top_votes() * self._min_share
         out: list[VisionCandidate] = []
         for cid in classes:
@@ -456,7 +496,7 @@ class VotingEnsemble:
         로직을 읽기 전용으로 중복 계산할 뿐, combine()의 동작·성능에는 영향
         없다(공유 mutable state 없음, 호출하지 않으면 오버헤드 0)."""
         classes = set(self._votes["top"]) | set(self._votes["side"])
-        denominator = max(1, self.gate_passed_frames)
+        denominator = self._ratio_denominator()
         vote_floor = self._top_votes() * self._min_share
         summary: dict[int, dict] = {}
         for cid in classes:

@@ -661,8 +661,14 @@ class TriggerPipeline:
                 if evidence is not None
                 else None
             )
-            voting.add_frame(camera, detections, track_ids=tids, pos=pos)
-            latch.update_after_inference(any(d.is_hand for d in detections))
+            hand_now = any(d.is_hand for d in detections)
+            voting.add_frame(
+                camera, detections, track_ids=tids, pos=pos,
+                # 래치는 아직 이전 프레임 상태 — 현재 프레임 손은 hand_now가
+                # 커버하고, 래치의 퇴장 유예(pending) 구간은 active가 커버한다.
+                hand_active=hand_now or latch.active,
+            )
+            latch.update_after_inference(hand_now)
             # combine은 지연 콜러블로 — 냉동(I15)·반품·손 미퇴장
             # 프레임에서는 O(누적 표²) 결합이 아예 실행되지 않는다
             # (docs/0728_freezer_latency_research.md T1-1).
@@ -820,6 +826,10 @@ class TriggerPipeline:
             # 라벨과 대조해 갭별 승격/폐기를 판정한다.
             "tube_shadow": _with_tubes(voting.tube_summary(), evidence),
         }
+        if voting.ratio_denominator != "gate":
+            # 분모 의미가 바뀐 세션임을 아카이브에 명시 — 과거 세션과
+            # vote_ratio를 섞어 비교할 때의 단일 정의(함정 #4) 보호.
+            trace.vote_summary["ratio_denominator"] = voting.ratio_denominator
         return voting.combine()
 
     def _record_frame_detections(
