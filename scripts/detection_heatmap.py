@@ -84,11 +84,18 @@ class _CellGrid:
         return sum(sum(row) for row in self.count)
 
 
-def collect(root: Path, grid: int, size: float):
-    """아카이브를 훑어 (camera, zone)별 셀 격자·클래스 통계를 누적한다."""
+def collect(root: Path, grid: int, size: float, min_conf: float = 0.0):
+    """아카이브를 훑어 (camera, zone)별 셀 격자·클래스 통계를 누적한다.
+
+    min_conf: 이 값 미만 검출은 집계에서 제외. SAVE_DETECTIONS는 투표
+    하한보다 낮은 기록용 검출까지 동봉하므로, 고정 배경 오탐(예: 전 존
+    top (0,6) 셀의 conf~0.1 class 48 유령)을 걷어내고 보려면 0.25~0.3 권장.
+    """
     grids: dict = defaultdict(lambda: {"product": _CellGrid(grid), "hand": _CellGrid(grid)})
     # (camera, zone, class_id) -> [count, conf_sum, conf_max]
     by_class: dict = defaultdict(lambda: [0, 0.0, 0.0])
+    # (camera, zone) -> 판정입력 프레임 수 — 존별 검출수 비교의 분모
+    frames_by: dict = defaultdict(int)
     class_names: dict[int, str] = {}
     crops_seen: dict[str, set] = defaultdict(set)
     n_files = n_with_fd = n_frames = 0
@@ -120,10 +127,11 @@ def collect(root: Path, grid: int, size: float):
                 if cam is None:
                     continue
                 n_frames += 1
+                frames_by[(cam, zone)] += 1
                 for det in fr.get("detections") or []:
                     bbox = det.get("bbox")
                     conf = det.get("conf")
-                    if not bbox or len(bbox) != 4 or conf is None:
+                    if not bbox or len(bbox) != 4 or conf is None or conf < min_conf:
                         continue
                     cx = (bbox[0] + bbox[2]) / 2.0
                     cy = (bbox[1] + bbox[3]) / 2.0
@@ -140,6 +148,7 @@ def collect(root: Path, grid: int, size: float):
     return {
         "grids": grids,
         "by_class": by_class,
+        "frames_by": frames_by,
         "class_names": class_names,
         "crops_seen": crops_seen,
         "n_files": n_files,
@@ -177,6 +186,12 @@ def print_summary(data: dict) -> None:
             # 크롭 모드가 섞이면 같은 카메라라도 프레임 좌표가 다른 세계 영역을
             # 가리킨다 — 존 간 위치 비교가 무효이므로 반드시 경고.
             print(f"[경고] {cam} 카메라 crop 모드 혼재: {sorted(modes)} — 위치 비교 주의")
+    # 존별 분모(판정입력 프레임 수)와 프레임당 검출률 — 원시 count는 존별
+    # 세션 수 차이에 좌우되므로 존 간 비교는 rate로 해야 공정하다.
+    print(f"\n{'camera':<7}{'zone':<6}{'frames':>8}{'product':>9}{'per-frame':>11}")
+    for (cam, zone), nf in sorted(data["frames_by"].items()):
+        np_ = data["grids"][(cam, zone)]["product"].total if (cam, zone) in data["grids"] else 0
+        print(f"{cam:<7}{zone:<6}{nf:>8}{np_:>9}{np_ / nf if nf else 0:>11.2f}")
     rows: dict = defaultdict(dict)
     for (cam, zone, cid), (n, s, _mx) in data["by_class"].items():
         rows[(cam, zone)][cid] = (n, s / n)
@@ -266,6 +281,10 @@ def main() -> int:
     ap.add_argument(
         "--size", type=float, default=480.0,
         help="프레임 한 변 픽셀 (크롭 후 정방 크기, 기본: 480)",
+    )
+    ap.add_argument(
+        "--min-conf", type=float, default=0.0,
+        help="이 conf 미만 검출 제외 (기본: 0 — 기록 전부. 배경 오탐 제거엔 0.25~0.3)",
     )
     args = ap.parse_args()
 
