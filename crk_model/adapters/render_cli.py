@@ -118,33 +118,33 @@ _GLYPHS_RAW = {
 }
 
 
-def _glyph_arrays():
+_GLYPH_CACHE: dict = {}  # (char, scale) -> 스케일 적용된 bool 마스크
+
+
+def _glyph_mask(ch: str, scale: int):
+    """스케일 포함 글리프 캐시 — 프레임×글자마다 np.kron을 재계산하던 것이
+    render 프로파일 hot spot이었다 (2026-07-29 실측, _compose_frame 11ms/frame
+    의 구성 요소). 문자 집합이 작아(≤52 × scale 종류) 캐시가 즉시 포화된다."""
     import numpy as np  # lazy
 
-    glyphs = {}
-    for ch, rows in _GLYPHS_RAW.items():
-        bits = [[c == "X" for c in row] for row in rows.split()]
-        glyphs[ch] = np.array(bits, dtype=bool)
-    return glyphs
-
-
-_GLYPH_CACHE = None
+    key = (ch, scale)
+    mask = _GLYPH_CACHE.get(key)
+    if mask is None:
+        rows = _GLYPHS_RAW.get(ch) or _GLYPHS_RAW["?"]
+        base = np.array(
+            [[c == "X" for c in row] for row in rows.split()], dtype=bool
+        )
+        mask = np.kron(base, np.ones((scale, scale), dtype=bool))
+        _GLYPH_CACHE[key] = mask
+    return mask
 
 
 def _text(img, x: int, y: int, s: str, color, scale: int = 2) -> None:
     """(x, y)에서 시작하는 텍스트 스탬프 — 프레임 밖은 잘라낸다."""
-    import numpy as np  # lazy
-
-    global _GLYPH_CACHE
-    if _GLYPH_CACHE is None:
-        _GLYPH_CACHE = _glyph_arrays()
     h, w = img.shape[:2]
     cx = x
     for ch in s.upper():
-        g = _GLYPH_CACHE.get(ch)
-        if g is None:
-            g = _GLYPH_CACHE["?"]
-        mask = np.kron(g, np.ones((scale, scale), dtype=bool))
+        mask = _glyph_mask(ch, scale)
         gh, gw = mask.shape
         x0, y0 = max(cx, 0), max(y, 0)
         x1, y1 = min(cx + gw, w), min(y + gh, h)
@@ -311,15 +311,16 @@ def _influential(record: dict | None) -> list[dict]:
     ]
 
 
-def _compose_frame(frame, record: dict | None, header: list[str], pos: int):
-    """카메라 프레임 1장을 여백 캔버스에 얹고 헤더 + bbox를 그린다.
+def _canvas_template(header: list[str]):
+    """트리거×카메라당 1회 생성하는 캔버스 템플릿 — 배경·프레임 테두리·
+    **정적 헤더**(세션/판정/카메라 줄)를 미리 그려 둔다. 프레임마다 바뀌는
+    것은 카메라 프레임·bbox·상태줄뿐이므로 per-frame 작업이 template.copy()
+    + 소량 스탬프로 줄어든다 (실측 11ms/frame의 지배 요인 제거).
 
-    헤더는 프레임 밖 상단 밴드(HEADER_H), 프레임은 (FRAME_X, FRAME_Y) —
-    bbox 라벨(y-16)이 프레임 위 경계를 넘으면 LABEL_GAP 띠에 그려져
-    잘리지도, 헤더를 가리지도 않는다. record=None이면 미추론 프레임."""
+    반환: (template, status_y) — status_y는 프레임별 상태줄의 y 오프셋."""
     import numpy as np  # lazy
 
-    canvas = np.empty((CANVAS_H, CANVAS_W, 3), dtype=frame.dtype)
+    canvas = np.empty((CANVAS_H, CANVAS_W, 3), dtype=np.uint8)
     canvas[:, :] = _CANVAS_BG
     # 카메라 프레임 경계 테두리 — 여백과 실제 시야의 구분선
     _rect(
@@ -328,6 +329,21 @@ def _compose_frame(frame, record: dict | None, header: list[str], pos: int):
         _FRAME_BORDER,
         thickness=1,
     )
+    y = 4
+    for line in header:
+        _text(canvas, 3, y, line, (0, 255, 255), scale=2)
+        y += 18
+    return canvas, y
+
+
+def _compose_frame(template, status_y: int, frame, record: dict | None, pos: int):
+    """카메라 프레임 1장을 템플릿 위에 얹고 bbox + 상태줄을 그린다.
+
+    헤더는 프레임 밖 상단 밴드(HEADER_H, 템플릿에 사전 렌더), 프레임은
+    (FRAME_X, FRAME_Y) — bbox 라벨(y-16)이 프레임 위 경계를 넘으면
+    LABEL_GAP 띠에 그려져 잘리지도, 헤더를 가리지도 않는다.
+    record=None이면 미추론 프레임."""
+    canvas = template.copy()
     canvas[FRAME_Y : FRAME_Y + FRAME_SIZE, FRAME_X : FRAME_X + FRAME_SIZE] = frame
 
     for d in _influential(record):
@@ -352,17 +368,13 @@ def _compose_frame(frame, record: dict | None, header: list[str], pos: int):
         _fill(canvas, lx, ly, lx + 12 * len(label) + 4, ly + 16, _TEXT_BG)
         _text(canvas, lx + 2, ly + 1, label, color, scale=2)
 
-    y = 4
-    for line in header:
-        _text(canvas, 3, y, line, (0, 255, 255), scale=2)
-        y += 18
     if record is None:
         status = f"POS {pos:03d} SKIP"
         color = (160, 160, 160)
     else:
         status = f"POS {pos:03d} INFER {len(_influential(record))}"
         color = (0, 255, 0)
-    _text(canvas, 3, y, status, color, scale=2)
+    _text(canvas, 3, status_y, status, color, scale=2)
     return canvas
 
 
@@ -421,12 +433,15 @@ def render_trigger(
         )
         sink = FfmpegSink(dest, fmt, cam_fps)
         crop = crops.get(camera, "center")
-        header = header_base + [f"CAM {camera} ({crop})"]
+        template, status_y = _canvas_template(
+            header_base + [f"CAM {camera} ({crop})"]
+        )
         ok = False
         try:
             for pos, bundle in enumerate(decode_avi(path, crop=crop)):
                 canvas = _compose_frame(
-                    bundle.full, by_camera.get(camera, {}).get(pos), header, pos
+                    template, status_y, bundle.full,
+                    by_camera.get(camera, {}).get(pos), pos,
                 )
                 sink.write(canvas)
             ok = True
