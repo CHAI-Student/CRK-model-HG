@@ -87,9 +87,10 @@ Tier 0+1+2 합산 기대: **40ms/call → 15~20ms/call, 냉동 13.7s → 5~7s** 
 기반 판정 동등성 테스트(배치4 vs 비배치, ET 중간 발동, 프리페치) 포함.
 기기 활성화 절차:
 ```bash
-git fetch && git checkout perf/t2-batch-pipeline
-BATCH=4 bash scripts/convert_engine.sh        # 정적 batch-4 엔진 재수출
-# .env: MODEL__VISION__BATCH_SIZE=4, MODEL__VIDEO__PREFETCH=4
+BATCH=4 PT_FILE=<모델>.pt bash scripts/convert_engine.sh
+#   → models/<모델>_batch4.engine (batch 접미사 — 배치 다른 엔진의 덮어쓰기 방지)
+# .env: MODEL__VISION__YOLO_MODEL_PATH=models/<모델>_batch4.engine
+#       MODEL__VISION__BATCH_SIZE=4, MODEL__VIDEO__PREFETCH=4
 # 기동 프로브가 detect_batch를 1회 실행 — 엔진/텐서 불일치는 기동 실패로 드러남
 ```
 기기 검증 체크리스트: ① 기동 프로브 통과 ② 동일 AVI 재생에서 비배치와

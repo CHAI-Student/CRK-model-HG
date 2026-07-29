@@ -14,7 +14,12 @@ BATCH="${BATCH:-1}"
 MODELS_DIR="${MODELS_DIR:-${PROJECT_ROOT}/models}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 INPUT_PATH="${MODELS_DIR}/${PT_FILE}"
-OUTPUT_PATH="${INPUT_PATH%.pt}.engine"
+# ultralytics export는 항상 {stem}.engine으로 쓰므로, 완료 후 batch 접미사를
+# 붙여 rename한다 — 배치가 다른 엔진이 같은 이름을 덮어써 .env의
+# MODEL__VISION__YOLO_MODEL_PATH / BATCH_SIZE 짝이 조용히 어긋나는 것을
+# 방지 (정적 엔진은 batch 불일치 시 기동 프로브에서 fail-fast).
+EXPORT_PATH="${INPUT_PATH%.pt}.engine"
+OUTPUT_PATH="${INPUT_PATH%.pt}_batch${BATCH}.engine"
 
 echo "=========================================="
 echo "TensorRT engine export"
@@ -124,10 +129,13 @@ model_path, imgsz, batch = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
 YOLO(model_path).export(format="engine", device=0, half=False, imgsz=imgsz, batch=batch)
 PY
 
-if [[ ! -f "${OUTPUT_PATH}" ]]; then
-    echo "ERROR: export did not produce ${OUTPUT_PATH}" >&2
+if [[ ! -f "${EXPORT_PATH}" ]]; then
+    echo "ERROR: export did not produce ${EXPORT_PATH}" >&2
     exit 1
 fi
+
+# batch 접미사 rename — .env의 YOLO_MODEL_PATH가 이 파일명을 가리켜야 한다.
+mv -f "${EXPORT_PATH}" "${OUTPUT_PATH}"
 
 # Post-check: fail loudly if anything bumped NumPy during export
 "${PYTHON_BIN}" - <<'PY'
