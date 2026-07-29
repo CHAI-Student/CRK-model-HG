@@ -55,6 +55,13 @@ class UltralyticsEngineDetector:
     def detect(
         self, frame, allowed_class_ids: Sequence[int] | None = None
     ) -> Sequence[Detection]:
+        if self._batch > 1:
+            # 정적 batch 엔진은 **모든** predict가 정확히 batch 크기여야 한다
+            # (ultralytics TRT backend: "input size ... not equal to max model
+            # size" — 기동 프로브의 단일 프레임 detect가 warmup부터 실패한
+            # 실기 사고, 2026-07-29 커밋 코멘트). 단일 프레임도 패딩 배치
+            # 경로로 우회한다.
+            return self.detect_batch([frame], allowed_class_ids=allowed_class_ids)[0]
         # classes 허용목록 (P0-2, 원본 yolo_wrapper 동형): None = 무제한,
         # 빈 목록 = fail-closed(predict 호출 없이 즉시 []) — 노이즈 클래스가
         # max_det 슬롯을 잠식해 저신뢰 실상품을 밀어내는 것을 원천 차단.
@@ -100,17 +107,26 @@ class UltralyticsEngineDetector:
         fulls = [getattr(f, "full", f) for f in frames]
         if not fulls:
             return []
-        import numpy as np  # lazy: Jetson system-site
-        import torch  # lazy
-
         expected = (self._imgsz, self._imgsz, 3)
         if any(getattr(f, "shape", None) != expected for f in fulls):
+            if self._batch > 1:
+                # 정적 batch 엔진에서는 프레임별 폴백도 batch-1 predict라
+                # 동일하게 실패하고, detect가 다시 이리로 위임하면 무한
+                # 재귀다 — 계약 위반을 즉시 드러낸다 (운영 입력은 항상
+                # imgsz 정방형 크롭이라 도달하지 않아야 정상).
+                raise ValueError(
+                    "detect_batch with a static batch engine requires "
+                    f"{expected} frames; got "
+                    f"{[getattr(f, 'shape', None) for f in fulls]}"
+                )
             # letterbox 필요 케이스는 어댑터에서 재구현하지 않는다 (좌표계
             # 등식 유지) — ultralytics 전처리가 있는 프레임별 경로로 폴백.
             return [
                 list(self.detect(f, allowed_class_ids=allowed_class_ids))
                 for f in fulls
             ]
+        import numpy as np  # lazy: Jetson system-site
+        import torch  # lazy
         n = len(fulls)
         pad = max(self._batch - n, 0)
         stack = np.stack(fulls + [np.zeros(expected, dtype=fulls[0].dtype)] * pad)

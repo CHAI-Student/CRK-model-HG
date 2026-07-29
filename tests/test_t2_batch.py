@@ -168,3 +168,62 @@ class TestSettingsWiring:
         assert Settings().prefetch_depth == 0
         monkeypatch.setenv("MODEL__VIDEO__PREFETCH", "4")
         assert Settings.from_env().prefetch_depth == 4
+
+
+class TestStaticBatchEngineAdapter:
+    """정적 batch 엔진 계약 (2026-07-29 실기 기동 실패 회귀 고정):
+    ultralytics TRT backend는 정적 엔진에서 모든 predict가 정확히 batch
+    크기여야 한다 ("input size ... not equal to max model size").
+    → batch>1이면 단일 프레임 detect도 detect_batch(패딩)로 위임한다."""
+
+    def _bare(self, batch):
+        from crk_model.adapters.yolo_detector import UltralyticsEngineDetector
+
+        det = UltralyticsEngineDetector.__new__(UltralyticsEngineDetector)
+        det._imgsz = 480
+        det._conf = 0.01
+        det._max_det = 20
+        det._hand_class = 0
+        det._device = 0
+        det._batch = batch
+        det._model = None  # predict에 도달하면 그 자체가 실패 신호
+        return det
+
+    def test_single_detect_delegates_to_batch_path(self, monkeypatch):
+        det = self._bare(batch=4)
+        seen = {}
+
+        def fake_batch(frames, allowed_class_ids=None):
+            seen["n"] = len(frames)
+            seen["allowed"] = allowed_class_ids
+            return [["sentinel-detections"]]
+
+        monkeypatch.setattr(det, "detect_batch", fake_batch)
+        out = det.detect("frame", allowed_class_ids=(1, 2))
+        assert out == ["sentinel-detections"]
+        assert seen == {"n": 1, "allowed": (1, 2)}
+
+    def test_non_square_with_static_batch_raises(self):
+        import numpy as np
+
+        det = self._bare(batch=4)
+        with pytest.raises(ValueError, match="static batch engine"):
+            det.detect_batch([np.zeros((240, 480, 3), dtype=np.uint8)])
+
+    def test_non_square_with_batch1_falls_back_per_frame(self, monkeypatch):
+        import numpy as np
+
+        det = self._bare(batch=1)
+        calls = []
+        monkeypatch.setattr(
+            det, "detect", lambda f, allowed_class_ids=None: calls.append(1) or []
+        )
+        out = det.detect_batch(
+            [np.zeros((240, 480, 3), dtype=np.uint8)] * 2
+        )
+        assert out == [[], []] and calls == [1, 1]
+
+    def test_empty_allowlist_fail_closed_without_predict(self):
+        det = self._bare(batch=4)
+        assert det.detect_batch(["f1", "f2"], allowed_class_ids=()) == [[], []]
+        assert det.detect("f1", allowed_class_ids=()) == []
