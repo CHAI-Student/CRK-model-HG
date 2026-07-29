@@ -469,6 +469,28 @@ class TestAllowedClassIds:
         assert (1,) in detector.allowed_seen  # side: 상품만
         assert all(s in ((1, 0), (1,)) for s in detector.allowed_seen)
 
+    def test_side_hand_enabled_adds_hand_to_side_allowlist(self, cola):
+        # 이슈 #18 side hand: 켜면 side도 상품 + hand(0)를 추론한다 — side
+        # 래치(I16)·hand_path 손 근접 게이팅의 입력이 생긴다. 기본 off는
+        # 위 테스트가 계약한다 (기본값 = 원본 동작).
+        detector = self.RecordingDetector()
+        store = ActiveProductStore()
+        store.update([cola])
+        pipe = TriggerPipeline(
+            detector, {1: REFRIGERATOR}, store, side_hand_enabled=True
+        )
+        pipe.process(
+            "s1",
+            TriggerRequest(
+                1,
+                {"top": moving_frames(4), "side": moving_frames(4)},
+                samples(500, 400),
+                1.0,
+            ),
+        )
+        assert detector.allowed_seen
+        assert all(s == (1, 0) for s in detector.allowed_seen)  # 양 카메라 동일
+
     def test_unmapped_sentinel_excluded_from_allowlist(self, cola):
         # 미매핑 상품(class_id=-1 센티널, issue #6)은 허용목록에서 제외 —
         # -1이 predict classes로 흘러가면 안 된다.

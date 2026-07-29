@@ -67,6 +67,11 @@ class DetectionFilterChain:
         # 손 검출 conf 하한 (원본 hand_confidence_threshold, P1-7 이식): 이
         # 값 미만의 hand 검출은 래치·궤적에 쓰지 않는다 — 유령 손이 모션
         # 게이트 래치(I16)와 hand_path 기준을 오염시키는 것을 차단. 0 = off.
+        side_hand_conf_floor: float | None = None,
+        # side 카메라 전용 손 conf 하한 (side hand 추론, 이슈 #18). None =
+        # hand_conf_floor를 따른다. side에서는 손 검출 1건이 곧 hand_path
+        # 필터를 무장시키는 방아쇠라(아래 apply의 `if history` 가드), 오탐
+        # 손이 상품 recall을 지우는 비용이 top보다 커서 하한을 따로 조인다.
     ):
         if vertical_roi_region not in ("off", "upper", "lower"):
             # cabinet_type과 동일한 fail-closed: 오타가 조용히 off가 되면
@@ -78,6 +83,7 @@ class DetectionFilterChain:
         self._top_roi_enabled = top_roi_enabled
         self._top_roi_split = top_roi_y_split
         self._hand_conf_floor = hand_conf_floor
+        self._side_hand_conf_floor = side_hand_conf_floor
         # top ROI의 방향 게이트 (원본 _top_roi_direction): 트리거 delta가
         # 0이면 필터 미적용. pipeline이 set_trigger_delta로 주입한다.
         self._trigger_delta: float | None = None
@@ -133,12 +139,17 @@ class DetectionFilterChain:
 
     def apply(self, camera: str, detections: Sequence[Detection]) -> list[Detection]:
         # Hand conf floor (P1-7): 유령 손을 래치·궤적 입력에서 제외 — 통과한
-        # 손만 hand_path 기준·래치(I16)에 쓰인다.
+        # 손만 hand_path 기준·래치(I16)에 쓰인다. side는 전용 하한 우선.
+        floor = (
+            self._side_hand_conf_floor
+            if camera == "side" and self._side_hand_conf_floor is not None
+            else self._hand_conf_floor
+        )
         hands = []
         for d in detections:
             if not d.is_hand:
                 continue
-            if self._hand_conf_floor > 0 and d.confidence < self._hand_conf_floor:
+            if floor > 0 and d.confidence < floor:
                 self.drop_stats["hand_conf"][camera] += 1
                 continue
             hands.append(d)

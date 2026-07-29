@@ -5,6 +5,7 @@ from conftest import cand
 from crk_model.core.profiles import FREEZER, REFRIGERATOR
 from crk_model.perception import (
     Detection,
+    DetectionFilterChain,
     EarlyTerminationConfig,
     EarlyTerminator,
     MotionEvidence,
@@ -668,3 +669,31 @@ class TestTrackletGaps:
         for pos in range(12):
             tids = ev2.observe("top", [self._moving(pos)], pos=pos)
         assert ev2.track_held(tids[0]) is True
+
+
+class TestSideHandConfFloor:
+    """side 전용 손 conf 하한 + hand_path 자동 무장 (이슈 #18 side hand)."""
+
+    def test_side_floor_overrides_global_on_side_only(self):
+        f = DetectionFilterChain(hand_conf_floor=0.3, side_hand_conf_floor=0.6)
+        weak = Detection(0, 0.45, is_hand=True, bbox=(10.0, 10.0, 50.0, 50.0))
+        assert f.apply("top", [weak])  # top: 0.3 하한 → 생존
+        assert not f.apply("side", [weak])  # side: 0.6 하한 → 제거
+        assert f.drop_stats["hand_conf"]["side"] == 1
+
+    def test_side_floor_unset_inherits_global(self):
+        f = DetectionFilterChain(hand_conf_floor=0.3)
+        weak = Detection(0, 0.45, is_hand=True, bbox=(10.0, 10.0, 50.0, 50.0))
+        assert f.apply("side", [weak])
+
+    def test_side_hand_arms_hand_path_on_side(self):
+        # side 손 1건이 들어오는 순간부터 side 상품은 손 궤적 ±마진과
+        # 교차해야 생존 — side hand 활성화의 핵심 효과(정지 진열 오투표
+        # 제거)이자, 손 오탐 시 recall이 죽는 방아쇠이기도 하다.
+        f = DetectionFilterChain(hand_conf_floor=0.0, hand_margin_px=40.0)
+        hand = Detection(0, 0.9, is_hand=True, bbox=(100.0, 100.0, 150.0, 150.0))
+        near = Detection(7, 0.9, bbox=(160.0, 160.0, 200.0, 200.0))  # ±40 교차
+        far = Detection(8, 0.9, bbox=(300.0, 300.0, 350.0, 350.0))  # 궤적 밖
+        out = f.apply("side", [hand, near, far])
+        assert near in out and far not in out
+        assert f.drop_stats["hand_path"]["side"] == 1

@@ -170,6 +170,12 @@ class TriggerPipeline:
         # 수명(OPEN 리셋)을 관리하며 주입. None이면 기록·prior 모두 비활성
         # (라이브러리 기본, 하위호환). Phase 1: likelihood shadow의
         # log_p_tray 항으로만 소비 — 판정·정산 무변경.
+        side_hand_enabled: bool = False,
+        # side 카메라 hand 추론 (MODEL__VISION__SIDE_HAND_ENABLED, 이슈 #18):
+        # side allowlist에 hand(0)를 포함한다. 손이 side에 흐르기 시작하면
+        # 카메라별 래치(I16)·hand_path 필터가 side에서도 자동으로 작동한다 —
+        # 정지 진열 상품 오투표를 손 근접 게이팅으로 걷어내는 것이 목적.
+        # 기본 off = 원본 동작 (side는 상품만 추론).
         save_detections: bool = False,
         # 프레임별 bbox 기록 (MODEL__SESSION__SAVE_DETECTIONS): 추론 프레임의
         # 판정 기여 검출(필터 체인 통과 ∧ 투표 진입 conf 이상)을
@@ -203,6 +209,7 @@ class TriggerPipeline:
         self._router = router or JudgmentRouter()
         self._filters = filters or DetectionFilterChain()
         self._et_enabled = early_termination_enabled
+        self._side_hand_enabled = side_hand_enabled
         self._analyzer_factory = analyzer_factory or LoadcellAnalyzer
         self._default_profile = default_profile
         self._voting_params = dict(voting_params) if voting_params else {}
@@ -619,15 +626,18 @@ class TriggerPipeline:
         stopped = False
         filtered_out: dict[str, int] = {}  # 진단(work item 3): 카메라별 필터 제거 개수
         # P0-2 (원본 _inference_allowed_class_ids 동형): 판매중 상품의 매핑된
-        # class만 추론 허용 — 미매핑 센티널(-1)은 제외. hand는 top에만 포함
-        # (원본은 side에서 hand를 추론하지 않는다 — hand-path 추적은 top 소관).
+        # class만 추론 허용 — 미매핑 센티널(-1)은 제외. hand는 top에 항상,
+        # side에는 side_hand_enabled일 때만 포함한다 (기본 off = 원본 동작 —
+        # hand-path 추적이 top 소관이던 원본과 달리, 켜면 side도 손 근접
+        # 게이팅으로 정지 진열 오투표를 거른다. 이슈 #18).
         # 매핑된 상품이 0개면 빈 목록 = fail-closed (검출 0, 어댑터 계약).
         product_ids = sorted({p.class_id for p in snapshot.products if p.class_id >= 0})
         if not product_ids:
             trace.reason_codes.append("no_mapped_class_ids")
+        with_hand = tuple(dict.fromkeys((*product_ids, HAND_CLASS_ID)))
         allowed_by_camera: dict[str, tuple[int, ...]] = {
-            "top": tuple(dict.fromkeys((*product_ids, HAND_CLASS_ID))),
-            "side": tuple(product_ids),
+            "top": with_hand,
+            "side": with_hand if self._side_hand_enabled else tuple(product_ids),
         }
         # 트리거 단위 상태 초기화: 단계별 제거 카운터(issue #6 2차) + 손 궤적·
         # 정지 트랙(이슈 #10 — 이전 영상의 좌표가 다음 영상 필터 기준이 되던 결함)

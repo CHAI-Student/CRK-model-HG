@@ -260,6 +260,11 @@ class ModelService:
                 top_roi_enabled=self.settings.top_roi_enabled,
                 top_roi_y_split=self.settings.top_roi_y_split,
                 hand_conf_floor=self.settings.hand_confidence_threshold,
+                side_hand_conf_floor=(
+                    self.settings.side_hand_confidence_threshold
+                    if self.settings.side_hand_confidence_threshold >= 0
+                    else None
+                ),
             ),
             voting_params={
                 "entry_conf_top": self.settings.top_confidence_threshold,
@@ -290,6 +295,7 @@ class ModelService:
             # 프레임별 bbox 기록 (MODEL__SESSION__SAVE_DETECTIONS) — 아카이브
             # 동봉 후 render-session CLI가 오버레이 영상으로 재구성한다.
             # camera_crops는 렌더가 동일 크롭 기하를 재현하기 위한 좌표계 스탬프.
+            side_hand_enabled=self.settings.side_hand_enabled,
             save_detections=self.settings.save_detections,
             camera_crops=self.camera_crops,
             # T2 (docs/0728_freezer_latency_research.md): 마이크로배치(D8 배선)

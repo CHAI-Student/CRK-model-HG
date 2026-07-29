@@ -199,6 +199,15 @@ class Settings:
     # 손 검출 conf 하한 (perf-gap P1-7): 유령 손의 래치·궤적 오염 차단.
     # 원본 운영값 0.30 (기본 0.40, 실배포 .env 0.30).
     hand_confidence_threshold: float = 0.30
+    # side 카메라 hand 추론 (이슈 #18): side allowlist에 hand(0) 포함 —
+    # side에서도 래치(I16)·hand_path 손 근접 게이팅이 작동해 정지 진열
+    # 오투표를 거른다. 원본에 없는 신설 동작이라 기본 off. dual_top_proxy
+    # (냉동)에서는 side 스트림이 top 뷰라 의미가 다르니 냉장 전용으로 켤 것.
+    side_hand_enabled: bool = False
+    # side 전용 손 conf 하한. side는 손 1건이 hand_path를 무장시키는
+    # 방아쇠라 top보다 조일 수 있게 분리. 음수(기본) = hand_confidence_
+    # threshold 상속.
+    side_hand_confidence_threshold: float = -1.0
     # ---- 판정 I-V 노브 (이슈 #15, FreezerVisionFirst 단계별 임계) ----
     # single_share: top 득표 대비 이 비율 이상만 단일 정체성 교체 시도 허용
     # combo_share: 조합 멤버 자격 하한 / refit_share: 유일-적합 구제 자격 하한
@@ -385,6 +394,10 @@ class Settings:
             top_roi_y_split=_env_float("MODEL__VISION__TOP_ROI_Y_SPLIT", 240.0),
             hand_confidence_threshold=_env_float(
                 "MODEL__VISION__HAND_CONFIDENCE_THRESHOLD", 0.30
+            ),
+            side_hand_enabled=_env_bool("MODEL__VISION__SIDE_HAND_ENABLED", False),
+            side_hand_confidence_threshold=_env_float(
+                "MODEL__VISION__SIDE_HAND_CONFIDENCE_THRESHOLD", -1.0
             ),
             segment_retry_gap_grams=_env_float(
                 "MODEL__WEIGHT__SEGMENT_RETRY_GAP_GRAMS", 5.0
