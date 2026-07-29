@@ -667,21 +667,37 @@ class TriggerPipeline:
             else None
         )
         streams: dict[str, object] = {}
-        try:
-            # T2-3: 프리페치 활성 시 전 카메라 스트림을 트리거 시작 시점에
-            # 함께 연다 — top 추론 중 side 디코드가 백그라운드에서 진행된다.
-            # 구축 도중 디코드 실패(I1)도 outer finally가 앞서 만든 프리페처를
-            # 정리한 뒤 전파된다.
+
+        def _camera_iters():
+            """(camera, frame_iter) 시퀀스 — 스트림 오픈 시점이 모드를 가른다.
+
+            프리페치 활성: 전 카메라를 **트리거 시작 시점에** 함께 연다 (T2-3
+            — top 추론 중 side 디코드가 백그라운드에서 진행). 비활성(기본):
+            현행과 동일하게 **카메라 차례가 왔을 때** 연다 — LazyAviFrames의
+            __getitem__이 곧 ffmpeg spawn이라, 미리 열면 기본값에서도 side
+            디코더가 조기 기동해 "기본값 = 현행 동작" 계약이 깨진다.
+            어느 모드든 streams에 등록해 outer finally가 정리한다 (I1: 오픈
+            실패 전파 전에 앞서 만든 프리페처부터 닫는다)."""
+            if self._prefetch_depth > 0:
+                for camera in CAMERAS:
+                    frames = req.frames.get(camera)
+                    if frames is None:
+                        continue  # 빈 스트림(list)/미제공 모두 순회 0회
+                    streams[camera] = PrefetchFrames(
+                        iter(frames), depth=self._prefetch_depth
+                    )
+                yield from streams.items()
+                return
             for camera in CAMERAS:
                 frames = req.frames.get(camera)
                 if frames is None:
-                    continue  # 빈 스트림(list)/미제공 모두 아래 for가 0회 순회
-                streams[camera] = (
-                    PrefetchFrames(iter(frames), depth=self._prefetch_depth)
-                    if self._prefetch_depth > 0
-                    else iter(frames)
-                )
-            for camera, frame_iter in streams.items():
+                    continue
+                it = iter(frames)
+                streams[camera] = it
+                yield camera, it
+
+        try:
+            for camera, frame_iter in _camera_iters():
                 latch = HandLatch()  # 카메라별 래치 (hand-path는 카메라별, L3 계약과 동형)
                 gate = MotionGate(profile, latch)
                 camera_filtered_out = 0

@@ -227,3 +227,54 @@ class TestStaticBatchEngineAdapter:
         det = self._bare(batch=4)
         assert det.detect_batch(["f1", "f2"], allowed_class_ids=()) == [[], []]
         assert det.detect("f1", allowed_class_ids=()) == []
+
+
+class TestStreamOpenTiming:
+    """스트림 오픈 시점 계약: 기본값(PREFETCH=0)은 현행과 동일하게 카메라
+    차례에 열고, 프리페치 활성 시에만 트리거 시작 시 전 카메라를 함께 연다
+    — LazyAviFrames.__getitem__ == ffmpeg spawn이라 오픈 시점이 곧 동작이다."""
+
+    class _RecordingFrames:
+        def __init__(self, data, events):
+            self._d = data
+            self._events = events
+
+        def get(self, camera):
+            if camera not in self._d:
+                return None
+            self._events.append(("open", camera))
+            return self._d[camera]
+
+    def test_default_opens_side_only_after_top_consumed(self, cola):
+        events = []
+
+        def top_stream():
+            for f in moving_frames(12):
+                events.append(("frame", "top"))
+                yield f
+
+        req = TriggerRequest(
+            2,
+            self._RecordingFrames(
+                {"top": top_stream(), "side": moving_frames(12)}, events
+            ),
+            samples(500, 400),
+            1.0,
+        )
+        _pipe(cola, FakeDetector()).process("s1", req)
+        assert events[0] == ("open", "top")
+        assert events[-1] == ("open", "side")  # top 소비가 끝난 뒤에야 오픈
+        assert ("frame", "top") in events
+
+    def test_prefetch_opens_all_cameras_at_start(self, cola):
+        events = []
+        req = TriggerRequest(
+            2,
+            self._RecordingFrames(
+                {"top": moving_frames(12), "side": moving_frames(12)}, events
+            ),
+            samples(500, 400),
+            1.0,
+        )
+        _pipe(cola, FakeDetector(), prefetch_depth=2).process("s1", req)
+        assert events[:2] == [("open", "top"), ("open", "side")]
