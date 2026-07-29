@@ -137,6 +137,16 @@ class MotionEvidence:
     # 문서 G1의 fail-closed 역전 위험(진짜 ambiguous를 확신 오판으로)을
     # 다수결 문턱으로 차단한다.
     tube_minority_ratio: float = 0.3
+    # no_motion 몰수의 "측정 불가" 정책 (이슈 #18 후속, MODEL__VISION__
+    # MOTION_UNMEASURABLE): "forfeit"(현행) | "exempt". n=1 트랙은 path=0·
+    # max_disp=0이라 구조적으로 passes() 통과가 불가능하다 — 빠른 취출은
+    # 검출이 1~2프레임뿐이거나 max_jump 초과 단편화로 전 트랙이 그 상태가
+    # 되어, "너무 빨리 움직여서 no_motion"이라는 역설로 정답 표가 몰수된다.
+    # exempt는 클래스에 측정 가능한(관측 ≥ measurable_min_obs) 트랙이 하나도
+    # 없으면 면제한다 — zero-bbox 면제와 같은 "실패 방향 = 증거 보존" 원칙.
+    # "측정했더니 정지"(장수 트랙, path≈0 = 진열)는 계속 몰수된다.
+    unmeasurable_policy: str = "forfeit"
+    measurable_min_obs: int = 3
     _tracks: dict[tuple[str, int], list[_Track]] = field(
         default_factory=lambda: defaultdict(list)
     )
@@ -156,6 +166,12 @@ class MotionEvidence:
     _tube_by_id: dict[int, _Tube] = field(default_factory=dict)
     _tube_of_tid: dict[int, int] = field(default_factory=dict)
     _next_aid: int = 0
+
+    def __post_init__(self) -> None:
+        if self.unmeasurable_policy not in ("forfeit", "exempt"):
+            # fail-closed (cabinet_type 원칙) — 오타가 조용히 forfeit이 되면
+            # 면제 없이 운영 중임을 알 수 없다.
+            raise ValueError(f"Invalid unmeasurable_policy: {self.unmeasurable_policy}")
 
     def observe(
         self, camera: str, detections: Sequence[Detection], pos: int | None = None
@@ -317,9 +333,30 @@ class MotionEvidence:
 
         클래스 단위(class_motion)보다 정밀하다: 같은 클래스가 진열+취출로
         동시에 있어도 진열 인스턴스 트랙의 표는 몰수되고 움직인 트랙의
-        표만 남는다 — "오래 보이는 것 = 표 많은 것" 편향의 종결."""
+        표만 남는다 — "오래 보이는 것 = 표 많은 것" 편향의 종결.
+
+        exempt 정책의 면제는 **클래스 전체가 측정 불가일 때만** — 측정 가능한
+        형제 트랙(진열 인스턴스)이 있으면 단편 트랙은 계속 몰수된다 (진열+
+        취출 동시 케이스의 트랙 단위 정밀성 유지)."""
         t = self._track_by_id.get(tid)
-        return t is not None and t.passes(self.floor_px, self.size_scale)
+        if t is None:
+            return False
+        if t.passes(self.floor_px, self.size_scale):
+            return True
+        return (
+            self.unmeasurable_policy == "exempt"
+            and t.n < self.measurable_min_obs
+            and self.class_unmeasurable(t.camera, t.class_id)
+        )
+
+    def class_unmeasurable(self, camera: str, class_id: int) -> bool:
+        """변위 측정 자체가 불가했나 — 트랙은 있으나 전부 measurable_min_obs
+        미만 (찰나 가시성/단편화). 몰수의 전제인 "정지가 입증됨"이 성립하지
+        않는 상태. 트랙이 아예 없으면 False (moot — class_motion이 담당)."""
+        tracks = self._tracks.get((camera, class_id))
+        if not tracks:
+            return False
+        return all(t.n < self.measurable_min_obs for t in tracks)
 
     def track_held(self, tid: int) -> bool:
         """T2 held 판정: 프리롤 head 구간부터 지속 관측된(carried-in) 트랙인가.
@@ -348,7 +385,11 @@ class MotionEvidence:
         tracks = self._tracks.get((camera, class_id))
         if not tracks:
             return True  # 관측 없음 = 표도 없음 (moot) — 몰수할 것이 없다
-        return any(t.passes(self.floor_px, self.size_scale) for t in tracks)
+        if any(t.passes(self.floor_px, self.size_scale) for t in tracks):
+            return True
+        return self.unmeasurable_policy == "exempt" and self.class_unmeasurable(
+            camera, class_id
+        )
 
     def summary(self) -> dict:
         """vote_summary 진단용 — 카메라×클래스별 통과 여부와 최대 경로/임계.
@@ -376,13 +417,18 @@ class MotionEvidence:
                 }
                 for t in sorted(tracks, key=lambda t: -t.n)[:8]
             ]
-            out[camera][cid] = {
+            entry = {
                 "passed": self.class_motion(camera, cid),
                 "best_path": round(max(best.path, best.max_disp), 1),
                 "threshold": round(thr, 1),
                 "tracks": len(tracks),
                 "track_detail": detail,
             }
+            if self.class_unmeasurable(camera, cid):
+                # "측정된 정지"와 구분되는 아카이브 근거 — exempt 정책 승격
+                # 판단(정답 클래스가 여기 걸리는 빈도)의 실측 재료.
+                entry["unmeasurable"] = True
+            out[camera][cid] = entry
         for camera, cid in self._exempt:
             out[camera].setdefault(cid, {"passed": True, "exempt": True})
         return {cam: dict(classes) for cam, classes in out.items()}

@@ -265,6 +265,11 @@ class Settings:
     # crop 원점(left/center)과 무관하게 그대로 유효.
     motion_evidence_enabled: bool = True
     motion_evidence_floor_px: float | None = None
+    # no_motion "측정 불가" 정책 (이슈 #18 후속): "forfeit"(현행) | "exempt"
+    # — 관측 1~2회 단편 트랙뿐인 클래스는 몰수 대신 면제 (빠른 취출이
+    # "no_motion"으로 죽는 역설 차단, motion_evidence.py 참조).
+    motion_unmeasurable_policy: str = "forfeit"
+    motion_measurable_min_obs: int = 3
     # ---- T2 held 트랙 강등 (0713 A-2의 트랙 단위 재구현, 0723 문서 §8) ----
     # carried-in(프리롤 head부터 지속 관측) 트랙의 표를 combine에서 몰수.
     # 같은 클래스의 취출 트랙 표는 유지된다(S2 해소 — 클래스 단위 A-2 설계의
@@ -440,6 +445,14 @@ class Settings:
             motion_evidence_enabled=_env_bool("MODEL__VISION__MOTION_EVIDENCE", True),
             motion_evidence_floor_px=_env_opt_float(
                 "MODEL__VISION__MOTION_EVIDENCE_FLOOR_PX"
+            ),
+            motion_unmeasurable_policy=_env_choice(
+                "MODEL__VISION__MOTION_UNMEASURABLE",
+                "forfeit",
+                ("forfeit", "exempt"),
+            ),
+            motion_measurable_min_obs=_env_int(
+                "MODEL__VISION__MOTION_MEASURABLE_MIN_OBS", 3
             ),
             held_track_demotion=_env_choice(
                 "MODEL__VISION__HELD_TRACK_DEMOTION",

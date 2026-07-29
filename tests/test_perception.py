@@ -739,3 +739,58 @@ class TestHandWindowRatio:
     def test_invalid_denominator_mode_raises(self):
         with pytest.raises(ValueError):
             VotingEnsemble(ratio_denominator="hand")
+
+
+class TestMotionUnmeasurable:
+    """no_motion "측정 불가" 정책 (이슈 #18 후속) — n=1 트랙은 path=0이라
+    passes() 통과가 구조적으로 불가능한 결함의 면제 경로."""
+
+    def test_single_obs_track_forfeits_by_default(self):
+        ev = MotionEvidence(floor_px=10.0)  # forfeit (현행 계약)
+        tids = ev.observe("top", [Detection(7, 0.9, bbox=(100.0, 100.0, 140.0, 140.0))])
+        assert ev.class_motion("top", 7) is False
+        assert ev.track_qualifies(tids[0]) is False
+        assert ev.class_unmeasurable("top", 7) is True  # 진단 마킹은 양 모드 공통
+
+    def test_exempt_preserves_unmeasurable_class(self):
+        ev = MotionEvidence(floor_px=10.0, unmeasurable_policy="exempt")
+        tids = ev.observe("top", [Detection(7, 0.9, bbox=(100.0, 100.0, 140.0, 140.0))])
+        assert ev.class_motion("top", 7) is True
+        assert ev.track_qualifies(tids[0]) is True
+
+    def test_exempt_still_forfeits_measured_still_class(self):
+        # 5관측 정지 트랙 = "측정된 정지"(진열) — exempt에서도 몰수 유지.
+        ev = MotionEvidence(floor_px=10.0, unmeasurable_policy="exempt")
+        for _ in range(5):
+            tid = ev.observe(
+                "top", [Detection(7, 0.9, bbox=(100.0, 100.0, 140.0, 140.0))]
+            )[0]
+        assert ev.class_motion("top", 7) is False
+        assert ev.track_qualifies(tid) is False
+
+    def test_exempt_fragment_of_measurable_class_stays_forfeited(self):
+        # 진열(측정 가능 트랙)과 단편이 같은 클래스로 공존 — 클래스 전체가
+        # 측정 불가일 때만 면제한다 (진열+취출 동시 케이스의 트랙 정밀성).
+        ev = MotionEvidence(floor_px=10.0, unmeasurable_policy="exempt")
+        for _ in range(5):
+            ev.observe("top", [Detection(7, 0.9, bbox=(100.0, 100.0, 140.0, 140.0))])
+        frag = ev.observe(
+            "top", [Detection(7, 0.9, bbox=(400.0, 400.0, 440.0, 440.0))]
+        )[0]
+        assert ev.track_qualifies(frag) is False
+
+    def test_debug_summary_labels_unmeasurable_forfeit(self):
+        # forfeit 모드에서 몰수 사유를 "측정된 정지"와 구분 — exempt 승격
+        # 판단의 실측 재료 (rejected_by: no_motion_unmeasurable).
+        ev = MotionEvidence(floor_px=10.0)
+        v = VotingEnsemble(min_vote_count=1, conf_floor=0.0)
+        v.attach_motion_evidence(ev)
+        det = Detection(7, 0.9, bbox=(100.0, 100.0, 140.0, 140.0))
+        tids = ev.observe("top", [det])
+        v.add_frame("top", [det], track_ids=tids)
+        assert v.combine() == ()
+        assert v.debug_summary()[7]["rejected_by"] == "no_motion_unmeasurable"
+
+    def test_invalid_policy_raises(self):
+        with pytest.raises(ValueError):
+            MotionEvidence(unmeasurable_policy="open")

@@ -510,7 +510,16 @@ class VotingEnsemble:
             ratio = votes / denominator
             passes_ratio_gate = ratio >= self._min_ratio or votes >= self._min_count
             if votes == 0 and raw_votes > 0:
-                rejected_by = "no_motion"  # 변위 증거 없음 — 진열/배경 검출
+                # 변위 증거 없음 — 단, "측정된 정지"(진열/배경)와 "측정 불가"
+                # (1~2관측 단편 — 빠른 취출 시그니처)를 라벨로 구분한다.
+                # 후자가 정답 클래스에서 반복되면 MOTION_UNMEASURABLE=exempt
+                # 승격 근거 (motion_evidence.py unmeasurable_policy).
+                ev = self._motion_evidence
+                unmeasured = ev is not None and any(
+                    self._votes[c].get(cid) and ev.class_unmeasurable(c, cid)
+                    for c in ("top", "side")
+                )
+                rejected_by = "no_motion_unmeasurable" if unmeasured else "no_motion"
                 votes = raw_votes  # 진단에는 원 득표를 남긴다 (얼마나 몰수됐나)
             elif not passes_ratio_gate:
                 rejected_by = "ratio"

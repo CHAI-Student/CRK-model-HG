@@ -152,6 +152,11 @@ class TriggerPipeline:
         motion_evidence_floor_px: float | None = None,
         # None = 프로파일 기본 (냉장 10px / 냉동 12px — 원본
         # MOTION_MIN_DISPLACEMENT_PX 동형, 1:1 center-crop 좌표계 전제).
+        motion_unmeasurable_policy: str = "forfeit",
+        # no_motion "측정 불가" 정책 (MODEL__VISION__MOTION_UNMEASURABLE):
+        # motion_evidence.py unmeasurable_policy 참조. 기본 = 현행 몰수.
+        motion_measurable_min_obs: int = 3,
+        # 측정 자격 최소 관측 수 (MODEL__VISION__MOTION_MEASURABLE_MIN_OBS).
         held_track_min_head: int = 5,
         # T2 held 트랙 판정의 head 임계 (MotionEvidence.held_min_head 주입,
         # MODEL__VISION__HELD_TRACK_MIN_HEAD). 강등 모드 자체는 voting_params
@@ -216,6 +221,8 @@ class TriggerPipeline:
         self._segment_retry_gap = segment_retry_gap_grams
         self._motion_evidence_enabled = motion_evidence_enabled
         self._motion_evidence_floor = motion_evidence_floor_px
+        self._motion_unmeasurable = motion_unmeasurable_policy
+        self._motion_measurable_min_obs = motion_measurable_min_obs
         self._held_min_head = held_track_min_head
         self._track_max_gap = track_max_gap
         self._likelihood: WeightLikelihoodScorer | None = (
@@ -620,6 +627,8 @@ class TriggerPipeline:
                 floor_px=floor,
                 held_min_head=self._held_min_head,
                 track_max_gap=self._track_max_gap,
+                unmeasurable_policy=self._motion_unmeasurable,
+                measurable_min_obs=self._motion_measurable_min_obs,
             )
             voting.attach_motion_evidence(evidence)
         terminator = EarlyTerminator(profile, enabled=self._et_enabled)

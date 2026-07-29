@@ -209,6 +209,8 @@ class ModelService:
             early_termination_enabled=self.settings.early_termination_enabled,
             motion_evidence_enabled=self.settings.motion_evidence_enabled,
             motion_evidence_floor_px=self.settings.motion_evidence_floor_px,
+            motion_unmeasurable_policy=self.settings.motion_unmeasurable_policy,
+            motion_measurable_min_obs=self.settings.motion_measurable_min_obs,
             # 무게 우도 score shadow (MODEL__JUDGMENT__LIKELIHOOD_*, Phase 1):
             # 판정 미사용 — 아카이브 diff 실측용.
             likelihood_shadow_enabled=self.settings.likelihood_shadow,
