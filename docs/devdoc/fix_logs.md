@@ -1759,3 +1759,19 @@ unit_weight는 정책상 고정이고 실측과 10~30g 편차가 있으므로(�
   검사로 감쌌다.
   검증: torch 상태 4종(미설치 / 정상 / venv 그림자 / 그림자+회수)을 python shim으로
   모사해 5단계를 전부 완주시킴.
+
+- **후속 회귀 정정 2 (같은 날)**: torch 설치는 성공했으나 **NumPy 2.2.6이 깔려
+  크래시**. 원인 2단 —
+  1. `install_jetson_torch.sh`가 Jetson 휠을 `--force-reinstall`로, **의존성 해석과
+     함께** 설치한다. torchvision이 `numpy`를 의존성으로 선언하므로 resolver가 PyPI
+     최신 NumPy 2.x를 끌어오고, NumPy 1.x로 빌드된 Jetson torch가 import에서 죽는다.
+  2. 직전 수정이 torch 단계를 의존성 설치 **뒤로** 옮기면서, 원래 그 뒤에 있던
+     NumPy 1.x 가드가 torch 단계 **앞**에만 남았다 — 휠 설치가 NumPy를 올려도 잡을
+     것이 없었다.
+  정정: ① 휠 설치 명령에 `"numpy>=1.24.0,<2.0.0"` 핀을 **같은 명령으로** 동봉
+  (setup_jetson.sh의 onnx 설치가 쓰는 것과 같은 방식) + 설치 후 재확인,
+  `nvidia-cudss-cu12` 설치에도 동일 핀. ② NumPy 가드를 `ensure_numpy1()` 함수로
+  추출해 **의존성 설치 뒤와 torch 단계 뒤 양쪽**에서 호출, 강등 실패 시 명시적 종료.
+  ③ 7단계 검증이 NumPy 2.x를 직접 차단(복구 명령 포함 메시지).
+  교훈: **NumPy를 올릴 수 있는 설치 지점마다 가드가 필요하다** — 한 번 검사로는
+  이후 단계가 다시 올려놓는다.

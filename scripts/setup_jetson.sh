@@ -66,6 +66,32 @@ install_activation_hook() {
     print_ok "Installed Jetson activation hook into .venv/bin/activate"
 }
 
+# Jetson torch는 NumPy 1.x로 빌드돼 있어 2.x가 들어오면 import가 깨진다.
+# 의존성 해석이 NumPy를 올릴 수 있는 지점(프로젝트 의존성 설치, Jetson 휠 설치)
+# **뒤마다** 호출한다 — 한 번만 검사하면 이후 단계가 다시 올려놓는다
+# (2026-07-30: torch 단계를 뒤로 옮기면서 이 가드가 앞에만 남아 numpy 2.2.6이 통과).
+ensure_numpy1() {
+    local version
+    version="$(python -c 'import numpy; print(numpy.__version__)' 2>/dev/null || true)"
+
+    if [[ -z "${version}" ]]; then
+        print_err "NumPy is not importable inside the venv."
+        exit 1
+    fi
+
+    if [[ "${version}" == 2.* ]]; then
+        print_warn "NumPy ${version} detected. Reinstalling NumPy 1.x for Jetson compatibility."
+        uv pip install --force-reinstall "numpy>=1.24.0,<2.0.0"
+        version="$(python -c 'import numpy; print(numpy.__version__)' 2>/dev/null || true)"
+        if [[ "${version}" == 2.* || -z "${version}" ]]; then
+            print_err "Failed to pin NumPy 1.x (now: ${version:-import failed})."
+            exit 1
+        fi
+    fi
+
+    print_ok "NumPy ${version}"
+}
+
 install_project_packages() {
     uv pip install --no-deps -e .
 
@@ -191,17 +217,7 @@ print_step "4/10" "Installing project dependencies"
 install_project_packages
 print_ok "Project dependencies installed"
 
-NUMPY_VERSION="$(python -c 'import numpy; print(numpy.__version__)' 2>/dev/null || true)"
-if [[ -z "${NUMPY_VERSION}" ]]; then
-    print_err "NumPy import failed inside the venv after installing dependencies."
-    exit 1
-fi
-if [[ "${NUMPY_VERSION}" == 2.* ]]; then
-    print_warn "NumPy ${NUMPY_VERSION} detected. Reinstalling NumPy 1.x for Jetson compatibility."
-    uv pip install "numpy>=1.24.0,<2.0.0" --force-reinstall
-    NUMPY_VERSION="$(python -c 'import numpy; print(numpy.__version__)' 2>/dev/null || true)"
-fi
-print_ok "NumPy ${NUMPY_VERSION:-unknown}"
+ensure_numpy1
 
 print_step "5/10" "Ensuring Jetson-compatible torch"
 
@@ -255,6 +271,9 @@ else
     fi
 fi
 
+# 휠 설치가 NumPy를 2.x로 올렸을 수 있다 — torch 단계 뒤에 반드시 재검사한다.
+ensure_numpy1
+
 print_step "6/10" "Preparing runtime configuration"
 
 if [[ ! -f "${PROJECT_ROOT}/.env" ]]; then
@@ -306,6 +325,13 @@ print(f"PyTorch: {torch.__version__} (built for CUDA {torch.version.cuda})")
 # 사용자 사이트(~/.local) 중 어디인지가 장애 진단의 첫 갈림길이다.
 print(f"PyTorch origin: {torch.__file__}")
 print(f"CUDA available: {torch.cuda.is_available()}")
+
+if numpy.__version__.startswith("2."):
+    raise SystemExit(
+        f"NumPy {numpy.__version__} is installed, but Jetson torch is built for 1.x.\n"
+        "  Something re-resolved NumPy after the pin. Fix with:\n"
+        "    uv pip install --force-reinstall 'numpy>=1.24.0,<2.0.0'"
+    )
 
 if torch.version.cuda is None:
     raise SystemExit("PyTorch is still CPU-only. Verify the Jetson wheel source.")

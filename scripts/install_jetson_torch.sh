@@ -77,7 +77,8 @@ PY
 
     if [[ "${INSTALL_CUDSS_IF_NEEDED}" == "1" ]] && grep -q "libcudss.so" "${import_log}"; then
         print_warn "PyTorch import requires libcudss.so. Installing nvidia-cudss-cu12 into the venv."
-        python -m pip install --no-cache-dir --force-reinstall nvidia-cudss-cu12
+        python -m pip install --no-cache-dir --force-reinstall \
+            nvidia-cudss-cu12 "numpy>=1.24.0,<2.0.0"
 
         if python - <<'PY'
 import torch
@@ -163,9 +164,22 @@ else
 fi
 
 print_warn "Installing Jetson-compatible PyTorch wheels into ${VENV_PATH}"
+# NumPy 핀을 **같은 명령**에 넣어야 한다: torchvision이 numpy를 의존성으로 선언하므로
+# 핀 없이 설치하면 resolver가 PyPI 최신 NumPy 2.x를 끌어오고, NumPy 1.x로 빌드된
+# Jetson torch가 import 시점에 죽는다 (2026-07-30 실기: numpy 2.2.6이 설치돼 크래시).
+# setup_jetson.sh의 onnx 설치가 쓰는 것과 같은 방식.
 python -m pip install --no-cache-dir --force-reinstall \
     "${WHEEL_DIR}"/torch-*.whl \
-    "${WHEEL_DIR}"/torchvision-*.whl
+    "${WHEEL_DIR}"/torchvision-*.whl \
+    "numpy>=1.24.0,<2.0.0"
+
+NUMPY_AFTER="$(python -c 'import numpy; print(numpy.__version__)' 2>/dev/null || true)"
+if [[ "${NUMPY_AFTER}" == 2.* ]]; then
+    print_warn "NumPy ${NUMPY_AFTER} slipped in. Forcing 1.x back."
+    python -m pip install --no-cache-dir --force-reinstall "numpy>=1.24.0,<2.0.0"
+    NUMPY_AFTER="$(python -c 'import numpy; print(numpy.__version__)' 2>/dev/null || true)"
+fi
+print_ok "NumPy ${NUMPY_AFTER:-unknown}"
 
 if ! install_cudss_if_needed; then
     print_err "Jetson torch installation completed, but import/initialization still failed."
