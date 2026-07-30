@@ -67,7 +67,7 @@ cp refrg.env.example .env          # 냉장 기기 (냉동은 freezer.env.exampl
 #  → .env에서 MODEL__VISION__YOLO_MODEL_PATH 등 필수값 확인
 
 source .venv/bin/activate
-model-service-hg
+model-service
 ```
 
 ```bash
@@ -167,7 +167,7 @@ docs/               문서집 01~08 + devdoc(히스토리)
 
 | 명령 | 용도 |
 |---|---|
-| `model-service-hg` | 서비스 기동 (FastAPI :8002) |
+| `model-service` | 서비스 기동 (FastAPI :8002) |
 | `label-session` | 실험 직후 정답 라벨 기입 (무취출은 `--none`) |
 | `analyze-sessions` | 아카이브 오프라인 실측 리포트 (과금 정오·임계 제안·shadow 관측) |
 | `render-session` | 기록된 bbox를 AVI 위에 오버레이해 육안 검증 |

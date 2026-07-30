@@ -12,7 +12,7 @@ dev = ["pytest", "ruff", "httpx"]
 jetson = ["fastapi>=0.100.0", "uvicorn[standard]>=0.23.0"]
 
 [project.scripts]
-model-service-hg = "crk_model.adapters.serve:main"
+model-service = "crk_model.adapters.serve:main"
 label-session = "crk_model.adapters.label_cli:main"
 analyze-sessions = "crk_model.adapters.analyze_cli:main"
 render-session = "crk_model.adapters.render_cli:main"

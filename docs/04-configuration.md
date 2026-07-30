@@ -81,7 +81,7 @@ flowchart TD
     Q -- "냉동 (freezer)" --> F["cp freezer.env.example .env"]
     R --> E["엔진 경로·ROI 경계를<br/>기기 실측값으로 수정"]
     F --> E
-    E --> S["model-service-hg 기동<br/>(serve.py가 .env 자동 로드)"]
+    E --> S["model-service 기동<br/>(serve.py가 .env 자동 로드)"]
     C[".env.example<br/>전체 노브 레퍼런스 + 튜닝 가이드"] -.->|"값의 의미가 궁금할 때 참조"| E
 ```
 

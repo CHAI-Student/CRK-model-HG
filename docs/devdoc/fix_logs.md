@@ -1682,3 +1682,13 @@ unit_weight는 정책상 고정이고 실측과 10~30g 편차가 있으므로(�
 
 - **전체 상태 (2026-07-30 정리 후)**: `pytest -q` → **406 passed**,
   `ruff check .` → All checks passed. 문서 상호 링크 37파일 전수 검사 0 오류.
+
+- **후속 (같은 날): 콘솔 스크립트 개명** `model-service-hg` → **`model-service`**
+  (`pyproject.toml`, 사용자 결정). 참조 11파일 갱신 — 문서·env 템플릿·
+  `setup_jetson.sh`·`serve.py` docstring. devdoc의 실기 플랜 2건은 히스토리라
+  구 이름 유지. **알려진 위험**: 레거시 CRK-model도 같은 이름의 엔트리포인트를
+  등록하므로, 한 venv에 두 패키지가 설치되면 나중 설치가 이름을 차지해 의도와
+  다른 서비스가 기동될 수 있다 — `docs/05-operations.md` §10 트러블슈팅과
+  `docs/08-handover.md` §4 리스크 등록부에 명시. `setup_jetson.sh`의 활성화 훅
+  중복 삽입 가드는 구 이름 훅도 인식하도록 'Jetson runtime hook'으로 완화.
+  기존 배포는 `pip install --no-deps -e .` 재실행 전까지 새 이름이 생기지 않는다.

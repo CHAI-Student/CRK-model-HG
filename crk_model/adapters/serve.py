@@ -1,4 +1,4 @@
-"""진입점 — `model-service-hg` 콘솔 스크립트.
+"""진입점 — `model-service` 콘솔 스크립트.
 
 기동 순서:
 1. .env 로드 (stdlib 파서, 원본 Settings 자동 로드 관행 대응)

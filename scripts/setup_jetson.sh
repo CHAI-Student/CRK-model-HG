@@ -44,9 +44,11 @@ install_activation_hook() {
 
     # Persist the Jetson runtime linker setup across future shells so users only
     # need `source .venv/bin/activate` before starting the service.
-    hook_block=$'\n# model-service-hg Jetson runtime hook\nif [ -n "${VIRTUAL_ENV:-}" ] && [ -f "${VIRTUAL_ENV}/../scripts/jetson_env.sh" ]; then\n    . "${VIRTUAL_ENV}/../scripts/jetson_env.sh"\nfi\n'
+    hook_block=$'\n# model-service Jetson runtime hook\nif [ -n "${VIRTUAL_ENV:-}" ] && [ -f "${VIRTUAL_ENV}/../scripts/jetson_env.sh" ]; then\n    . "${VIRTUAL_ENV}/../scripts/jetson_env.sh"\nfi\n'
 
-    if grep -Fq 'model-service-hg Jetson runtime hook' "${activate_path}"; then
+    # 이름 변경(model-service-hg → model-service) 전에 설치된 훅도 잡아야
+    # 중복 삽입되지 않는다 — 접두 이름이 아니라 'Jetson runtime hook'으로 검사.
+    if grep -Fq 'Jetson runtime hook' "${activate_path}"; then
         print_ok "Jetson activation hook already installed"
         return
     fi
@@ -242,10 +244,10 @@ PY
 
 print_step "8/10" "Verifying entry points"
 
-if command -v model-service-hg >/dev/null 2>&1; then
-    print_ok "model-service-hg entry point is available"
+if command -v model-service >/dev/null 2>&1; then
+    print_ok "model-service entry point is available"
 else
-    print_err "model-service-hg entry point is not available after install"
+    print_err "model-service entry point is not available after install"
     exit 1
 fi
 
@@ -273,12 +275,12 @@ print_step "10/10" "Done"
 echo -e "${BLUE}Recommended runtime commands${NC}"
 echo "  source .venv/bin/activate"
 echo "  cp refrg.env.example .env      # 냉장 기기 (냉동은 freezer.env.example)"
-echo "  model-service-hg"
+echo "  model-service"
 echo ""
 echo -e "${BLUE}Verification${NC}"
 echo "  curl -s http://localhost:8002/api/health"
 echo "  pytest -q"
 echo ""
 echo -e "${BLUE}Optional uv commands without re-sync${NC}"
-echo "  uv run --no-sync model-service-hg"
+echo "  uv run --no-sync model-service"
 echo "  uv run --no-sync pytest -q"

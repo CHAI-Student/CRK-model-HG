@@ -20,7 +20,7 @@ flowchart TD
     B --> C{"models/에 .engine 있나?"}
     C -- "없음 (.pt만 있음)" --> D["그 Jetson에서 빌드<br/>scripts/convert_engine.sh"]
     C -- "있음" --> E
-    D --> E["기동<br/>model-service-hg"]
+    D --> E["기동<br/>model-service"]
     E --> F{"startup probe 통과?"}
     F -- "실패" --> G["프로세스 즉시 종료<br/>= 무증상 기동 금지"]
     F -- "통과" --> H["헬스 체크<br/>GET /api/health"]
@@ -46,7 +46,7 @@ chmod +x scripts/setup_jetson.sh scripts/install_jetson_torch.sh scripts/jetson_
 | NumPy 핀 | `numpy>=1.24.0,<2.0.0` | Jetson torch는 NumPy 1.x 빌드다. 2.x가 들어오면 추론·export가 깨진다 |
 | export 의존성 | `onnx`, `onnxslim`을 NumPy 핀과 **한 명령으로** 설치 | 나중에 엔진 export 시 ultralytics가 자동 설치하며 NumPy를 2.x로 올리는 사고를 예방 |
 | 런타임 설정 | `.env`가 없으면 `.env.example`에서 생성, `models/`의 `.engine` 개수 보고 | 엔진이 0개면 경고 — 1.5절로 |
-| 검증 | `crk_model.core.config` import + 해석된 캐비닛 타입/카메라 레이아웃/배치 출력, torch CUDA 가용성, `model-service-hg` 엔트리포인트 | 설치가 끝났는데도 CPU torch면 여기서 실패로 드러난다 |
+| 검증 | `crk_model.core.config` import + 해석된 캐비닛 타입/카메라 레이아웃/배치 출력, torch CUDA 가용성, `model-service` 엔트리포인트 | 설치가 끝났는데도 CPU torch면 여기서 실패로 드러난다 |
 | 활성화 훅 | `.venv/bin/activate`에 `scripts/jetson_env.sh` source 추가 | 이후에는 `source .venv/bin/activate`만으로 CUDA/TensorRT 런타임 경로가 복원된다 |
 
 이 스크립트는 `.env`를 **`.env.example`(냉장 기본)** 에서 생성합니다. 냉동 기기라면
@@ -63,7 +63,7 @@ cp refrg.env.example .env      # 냉장 기기
 # cp freezer.env.example .env  # 냉동 기기
 
 source .venv/bin/activate
-model-service-hg
+model-service
 ```
 
 `.env`에서 기기별로 **반드시** 확인할 두 값:
@@ -81,7 +81,7 @@ deactivate 2>/dev/null
 git pull origin master
 
 source .venv/bin/activate
-model-service-hg
+model-service
 ```
 
 콘솔 스크립트 구성(`pyproject.toml`의 `[project.scripts]`)이나 패키지 구조가 바뀐
@@ -91,7 +91,7 @@ model-service-hg
 
 > **각주 — venv 재설치가 필요한 경우**: editable 설치(`-e .`)는 venv 안에
 > 저장소의 **절대 경로**를 박아 둡니다. 저장소 폴더를 옮기거나 이름을 바꾸면
-> `import crk_model`이 깨지고 `model-service-hg`가 실행되지 않습니다. 이때는
+> `import crk_model`이 깨지고 `model-service`가 실행되지 않습니다. 이때는
 > 폴더 이동 후 `source .venv/bin/activate && uv pip install --no-deps -e .`를
 > 다시 실행하세요. `.venv` 디렉터리 자체를 옮겼다면 venv를 재생성합니다
 > (`uv venv --system-site-packages --python python3.10 .venv` 후 재설치).
@@ -529,6 +529,8 @@ vision 후보가 0개일 때의 폴백 규칙입니다.
 
 | 증상 | 원인 | 조치 |
 |---|---|---|
+| `model-service`가 이 서비스가 아니라 **레거시 CRK-model을 띄운다** | 레거시 서비스도 같은 이름의 콘솔 스크립트를 등록한다 — 한 venv에 두 패키지가 설치되면 나중에 설치된 쪽이 이름을 차지한다 | `which model-service`로 어느 venv인지 확인 → 이 저장소 venv에서 `pip install --no-deps -e .` 재실행. 애초에 두 서비스를 같은 venv에 섞지 않는다 |
+| 업데이트 후 `model-service: command not found` | 2026-07-30 이전 버전은 엔트리포인트 이름이 `model-service-hg`였다 — 이름이 바뀌면 재설치 전까지 새 이름이 생기지 않는다 | `pip install --no-deps -e .` 재실행(1.4절). systemd·기동 스크립트의 명령 이름도 함께 갱신 |
 | 기동 직후 프로세스가 죽는다 (엔진 로드 실패) | `.engine` 경로 오류, 또는 다른 기기/TensorRT 버전에서 빌드한 엔진 | `MODEL__VISION__YOLO_MODEL_PATH` 확인 → 그 Jetson에서 `scripts/convert_engine.sh`로 재빌드(1.5절) |
 | 기동 시 CUDA 관련 실패 | venv가 `--system-site-packages` 없이 만들어져 CPU torch를 씀, 또는 CUDA/TensorRT 경로 미설정 | venv 재생성(`uv venv --system-site-packages`) → `source .venv/bin/activate`(활성화 훅이 `jetson_env.sh`를 source) |
 | 추론/export가 NumPy 오류로 죽는다 | venv에 NumPy 2.x가 들어옴(Jetson torch는 1.x 빌드). 보통 ultralytics 자동 설치가 원인 | `uv pip install onnx onnxslim "numpy>=1.24.0,<2.0.0"` (핀과 함께 한 명령으로). `convert_engine.sh`는 사전 검사로 미리 차단한다 |

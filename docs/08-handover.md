@@ -73,7 +73,7 @@ uv pip install --no-deps -e .             # 콘솔 스크립트 3종 엔트리�
 
 cp freezer.env.example .env               # 또는 refrg.env.example (§1.3)
 # .env에서 MODEL__VISION__YOLO_MODEL_PATH를 실제 엔진 파일로 맞춘다
-model-service-hg
+model-service
 ```
 
 **엔진 빌드** — `.engine` 파일은 저장소에 없습니다. TensorRT 버전·GPU에
@@ -201,6 +201,7 @@ mv data/sessions data/sessions.pre-<태그>
 
 | 리스크 | 영향 | 현재 완화책 | 잔존 위험 |
 |---|---|---|---|
+| **콘솔 스크립트 이름이 레거시와 동일** — 2026-07-30에 `model-service-hg` → `model-service`로 교체 | 한 venv에 레거시 CRK-model과 같이 설치되면 나중 설치가 이름을 차지해 **의도와 다른 서비스가 기동**될 수 있다 | 두 서비스를 같은 venv에 섞지 않는다. 기동 후 `/api/health` 응답 형태로 확인 가능 | 이름만으로는 구분 불가 — 배포 스크립트가 venv 경로를 명시해야 한다 |
 | **로드셀 물리 한계** — 5g 양자화, 냉동 오차 5~15g | 무게로 정체성을 판별하면 오식별 과금 | `weight_is_discriminative=False`로 냉동의 무게-정체성 경로 전부 억제, 냉동 `segment_step` 20g, ±15g 개수 게이트 | 5g 미만 차이는 원리적으로 구분 불가. DB `unit_weight` 편차가 더해지면 정답이 게이트를 통과하지 못함 |
 | **옷 프린트 유령** — 사람 옷의 프린트가 상품으로 검출 | 오과금. 트리거 안에서는 진짜와 구분 불가(변위 통과·다수 표) | 세션 고스트 원장(shadow), close 콤보 자격 5중 가드, `min_vote_share` | 고스트가 shadow라 실제 차단은 아직 없음. 오플래그 위험 때문에 승격도 못 하는 교착 |
 | **side 카메라 광학 공유** | 타 존 진열이 이 존 영상에 찍혀 교차 오염·고스트 오플래그 | 교차존 페널티(기본 ON) + self-fit 자격, 고스트 에피소드 ≥2 요건, side x-ROI | ROI 경계값이 center-crop 재측정 대기 상태. 냉장은 존별 side 카메라라 냉동(공용 광각)과 기하가 다름 |

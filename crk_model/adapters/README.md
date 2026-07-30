@@ -45,7 +45,7 @@
 | 파일 | 역할 | 핵심 진입점 |
 |---|---|---|
 | `http_app.py` (330행) | FastAPI 무로직 바인딩 + wire 계약 번역 + 워커 스레드 | `create_app`, `start_worker_thread` |
-| `serve.py` (87행) | `model-service-hg` 프로세스 진입점 | `main`, `load_dotenv` |
+| `serve.py` (87행) | `model-service` 프로세스 진입점 | `main`, `load_dotenv` |
 | `yolo_detector.py` (168행) | Ultralytics TensorRT `.engine` 어댑터 (`perception.Detector`/`BatchDetector` 구현) | `UltralyticsEngineDetector.detect` / `.detect_batch` / `.class_names` |
 | `avi_frames.py` (320행) | AVI → `FrameBundle` 스트리밍 디코드 | `decode_avi`, `LazyAviFrames` |
 | `analyze_cli.py` (871행) | `analyze-sessions` — 오프라인 실측 리포트 | `main`, `analyze`, `render`, `render_session` |
@@ -53,7 +53,7 @@
 | `label_cli.py` (119행) | `label-session` — 정답 라벨 기입 | `main` |
 | `__init__.py` (15행) | `LazyAviFrames`·`UltralyticsEngineDetector`·`create_app`·`decode_avi`·`start_worker_thread` 재수출 | — |
 
-콘솔 스크립트 4종: `model-service-hg`, `label-session`, `analyze-sessions`, `render-session`.
+콘솔 스크립트 4종: `model-service`, `label-session`, `analyze-sessions`, `render-session`.
 
 ## 3. 파일별 상세
 
@@ -93,7 +93,7 @@ wire 번역 헬퍼 (전부 순수 함수 — 테스트가 직접 호출한다):
 동시 추론이 된다). drain 루프의 예외는 잡아서 기록하고 계속한다 — 워커가
 죽으면 큐가 영구 적체돼 배리어가 영원히 미충족이 되기 때문이다.
 
-### `serve.py` — `model-service-hg` 진입점
+### `serve.py` — `model-service` 진입점
 
 ```mermaid
 flowchart TD
