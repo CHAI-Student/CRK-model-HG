@@ -31,7 +31,6 @@ from crk_model.ingest.loadcell import (
     LoadcellSample,
 )
 from crk_model.judgment.interfaces import JudgmentContext
-from crk_model.judgment.likelihood import WeightLikelihoodScorer
 from crk_model.judgment.router import JudgmentRouter
 from crk_model.ledger.events import TriggerEvent
 from crk_model.perception.detector import HAND_CLASS_ID, Detector
@@ -59,8 +58,8 @@ def _vision_top_not_billed(candidates, judgment) -> str | None:
 
 
 def _with_tubes(tube_summary: dict | None, evidence) -> dict | None:
-    """tube_shadow에 튜브 구성 진단(tube_detail)을 동봉 — 의류 산탄의
-    "한 궤적, 여러 클래스" 실측 근거. summary가 None(전 모드 off)이면 그대로."""
+    """tube_diag에 튜브 구성 진단(tube_detail)을 동봉 — 의류 산탄의
+    "한 궤적, 여러 클래스" 실측 근거. summary가 None이면 그대로."""
     if tube_summary is None or evidence is None:
         return tube_summary
     tubes = evidence.tube_detail()
@@ -94,10 +93,6 @@ class TriggerTrace:
     # 케이스를 사후에 재구성하기 위한 클래스별/카메라별 요약
     # ({"classes": VotingEnsemble.debug_summary(), "filtered_out_by_camera": {...}}).
     vote_summary: dict = field(default_factory=dict)
-    # 무게 우도 score shadow (docs/0722_weight_likelihood_design.md Phase 1):
-    # 판정 미사용 — 이벤트(트레이)별 score 순위와 현행 판정의 diff 기록.
-    # mismatch=true 세션을 아카이브에서 수집해 승격(Phase 2/3)을 결정한다.
-    likelihood_shadow: list[dict] | None = None
     # 프레임별 bbox 기록 (render-session 시각 검증용, MODEL__SESSION__
     # SAVE_DETECTIONS opt-in): 추론이 실행된 프레임마다 {camera, pos,
     # detections[{class_id, conf, bbox, hand}]} — **판정 로직에 실제로
@@ -161,20 +156,6 @@ class TriggerPipeline:
         # T2 held 트랙 판정의 head 임계 (MotionEvidence.held_min_head 주입,
         # MODEL__VISION__HELD_TRACK_MIN_HEAD). 강등 모드 자체는 voting_params
         # 의 held_demotion으로 들어간다 — 판정은 증거층, 몰수는 투표층 소관.
-        track_max_gap: int = 0,
-        # 갭 1 트랙 소멸 (MotionEvidence.track_max_gap 주입, MODEL__VISION__
-        # TRACK_MAX_GAP): 공백 > N 추론프레임 트랙은 사망. 0 = 무소멸(현행).
-        likelihood_shadow_enabled: bool = False,
-        # 무게 우도 score shadow (research §1-2 승인분, Phase 1): 라이브러리
-        # 기본 False(하위호환), 운영값은 Settings가 주입
-        # (MODEL__JUDGMENT__LIKELIHOOD_SHADOW). 판정·정산 무변경 — trace 기록만.
-        likelihood_params: Mapping | None = None,
-        # WeightLikelihoodScorer 생성 인자 (k/sigma_db 등, MODEL__JUDGMENT__* env).
-        tray_memory=None,
-        # 세션 트레이 메모리 (ledger/tray_memory.py) — ModelService가 세션
-        # 수명(OPEN 리셋)을 관리하며 주입. None이면 기록·prior 모두 비활성
-        # (라이브러리 기본, 하위호환). Phase 1: likelihood shadow의
-        # log_p_tray 항으로만 소비 — 판정·정산 무변경.
         side_hand_enabled: bool = False,
         # side 카메라 hand 추론 (MODEL__VISION__SIDE_HAND_ENABLED, 이슈 #18):
         # side allowlist에 hand(0)를 포함한다. 손이 side에 흐르기 시작하면
@@ -224,13 +205,6 @@ class TriggerPipeline:
         self._motion_unmeasurable = motion_unmeasurable_policy
         self._motion_measurable_min_obs = motion_measurable_min_obs
         self._held_min_head = held_track_min_head
-        self._track_max_gap = track_max_gap
-        self._likelihood: WeightLikelihoodScorer | None = (
-            WeightLikelihoodScorer(**dict(likelihood_params or {}))
-            if likelihood_shadow_enabled
-            else None
-        )
-        self._tray_memory = tray_memory
         self._save_detections = save_detections
         self._camera_crops = dict(camera_crops) if camera_crops else None
         self._batch_size = max(int(batch_size), 1)
@@ -310,19 +284,10 @@ class TriggerPipeline:
             vision_only=vision_only,
         )
         if len(analysis.events) >= 2:
-            judgment = self._judge_tray_events(ctx, analysis, trace, session_id)
+            judgment = self._judge_tray_events(ctx, analysis, trace)
         else:
-            # 단일 이벤트라도 게이트를 넘은 채널이 정확히 하나면 트레이가
-            # 특정된다 — 트레이 메모리의 키/prior 해상도로 쓴다.
-            channel = (
-                analysis.events[0].channel if len(analysis.events) == 1 else None
-            )
             judgment = self._router.judge(ctx)
             judgment = self._segment_target_retry(ctx, judgment, analysis, trace)
-            self._likelihood_shadow(
-                ctx, judgment, trace, channel=channel, session_id=session_id
-            )
-            self._record_tray_evidence(ctx, judgment, channel, session_id)
         top_code = _vision_top_not_billed(candidates, judgment)
         if top_code:
             trace.reason_codes.append(top_code)
@@ -335,7 +300,6 @@ class TriggerPipeline:
         ctx: JudgmentContext,
         analysis,
         trace: TriggerTrace,
-        session_id: str | None = None,
     ) -> JudgmentResult:
         """2단계: 트레이별 동시 이벤트를 이벤트당 1회씩 개별 판정 후 병합.
 
@@ -356,27 +320,12 @@ class TriggerPipeline:
             j = self._segment_target_retry(ectx, j, ev, trace)
             results.append((ev, j))
         results = self._pool_exhaustion_retry(ctx, results, trace)
-        for ev, j in results:
-            self._likelihood_shadow(
-                replace(ctx, delta_weight=ev.delta_grams, segments=ev.segments),
-                j,
-                trace,
-                channel=ev.channel,
-                session_id=session_id,
-            )
-        # 등록은 shadow 계산이 전부 끝난 뒤 — 같은 트리거의 형제 이벤트가
-        # 서로의 prior에 영향을 주지 않는다 (트리거 시작 시점의 메모리로만
-        # shadow 산출, 등록은 트리거 단위 원자적).
-        for ev, j in results:
-            self._record_tray_evidence(
-                replace(ctx, delta_weight=ev.delta_grams), j, ev.channel, session_id
-            )
 
         complete = [
             (ev, j) for ev, j in results
             if j.status is JudgmentStatus.COMPLETE and j.products
         ]
-        # 설계 4 (issue #16, docs/0722_issue16_arbitration_design.md): 정산기는
+        # 설계 4 (issue #16, docs/devdoc/design/0722_issue16_arbitration_design.md): 정산기는
         # 에러가 아닌 모든 판정의 products를 집계하므로(단일 트리거의 near-gate
         # PARTIAL은 과금된다 — #15 정답 경로), 병합만 COMPLETE 한정이면 두
         # 취출이 한 영상에 담겼다는 이유로 덜 과금된다. 고유 정체성 PARTIAL은
@@ -440,82 +389,6 @@ class TriggerPipeline:
             reason=f"multi_tray[{reasons}]",
             strategy=f"multi_tray[{strategies}]",
         )
-
-    def _likelihood_shadow(
-        self,
-        ctx: JudgmentContext,
-        judgment: JudgmentResult,
-        trace: TriggerTrace,
-        channel: int | None = None,
-        session_id: str | None = None,
-    ) -> None:
-        """무게 우도 score shadow (Phase 1) — 판정 경로를 절대 깨지 않는다.
-
-        실패·비적용은 조용히 건너뛰거나 error만 기록한다 (shadow 격리).
-        σ_d는 설계 §2의 BOCPD delta_std 연결이 BOCPD shadow 은퇴(2026-07-24,
-        primary 승격 완료)로 소스를 잃어 현재 None 고정 — 라이브러리 기본
-        σ 사용. Phase 2 승격 시 primary BocpdLoadcellAnalyzer에서 직접 뽑는
-        경로로 재연결한다."""
-        if self._likelihood is None:
-            return
-        try:
-            sigma_d = None
-            tray_prior = None
-            if self._tray_memory is not None and ctx.vision_candidates:
-                tray_prior = self._tray_memory.priors_for(
-                    ctx.zone,
-                    channel,
-                    [c.class_id for c in ctx.vision_candidates],
-                    session_id=session_id,
-                )
-            entry = self._likelihood.shadow(
-                ctx, judgment, sigma_d=sigma_d, tray_prior=tray_prior
-            )
-        except Exception as exc:  # noqa: BLE001 — shadow 격리
-            entry = {"scorer": "weight_likelihood", "error": type(exc).__name__}
-        if entry is None:
-            return
-        if channel is not None:
-            entry["channel"] = channel
-        if trace.likelihood_shadow is None:
-            trace.likelihood_shadow = []
-        trace.likelihood_shadow.append(entry)
-        if entry.get("mismatch"):
-            suffix = f":ch{channel}" if channel is not None else ""
-            trace.reason_codes.append(f"likelihood_shadow_mismatch{suffix}")
-
-    def _record_tray_evidence(
-        self,
-        ctx: JudgmentContext,
-        judgment: JudgmentResult,
-        channel: int | None,
-        session_id: str | None = None,
-    ) -> None:
-        """세션 트레이 메모리 등록 (ledger/tray_memory.py 등록 게이트).
-
-        오판 전파 차단: COMPLETE + 무게 뒷받침(vision_only 아님 — I6 통과
-        COMPLETE는 delta 전량 설명 보장)만 등록한다. PARTIAL·near_gate와
-        무게가 정체성을 고른 예외 경로(unique_refit)는 등록하지 않는다.
-
-        vision 1위 일치 조건은 Phase 1에서 제외 (5차 배치 ses-10): 오염이
-        심한 존일수록 top 불일치가 흔한데 그게 정확히 prior가 필요한 상황
-        — top 일치 게이트는 닭-달걀이다. shadow 전용이라 완화가 안전하고,
-        승격 전 라벨 실측으로 재평가한다 (tray_memory.py docstring)."""
-        if self._tray_memory is None or ctx.vision_only:
-            return
-        if judgment.status is not JudgmentStatus.COMPLETE or not judgment.products:
-            return
-        if "refit" in (judgment.reason or ""):
-            return
-        for pc in judgment.products:
-            if pc.product.class_id > 0:
-                self._tray_memory.record(
-                    ctx.zone,
-                    channel,
-                    pc.product.class_id,
-                    pc.count,
-                    session_id=session_id,
-                )
 
     def _pool_exhaustion_retry(
         self,
@@ -626,7 +499,6 @@ class TriggerPipeline:
             evidence = MotionEvidence(
                 floor_px=floor,
                 held_min_head=self._held_min_head,
-                track_max_gap=self._track_max_gap,
                 unmeasurable_policy=self._motion_unmeasurable,
                 measurable_min_obs=self._motion_measurable_min_obs,
             )
@@ -680,7 +552,7 @@ class TriggerPipeline:
             latch.update_after_inference(hand_now)
             # combine은 지연 콜러블로 — 냉동(I15)·반품·손 미퇴장
             # 프레임에서는 O(누적 표²) 결합이 아예 실행되지 않는다
-            # (docs/0728_freezer_latency_research.md T1-1).
+            # (docs/devdoc/research/0728_freezer_latency_research.md T1-1).
             stop = terminator.should_stop(
                 delta_weight=delta,
                 candidates=voting.combine,
@@ -830,10 +702,11 @@ class TriggerPipeline:
             # [held 표, 전체 표] — 승격 게이트는 analyze-sessions가 라벨과
             # 대조한다 (정답 클래스 held 플래그 = 승격 보류 신호).
             "held_shadow": voting.held_summary(),
-            # 트랙릿 갭 4종 shadow (0723 문서 §2 잔여): 클래스별 현행/가상
-            # 유효표 병기 + 튜브 구성(tubes) — analyze-sessions tube_eval이
-            # 라벨과 대조해 갭별 승격/폐기를 판정한다.
-            "tube_shadow": _with_tubes(voting.tube_summary(), evidence),
+            # 튜브 진단 (판정 영향 0): 클래스별 유효표·결정적 소수 표 수·
+            # 튜브 conf + 튜브 구성(tubes) — "한 궤적, 여러 클래스"(의류 산탄)
+            # 실패 모드를 아카이브에서 확인하는 관측치. 구 tube_shadow(갭 4종
+            # 승격 장치)는 2026-07-30 폐기.
+            "tube_diag": _with_tubes(voting.tube_summary(), evidence),
         }
         if voting.ratio_denominator != "gate":
             # 분모 의미가 바뀐 세션임을 아카이브에 명시 — 과거 세션과

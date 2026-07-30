@@ -10,7 +10,10 @@ from dataclasses import dataclass
 @dataclass(frozen=True)
 class RegisterResult:
     duplicate: bool
-    session_id: str  # 중복이면 기존 세션 ID 반환 (드롭 응답에 사용)
+    # 최초 등록 시 발급된 식별자를 그대로 되돌려준다 — 호출측
+    # (model_service.handle_trigger)은 trigger_id를 넣고 중복 응답의
+    # trigger_id로 회신한다. 필드명은 초기 계약의 잔재.
+    session_id: str
 
 
 class IdempotencyRegistry:

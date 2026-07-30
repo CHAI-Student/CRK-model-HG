@@ -627,7 +627,7 @@ class TestIssue15IdentityConsistency:
 
 
 class TestIssue16WeightArbitration:
-    """이슈 #16 설계 (docs/0722_issue16_arbitration_design.md): 무게=거부권,
+    """이슈 #16 설계 (docs/devdoc/design/0722_issue16_arbitration_design.md): 무게=거부권,
     선택권=vision(득표+conf). n-스케일 게이트 + ① 선착 폐지 + conf 자격."""
 
     BAGEL = ActiveProduct("P27", "베이글", class_id=27, unit_weight=155.0,

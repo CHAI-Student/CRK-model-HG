@@ -23,7 +23,7 @@ baseline은 손 신호에 의존해 top(프리롤에 이미 손)에서는 무력
   클래스를 면제한다 (filters.py와 동일한 "실패 방향 = 증거 보존" 원칙).
 - 적용 지점: VotingEnsemble.combine()의 클래스 거부권 (perception 계층 —
   판정층은 이미 걸러진 득표 순위를 신뢰한다는 층별 책임 유지).
-- T1 계측 (docs/0723_tracklet_cost_benefit.md §8, 판정 영향 0): 트랙별
+- T1 계측 (docs/devdoc/design/0723_tracklet_cost_benefit.md §8, 판정 영향 0): 트랙별
   디코드 위치 통계(first/last/head_obs)를 summary()의 track_detail로
   아카이브에 싣는다. 용도 두 가지 — ① held-object 강등(0713 A-2)을 클래스
   단위가 아닌 **트랙 단위**로 재구현하기 위한 분포 실측 (S2: 같은 클래스의
@@ -32,12 +32,13 @@ baseline은 손 신호에 의존해 top(프리롤에 이미 손)에서는 무력
   판단 근거). pos는 voting.add_frame과 동일한 "게이트 스킵 포함 디코드
   위치" — head_obs는 표가 아니라 관측 수 기준이다 (entry_conf 미달 저신뢰
   검출도 트랙은 이으므로, held 트랙의 프리롤 존재를 표보다 빠짐없이 센다).
-- T2' 튜브 층 (0723 문서 §2 G1, shadow-first): 클래스-조건 트랙과 **병행**으로
-  클래스 무관 튜브(_Tube)를 연관해 관측 클래스 히스토그램을 쌓는다.
-  tube_minority()가 "한 궤적 위에서 깜빡인 결정적 소수 클래스"(8차 의류
-  산탄의 시그니처)를 판정하고, 표 몰수 여부는 투표층 모드(MODEL__VISION__
-  TUBE_IDENTITY)가 정한다. track_max_gap(갭 1)·track_obs(probation 입력)도
-  여기 소재 — 트랙 상태의 단일 소유자는 이 모듈이다.
+- 튜브 층 (진단 전용): 클래스-조건 트랙과 **병행**으로 클래스 무관 튜브
+  (_Tube)를 연관해 관측 클래스 히스토그램을 쌓는다. tube_minority()가
+  "한 궤적 위에서 깜빡인 결정적 소수 클래스"(의류 산탄의 시그니처)를
+  판정하고, voting.tube_summary()가 이를 아카이브 계측으로만 싣는다 —
+  이 판정으로 표를 몰수하던 경로(구 `TUBE_IDENTITY=active`)는 냉동 실측
+  열세로 폐기됐다 (docs/07-rejected-and-retired.md). 트랙 상태의 단일
+  소유자는 이 모듈이다.
 """
 from __future__ import annotations
 
@@ -127,15 +128,9 @@ class MotionEvidence:
     # 프리롤 부족 가드 (0713 §6): 관측 스트림이 공칭 프리롤 120프레임의
     # 절반 미만이면 위치 의미가 왜곡 — 카메라 단위로 held 판정 전체 비활성.
     held_min_stream: int = 60
-    # 갭 1 probation: 이 공백(추론 프레임)을 넘긴 트랙은 사망 — 새 검출은
-    # 새 트랙이 된다(first 리셋 = 변위 리셋). 0 = 무소멸(현행). 실패 방향이
-    # fail-closed(단명화 → 표 몰수)라 기본 off, env로만 켠다
-    # (MODEL__VISION__TRACK_MAX_GAP).
-    track_max_gap: int = 0
-    # T2' 다수결 문턱: 튜브 내 자기 클래스 관측 수가 최다 클래스의 이 비율
-    # 미만이면 "결정적 소수" — 근소 열세(48:52류)는 소수로 치지 않는다.
-    # 문서 G1의 fail-closed 역전 위험(진짜 ambiguous를 확신 오판으로)을
-    # 다수결 문턱으로 차단한다.
+    # 튜브 다수결 문턱 (진단 계측용): 튜브 내 자기 클래스 관측 수가 최다
+    # 클래스의 이 비율 미만이면 "결정적 소수" — 근소 열세(48:52류)는 소수로
+    # 치지 않는다.
     tube_minority_ratio: float = 0.3
     # no_motion 몰수의 "측정 불가" 정책 (이슈 #18 후속, MODEL__VISION__
     # MOTION_UNMEASURABLE): "forfeit"(현행) | "exempt". n=1 트랙은 path=0·
@@ -206,8 +201,6 @@ class MotionEvidence:
                 # 이상 끊겼던 트랙은 reassoc_window 안에서 완화 반경으로 잇는다
                 # (같은 클래스 버킷 한정 — 승계 오염 방지는 클래스 조건이 담당).
                 gap = idx - t.matched_frame
-                if self.track_max_gap and gap > self.track_max_gap:
-                    continue  # 갭 1: 공백 초과 트랙 사망 — 재연관 창의 상한
                 radius = self.max_jump_px
                 if 1 < gap <= self.reassoc_window:
                     radius *= self.reassoc_factor
@@ -265,8 +258,6 @@ class MotionEvidence:
             if t.matched_frame == idx:
                 continue
             gap = idx - t.matched_frame
-            if self.track_max_gap and gap > self.track_max_gap:
-                continue
             radius = self.max_jump_px
             if 1 < gap <= self.reassoc_window:
                 radius *= self.reassoc_factor
@@ -286,11 +277,11 @@ class MotionEvidence:
         return best
 
     def tube_minority(self, tid: int) -> bool:
-        """T2' 다수결: 이 트랙(의 클래스)이 소속 튜브에서 결정적 소수인가.
+        """튜브 다수결(진단): 이 트랙(의 클래스)이 소속 튜브에서 결정적 소수인가.
 
         결정적 기준: 자기 클래스 관측 < tube_minority_ratio × 최다 클래스
-        관측. 튜브 미귀속·단일 클래스 튜브는 False (fail-open — 판단 근거가
-        없으면 표를 건드리지 않는다)."""
+        관측. 튜브 미귀속·단일 클래스 튜브는 False. 소비자는 계측
+        (voting.tube_summary)뿐 — 이 값으로 표를 몰수하지 않는다."""
         t = self._track_by_id.get(tid)
         if t is None:
             return False
@@ -303,13 +294,8 @@ class MotionEvidence:
         top = max(tube.class_counts.values())
         return tube.class_counts.get(t.class_id, 0) < self.tube_minority_ratio * top
 
-    def track_obs(self, tid: int) -> int:
-        """갭 1 probation 입력: 트랙의 총 관측 수 (미존재 트랙은 0)."""
-        t = self._track_by_id.get(tid)
-        return t.n if t is not None else 0
-
     def tube_detail(self, limit: int = 6) -> dict[str, list[dict]]:
-        """튜브 구성 진단 (vote_summary.tube_shadow.tubes) — 카메라별 관측
+        """튜브 구성 진단 (vote_summary.tube_diag.tubes) — 카메라별 관측
         상위 튜브의 클래스 히스토그램. 의류 산탄("한 궤적, 여러 클래스")의
         실측 근거. 1관측 잔튜브는 제외 (아카이브 범람 방지)."""
         out: dict[str, list[dict]] = {}

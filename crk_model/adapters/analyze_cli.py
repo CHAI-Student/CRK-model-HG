@@ -1,23 +1,22 @@
-"""analyze-sessions — 세션 아카이브 오프라인 실측 리포트 (research §6, 로드맵 단기 ②).
+"""analyze-sessions — 세션 아카이브 오프라인 실측 리포트.
 
-세 가지 질문에 아카이브(+ `label-session` 정답 라벨)만으로 답한다:
+네 가지 질문에 아카이브(+ `label-session` 정답 라벨)만으로 답한다:
 
-1. **shadow 정오** — 무게 우도(likelihood_shadow)의 mismatch 세션 목록과,
-   라벨이 있으면 "현행 판정 vs shadow 중 누가 맞았나" 집계 (Phase 2 승격
-   게이트의 실측치). BOCPD shadow는 primary 승격(2026-07-23)으로 은퇴 —
-   구 아카이브의 loadcell_shadow 필드는 무시된다.
+1. **과금 정오** — 라벨된 세션의 최종 확정(존별 products) vs 정답. 이 리포트의
+   헤드라인 지표다.
 2. **conformal 보정** — 라벨된 트리거에서 정답 상품의 투표 통계(votes/ratio/
    share/conf) 분위수 → 채택 임계(MIN_VOTE_*)의 근거 있는 제안값
    ("목표 재현율에서 역산" — 손튜닝 노브의 대체).
-3. **σ_db 실측** — (delta, 정답 배정) 잔차의 개당 분포 →
-   `MODEL__JUDGMENT__LIKELIHOOD_SIGMA_DB`·gate_n slack의 보정 입력.
-4. **tray prior 개입** — likelihood shadow의 tray_prior가 score 1위를 실제로
-   바꾼 entry(ranking의 log_p_tray를 빼면 무-prior 순위를 복원할 수 있다)와,
-   라벨 대비 "prior 덕 정답 / prior 탓 오답" 집계 → penalty(기본 2.5) 보정.
-5. **트랙릿 T1** — vote_summary.motion_evidence.track_detail의 트랙별
-   head_obs 분포(정답 클래스 vs 비정답: held 강등 T2 임계 근거)와 클래스당
-   트랙 수(단절/fragmentation → G2 재연관 창 도입 판단).
-   docs/0723_tracklet_cost_benefit.md §8.
+3. **개당 잔차 실측** — (delta, 정답 배정) 잔차의 개당 분포 → 개수 게이트
+   가산(`MODEL__JUDGMENT__COUNT_UNIT_SLACK`)의 보정 입력.
+4. **승격 대기 shadow 정오** — held 트랙 강등(`HELD_TRACK_DEMOTION`)과 세션
+   고스트 원장(`MODEL__GHOST__MODE`)의 관측을 라벨과 대조한다. 두 기제의
+   승격 게이트는 "정답 클래스 오플래그 0"이다. 폐기된 shadow 기제(무게 우도·
+   tray prior·튜브 다수결·표 회수·BOCPD)의 구 아카이브 필드는 무시된다
+   (docs/07-rejected-and-retired.md).
+
+부가: 트랙릿 T1 계측 — track_detail의 head_obs 분포와 클래스당 트랙 수
+(단절/fragmentation 감시).
 
 사용 예 (Jetson, 실험 후):
 
@@ -96,11 +95,6 @@ def _billed_multiset(products: list[dict]) -> list[tuple[int, int]] | None:
             return None
         out[int(cid)] = out.get(int(cid), 0) + int(p.get("count", 0))
     return sorted(out.items())
-
-
-def _norm_items(items) -> list[tuple[int, int]]:
-    """shadow ranking의 items([[cid, count], ...]) → 정렬 튜플 멀티셋."""
-    return sorted((int(c), int(n)) for c, n in (items or []))
 
 
 def _session_epoch(doc: dict) -> float | None:
@@ -183,33 +177,16 @@ def analyze(docs: list[dict]) -> dict:
         "load_errors": [],
         "by_status": {},
         "labeled": 0,
-        "likelihood": {
-            "observed": 0,
-            "mismatches": [],
-            # 라벨 대비 정오 (Phase 2 승격 게이트): mismatch 트리거 한정 —
-            # 일치 트리거는 양쪽이 같아 비교 정보가 없다.
-            "labeled_eval": {"score_correct": 0, "current_correct": 0, "both_wrong": 0},
-        },
         "calibration": {
             "true_candidate": {"votes": [], "ratio": [], "share": [], "conf": []},
             "missing_from_candidates": [],
         },
-        "sigma_db": {"unit_residuals": []},
+        # 개당 잔차 실측: 개수 게이트 가산(COUNT_UNIT_SLACK)의 보정 입력.
+        "unit_residual": {"samples": []},
         # 과금 정오 총괄: 라벨된 세션의 최종 확정(zones products) vs GT.
         # shadow mismatch와 달리 "현행 판정이 결국 맞게 청구했는가"의 헤드라인.
         "billing": {"labeled": 0, "correct": 0, "unknown_schema": 0, "wrong": []},
-        # tray prior 개입 (ledger/tray_memory.py Phase 1): observed = prior가
-        # 실린 entry 수, flips = prior가 score 1위를 바꾼 entry (ranking에서
-        # score − log_p_tray로 무-prior 순위 복원 — ranking이 상위 5로
-        # 잘려 있어 근사이지만 후보 풀이 작아 실용상 충분).
-        "tray_prior": {
-            "observed": 0,
-            "flips": [],
-            # 라벨 정오는 단일 entry 트리거 한정 — 멀티트레이 entry는 채널
-            # 단위라 존 GT와 직접 비교가 성립하지 않는다.
-            "labeled_eval": {"prior_helped": 0, "prior_hurt": 0, "both_wrong": 0},
-        },
-        # 트랙릿 T1 (docs/0723_tracklet_cost_benefit.md §8): head_obs 분포와
+        # 트랙릿 T1 (docs/devdoc/design/0723_tracklet_cost_benefit.md §8): head_obs 분포와
         # 클래스당 트랙 수 — held 강등(T2) 임계·재연관 창(G2) 판단 입력.
         # 7차 실측 보정: 저신뢰 플리커 검출(entry 컷 미달도 트랙은 생성)이
         # 1~2관측 잔트랙을 대량 생산해 원지표를 잠식했다(비정답 n=1136,
@@ -228,19 +205,6 @@ def analyze(docs: list[dict]) -> dict:
             # 뻔한 사례 — 0713 S1 계열), 비정답 건수는 강등의 기대 효과.
             "held_gt_flags": [],
             "held_non_gt": 0,
-            # 트랙릿 갭 shadow (vote_summary.tube_shadow — T2' 다수결·표
-            # 회수·probation·튜브 conf): 1위 변경 트리거의 라벨 정오 대조가
-            # TUBE_IDENTITY/VOTE_RECOVERY active 승격 게이트다 (likelihood
-            # labeled_eval과 동일 패턴).
-            "tube_eval": {
-                "observed": 0,
-                "changed": [],
-                "labeled_eval": {
-                    "shadow_correct": 0,
-                    "current_correct": 0,
-                    "both_wrong": 0,
-                },
-            },
         },
         # 세션 고스트 원장 shadow (ledger/ghost_ledger.py, 0723 이슈 #17 P1):
         # 정산 notes의 ghost_classes/ghost_shadow를 집계 — MODEL__GHOST__MODE
@@ -353,7 +317,7 @@ def analyze(docs: list[dict]) -> dict:
                             for c, k in re.findall(r"class(\d+)x(\d+)", would_raw)
                         )
                         # 주의: would는 트리거 재판정, billed는 존 최종 확정 —
-                        # 수준이 섞인 근사 비교다 (tube_eval과 동일 캐비앳).
+                        # 수준이 섞인 근사 비교다 (근사 캐비앳).
                         rec["ground_truth"] = gt_z
                         rec["shadow_correct"] = would_items == gt_z
                         rec["current_correct"] = billed_z == gt_z
@@ -371,86 +335,6 @@ def analyze(docs: list[dict]) -> dict:
             trace = trig.get("trace") or {}
             delta = float(trig.get("delta_weight") or 0.0)
             gt_zone = _gt_multiset(gt_items, zone) if gt_items else []
-
-            entries = trace.get("likelihood_shadow") or []
-            entries = [e for e in entries if isinstance(e, dict) and "top" in e]
-            if entries:
-                report["likelihood"]["observed"] += len(entries)
-                mismatched = [e for e in entries if e.get("mismatch")]
-                if mismatched:
-                    # 트리거 단위 병합: 멀티트레이는 채널별 entry의 합이
-                    # 존 GT와 비교 단위다.
-                    cur_agg: dict[int, int] = {}
-                    top_agg: dict[int, int] = {}
-                    for e in entries:
-                        for cid, cnt in (e.get("current") or {}).get("items") or []:
-                            cur_agg[int(cid)] = cur_agg.get(int(cid), 0) + int(cnt)
-                        for cid, cnt in (e.get("top") or {}).get("items") or []:
-                            top_agg[int(cid)] = top_agg.get(int(cid), 0) + int(cnt)
-                    record = {
-                        "session": sid,
-                        "zone": zone,
-                        "delta": delta,
-                        "current": sorted(cur_agg.items()),
-                        "score_top": sorted(top_agg.items()),
-                    }
-                    if gt_zone:
-                        cur_ok = sorted(cur_agg.items()) == gt_zone
-                        top_ok = sorted(top_agg.items()) == gt_zone
-                        record["ground_truth"] = gt_zone
-                        record["current_correct"] = cur_ok
-                        record["score_correct"] = top_ok
-                        ev = report["likelihood"]["labeled_eval"]
-                        if top_ok and not cur_ok:
-                            ev["score_correct"] += 1
-                        elif cur_ok and not top_ok:
-                            ev["current_correct"] += 1
-                        elif not cur_ok and not top_ok:
-                            ev["both_wrong"] += 1
-                    report["likelihood"]["mismatches"].append(record)
-
-                # tray prior 개입 (report 키 주석 참조): entry별 무-prior 순위
-                # 복원 후 1위가 달라진 것만 flip으로 집계
-                tp = report["tray_prior"]
-                for e in entries:
-                    prior = e.get("tray_prior")
-                    if not prior:
-                        continue
-                    tp["observed"] += 1
-                    ranking = e.get("ranking") or []
-                    if not ranking:
-                        continue
-                    top_with = ranking[0]  # scored 정렬 보존 (shadow 계약)
-                    top_wo = max(
-                        ranking,
-                        key=lambda r: (r.get("score") or 0.0)
-                        - (r.get("log_p_tray") or 0.0),
-                    )
-                    with_items = _norm_items(top_with.get("items"))
-                    wo_items = _norm_items(top_wo.get("items"))
-                    if with_items == wo_items:
-                        continue
-                    rec = {
-                        "session": sid,
-                        "zone": zone,
-                        "channel": e.get("channel"),
-                        "prior": prior,
-                        "with_prior": with_items,
-                        "without_prior": wo_items,
-                    }
-                    if gt_zone and len(entries) == 1:
-                        with_ok = with_items == gt_zone
-                        wo_ok = wo_items == gt_zone
-                        rec["ground_truth"] = gt_zone
-                        rec["prior_correct"] = with_ok
-                        ev = tp["labeled_eval"]
-                        if with_ok and not wo_ok:
-                            ev["prior_helped"] += 1
-                        elif wo_ok and not with_ok:
-                            ev["prior_hurt"] += 1
-                        elif not with_ok and not wo_ok:
-                            ev["both_wrong"] += 1
-                    tp["flips"].append(rec)
 
             # 트랙릿 T1 (report 키 주석 참조) — 라벨 없이도 트랙 수 분포는
             # 집계, head_obs의 GT 분리 실측은 라벨 트리거 한정
@@ -531,35 +415,6 @@ def analyze(docs: list[dict]) -> dict:
                         else:
                             tk["held_non_gt"] += 1
 
-            # 트랙릿 갭 shadow (report 키 주석 참조) — 1위 변경 트리거만
-            # 케이스로 남기고, 라벨이 있으면 정오를 대조한다
-            tube = (trace.get("vote_summary") or {}).get("tube_shadow") or {}
-            if isinstance(tube, dict) and tube.get("by_class"):
-                te = report["tracklet"]["tube_eval"]
-                te["observed"] += 1
-                if tube.get("changed"):
-                    rec = {
-                        "session": sid,
-                        "zone": zone,
-                        "top_current": tube.get("top_current"),
-                        "top_shadow": tube.get("top_shadow"),
-                    }
-                    if gt_zone:
-                        gt_ids = {cid for cid, _ in gt_zone}
-                        cur, shw = rec["top_current"], rec["top_shadow"]
-                        cc = cur is not None and int(cur) in gt_ids
-                        sc = shw is not None and int(shw) in gt_ids
-                        rec["current_correct"] = cc
-                        rec["shadow_correct"] = sc
-                        lv = te["labeled_eval"]
-                        if sc and not cc:
-                            lv["shadow_correct"] += 1
-                        elif cc and not sc:
-                            lv["current_correct"] += 1
-                        elif not sc and not cc:
-                            lv["both_wrong"] += 1
-                    te["changed"].append(rec)
-
             if not gt_zone:
                 continue
 
@@ -584,7 +439,7 @@ def analyze(docs: list[dict]) -> dict:
                 if top_votes > 0:
                     cal["share"].append(float(c.get("vote_count") or 0) / top_votes)
 
-            # σ_db 실측: 단일 정체성 GT + removal delta + unit_weight 기록 시
+            # 개당 잔차 실측: 단일 정체성 GT + removal delta + unit_weight 기록 시
             if len(gt_zone) == 1 and delta < 0:
                 cid, count = gt_zone[0]
                 weight = None
@@ -600,23 +455,23 @@ def analyze(docs: list[dict]) -> dict:
                                 break
                 if weight is not None and count > 0:
                     unit_r = (abs(delta) - count * weight) / count
-                    report["sigma_db"]["unit_residuals"].append(round(unit_r, 2))
+                    report["unit_residual"]["samples"].append(round(unit_r, 2))
 
     # 요약 통계로 마감
     cal = report["calibration"]["true_candidate"]
     report["calibration"]["quantiles"] = {
         k: _quantiles(v) for k, v in cal.items() if v
     }
-    residuals = report["sigma_db"]["unit_residuals"]
+    residuals = report["unit_residual"]["samples"]
     if residuals:
         n = len(residuals)
         mean = sum(residuals) / n
         var = sum((r - mean) ** 2 for r in residuals) / n
-        report["sigma_db"]["mean"] = round(mean, 2)
-        report["sigma_db"]["std"] = round(var**0.5, 2)
-        # 우도 σ_db 제안: 편향 포함 RMS — 잔차의 "전형적 크기"
+        report["unit_residual"]["mean"] = round(mean, 2)
+        report["unit_residual"]["std"] = round(var**0.5, 2)
+        # slack 제안: 편향 포함 RMS — 잔차의 "전형적 크기"
         rms = (sum(r * r for r in residuals) / n) ** 0.5
-        report["sigma_db"]["suggested_sigma_db"] = round(rms, 2)
+        report["unit_residual"]["suggested_slack"] = round(rms, 2)
     tk = report["tracklet"]
     tk["quantiles"] = {
         k: _quantiles(tk[k])
@@ -656,65 +511,8 @@ def render(report: dict) -> str:
                     f"과금 {d['billed']} ← 정답 {d['ground_truth']}"
                 )
 
-    lk = report["likelihood"]
-    lines.append("")
-    lines.append(f"--- 무게 우도 shadow (관측 {lk['observed']}건) ---")
-    if not lk["mismatches"]:
-        lines.append("mismatch 없음")
-    for m in lk["mismatches"]:
-        gt = m.get("ground_truth")
-        verdict = ""
-        if gt is not None:
-            verdict = (
-                f"  [GT {gt} → score {'O' if m['score_correct'] else 'X'} / "
-                f"현행 {'O' if m['current_correct'] else 'X'}]"
-            )
-        lines.append(
-            f"  {m['session']} zone{m['zone']} Δ{m['delta']}g: "
-            f"현행 {m['current']} vs score 1위 {m['score_top']}{verdict}"
-        )
-    ev = lk["labeled_eval"]
-    if any(ev.values()):
-        lines.append(
-            f"  라벨 정오 (mismatch 한정): score만 정답 {ev['score_correct']} / "
-            f"현행만 정답 {ev['current_correct']} / 둘 다 오답 {ev['both_wrong']}"
-        )
-        lines.append("  → Phase 2 승격 게이트: score만 정답이 우세할 때만 진행")
-
-    tp = report["tray_prior"]
-    if tp["observed"]:
-        lines.append("")
-        lines.append(
-            f"--- tray prior shadow (개입 {tp['observed']} entry, "
-            f"1위 변경 {len(tp['flips'])}건) ---"
-        )
-        for f in tp["flips"]:
-            ch = f" ch{f['channel']}" if f.get("channel") is not None else ""
-            verdict = ""
-            if "prior_correct" in f:
-                verdict = (
-                    f"  [GT {f['ground_truth']} → prior "
-                    f"{'O' if f['prior_correct'] else 'X'}]"
-                )
-            lines.append(
-                f"  {f['session']} zone{f['zone']}{ch}: prior {f['prior']} — "
-                f"무-prior 1위 {f['without_prior']} → {f['with_prior']}{verdict}"
-            )
-        pev = tp["labeled_eval"]
-        if any(pev.values()):
-            lines.append(
-                f"  라벨 정오 (단일 entry 한정): prior 덕 정답 "
-                f"{pev['prior_helped']} / prior 탓 오답 {pev['prior_hurt']} / "
-                f"둘 다 오답 {pev['both_wrong']}"
-            )
-            lines.append(
-                "  → PENALTY(2.5) 보정: hurt > 0이면 완화 검토, "
-                "helped 우세 지속 시 Phase 2 근거"
-            )
-
     tk = report["tracklet"]
-    tube_observed = (tk.get("tube_eval") or {}).get("observed", 0)
-    if tk["triggers"] or tk["held_non_gt"] or tk["held_gt_flags"] or tube_observed:
+    if tk["triggers"] or tk["held_non_gt"] or tk["held_gt_flags"]:
         lines.append("")
         lines.append(
             f"--- 트랙릿 T1 (track_detail 관측 트리거 {tk['triggers']}개) ---"
@@ -770,35 +568,6 @@ def render(report: dict) -> str:
                 lines.append(
                     "  → 정답 플래그 0 지속 시 HELD_TRACK_DEMOTION=active 승격 가능"
                 )
-        te = tk.get("tube_eval") or {}
-        if te.get("observed"):
-            lines.append(
-                f"  튜브 shadow(T2' 다수결·표 회수·probation): "
-                f"관측 {te['observed']}건, 1위 변경 {len(te['changed'])}건"
-            )
-            lv = te["labeled_eval"]
-            if any(lv.values()):
-                lines.append(
-                    f"    라벨 정오: shadow만 정답 {lv['shadow_correct']} / "
-                    f"현행만 정답 {lv['current_correct']} / "
-                    f"둘 다 오답 {lv['both_wrong']}"
-                )
-                lines.append(
-                    "    → shadow 우세 지속 시 TUBE_IDENTITY/VOTE_RECOVERY="
-                    "active 승격 근거, 현행 우세면 폐기"
-                )
-            for r in te["changed"][:8]:
-                if "shadow_correct" in r:
-                    mark = " ✓shadow" if r["shadow_correct"] else (
-                        " ✓현행" if r["current_correct"] else " 둘 다 ✗"
-                    )
-                else:
-                    mark = ""
-                lines.append(
-                    f"    {r['session']}/z{r['zone']}: "
-                    f"현행 c{r['top_current']} → shadow c{r['top_shadow']}{mark}"
-                )
-
     gh = report.get("ghost") or {}
     if gh.get("observed"):
         lines.append("")
@@ -857,15 +626,15 @@ def render(report: dict) -> str:
             )
         )
 
-    sd = report["sigma_db"]
+    sd = report["unit_residual"]
     lines.append("")
-    lines.append("--- σ_db 실측 (개당 잔차 = (|Δ| − n·w)/n) ---")
-    if not sd["unit_residuals"]:
+    lines.append("--- 개당 잔차 실측 (= (|Δ| − n·w)/n) ---")
+    if not sd["samples"]:
         lines.append("표본 없음 (단일 정체성 라벨 + removal + unit_weight 기록 필요)")
     else:
         lines.append(
-            f"  n={len(sd['unit_residuals'])} mean={sd['mean']} std={sd['std']} "
-            f"→ MODEL__JUDGMENT__LIKELIHOOD_SIGMA_DB 제안 {sd['suggested_sigma_db']}"
+            f"  n={len(sd['samples'])} mean={sd['mean']} std={sd['std']} "
+            f"→ MODEL__JUDGMENT__COUNT_UNIT_SLACK 제안 {sd['suggested_slack']}"
         )
     return "\n".join(lines)
 
@@ -994,48 +763,20 @@ def render_session(doc: dict, *, full: bool = False) -> str:
                 lines.append("   motion 몰수: " + ", ".join(vetoed))
             if held_tracks:
                 lines.append("   held 트랙: " + "; ".join(held_tracks[:6]))
-        tube = vs.get("tube_shadow")
+        tube = vs.get("tube_diag")
         if isinstance(tube, dict) and tube.get("by_class"):
-            # 트랙릿 갭 shadow 분해 (10차 후속 — 집계 리포트의 "1위 변경"이
-            # 어느 갭(minority/short/recovered) 때문인지 세션 단위로 재구성)
+            # 튜브 진단: 클래스별 유효표 / 결정적 소수 표 / 튜브 conf —
+            # "한 궤적, 여러 클래스"(의류 산탄) 확인용. 판정 영향 없음.
             parts = ", ".join(
-                f"c{cid}:{r['votes']}→{r['shadow']}"
-                f"(소수{r['minority']}/단명{r['short']}/회수{r['recovered']}"
-                f"/tconf{r['tube_conf']})"
+                f"c{cid}:{r['votes']}표(소수{r['minority']}/tconf{r['tube_conf']})"
                 for cid, r in sorted(
                     tube["by_class"].items(),
                     key=lambda kv: -(kv[1].get("votes") or 0),
                 )
             )
-            flag = " [1위 변경]" if tube.get("changed") else ""
-            lines.append(
-                f"   tube_shadow: 현행 c{tube.get('top_current')} → "
-                f"shadow c{tube.get('top_shadow')}{flag} | {parts}"
-            )
+            lines.append(f"   tube_diag: {parts}")
             if tube.get("tubes"):
-                lines.append(f"   tube_shadow.tubes: {tube['tubes']}")
-        for entry in trace.get("likelihood_shadow") or []:
-            if not isinstance(entry, dict):
-                continue
-            ch = f"ch{entry['channel']}" if entry.get("channel") is not None else ""
-            cur = entry.get("current") or {}
-            top_e = entry.get("top") or {}
-            if full:
-                lines.append(f"   likelihood_shadow: {entry}")
-            elif entry.get("mismatch"):
-                rank = ", ".join(
-                    f"{e.get('items')}={e.get('score')}(res{e.get('residual')})"
-                    for e in (entry.get("ranking") or [])[:3]
-                )
-                lines.append(
-                    f"   likelihood {ch} MISMATCH: 현행 {cur.get('items')}="
-                    f"{cur.get('score')} vs top {top_e.get('items')}="
-                    f"{top_e.get('score')} | {rank}"
-                )
-            else:
-                lines.append(
-                    f"   likelihood {ch}: 일치 {cur.get('items')}={cur.get('score')}"
-                )
+                lines.append(f"   tube_diag.tubes: {tube['tubes']}")
     return "\n".join(lines)
 
 

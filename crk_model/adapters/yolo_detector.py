@@ -1,13 +1,16 @@
 """Ultralytics TensorRT .engine 어댑터 — perception.Detector 구현 (제약 C1).
 
 현행 파라미터 보존: conf=0.01(I4: 저신뢰 투표 보존), max_det=20, imgsz=480,
-FP16 엔진, is_hand = class 0. allowed_class_ids가 오면 predict classes=로
-추론을 허용 클래스에 제한한다 (P0-2, 원본 동형). ultralytics는 Jetson
-system-site 것을 lazy import 한다 (개발 PC에서 이 모듈 import만으로는
-아무것도 로드되지 않음).
+is_hand = class 0. allowed_class_ids가 오면 predict classes=로 추론을 허용
+클래스에 제한한다 (P0-2, 원본 동형). ultralytics는 Jetson system-site 것을
+lazy import 한다 (개발 PC에서 이 모듈 import만으로는 아무것도 로드되지 않음).
 
-T2 (docs/0728_freezer_latency_research.md): detect_batch가 게이트 통과
-프레임 묶음을 **전처리 완료 GPU 텐서** 1회 predict로 처리한다 — 프레임당
+엔진 정밀도는 이 어댑터의 계약이 아니라 export 시점에 정해진다 —
+`scripts/convert_engine.sh`는 현재 `half=False`(FP32)로 내보낸다
+(2026-07-21 결정). 어댑터는 로드한 엔진을 그대로 쓴다.
+
+T2 (docs/devdoc/research/0728_freezer_latency_research.md): detect_batch가
+게이트 통과 프레임 묶음을 **전처리 완료 GPU 텐서** 1회 predict로 처리한다 — 프레임당
 predict 비용의 ~72%가 CPU(파이썬 letterbox/BGR→RGB/HWC→CHW//255 + NMS
 후처리)라는 실측에 근거. batch > 1은 정적 batch 엔진 재수출이 전제
 (scripts/convert_engine.sh BATCH=N).
@@ -136,7 +139,8 @@ class UltralyticsEngineDetector:
             else f"cuda:{self._device}"
         )
         t = torch.from_numpy(stack).to(device)  # uint8 업로드
-        # BGR→RGB(채널 역순) + BCHW + 0~1 — fp16 변환은 predictor가 수행
+        # BGR→RGB(채널 역순) + BCHW + 0~1 — 엔진 정밀도에 맞춘 dtype
+        # 캐스팅은 ultralytics predictor가 처리한다 (float32로 넘긴다).
         t = t.permute(0, 3, 1, 2)[:, [2, 1, 0], :, :].contiguous().float().div_(255.0)
         results = self._model.predict(
             t,

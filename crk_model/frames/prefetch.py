@@ -1,5 +1,5 @@
 """프레임 프리페처 — 디코드 ‖ 추론 파이프라이닝 (T2-3,
-docs/0728_freezer_latency_research.md).
+docs/devdoc/research/0728_freezer_latency_research.md).
 
 배경: 트리거 처리에서 디코드(ffmpeg 서브프로세스 파이프 읽기 + numpy 변환)는
 추론과 직렬로 실행돼 비YOLO 비용(총 처리의 12~21%)이 그대로 지연에 더해진다.

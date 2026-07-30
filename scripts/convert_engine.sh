@@ -6,10 +6,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="${PROJECT_ROOT:-$(cd "${SCRIPT_DIR}/.." && pwd)}"
 PT_FILE="${PT_FILE:-0204_morning.pt}"
 IMGSZ="${IMGSZ:-480}"
-# T2-2 (docs/0728_freezer_latency_research.md): 마이크로배치용 정적 batch
+# T2-2 (docs/devdoc/research/0728_freezer_latency_research.md): 마이크로배치용 정적 batch
 # 엔진. 기본 1 = 현행. BATCH=4로 재수출하면 MODEL__VISION__BATCH_SIZE=4와
 # 짝을 이룬다 (고정 배치 + 패딩이 1안 — dynamic batch의 TRT 프로파일
-# 재선택·할당자 파편화 회피, docs/OPTIMIZED_ARCHITECTURE.md L3).
+# 재선택·할당자 파편화 회피, docs/devdoc/design/OPTIMIZED_ARCHITECTURE.md L3).
 BATCH="${BATCH:-1}"
 MODELS_DIR="${MODELS_DIR:-${PROJECT_ROOT}/models}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"

@@ -38,7 +38,6 @@ from crk_model.ledger.events import EventLog
 from crk_model.ledger.ghost_ledger import GhostLedgerConfig
 from crk_model.ledger.journal import EventJournal
 from crk_model.ledger.settler import CloseSettler
-from crk_model.ledger.tray_memory import SessionTrayMemory
 from crk_model.perception.detector import Detector
 from crk_model.perception.filters import DetectionFilterChain
 from crk_model.service.pipeline import TriggerPipeline, TriggerRequest
@@ -69,7 +68,7 @@ def _default_profile_from_settings(settings: Settings) -> SensorProfile:
 
     존 미지정(zone이 freezer_zones/profiles dict에 없음) 시에도 냉동 기기는
     기본으로 FREEZER가 적용돼야 한다 (이슈 #6 공동 원인: cabinet_type 미이식으로
-    미설정 시 전 존이 REFRIGERATOR ±3g로 판정됨)."""
+    미설정 시 전 존이 REFRIGERATOR ±5g로 판정됨)."""
     base = FREEZER if settings.cabinet_type == "freezer" else REFRIGERATOR
     return _apply_gate_overrides(base, settings)
 
@@ -126,7 +125,7 @@ class ModelService:
         )
         self.snapshots = ActiveProductStore()
         self.event_log = EventLog()
-        # 교차존 비전 오염 페널티 (docs/cross_zone_penalty.md) — 재판정(④~⑥)에 필요한
+        # 교차존 비전 오염 페널티 (docs/devdoc/design/cross_zone_penalty.md) — 재판정(④~⑥)에 필요한
         # allowlist는 세션 스냅샷 provider로 주입한다 (CLOSE 시점 = OPEN이 갱신한
         # 해당 세션의 상품 목록).
         cross_zone = CrossZonePenaltyConfig(
@@ -147,7 +146,7 @@ class ModelService:
         )
         # 판정(pipeline)·정산(settler)·잠정 집계(gateway interim)의 tolerance
         # 단일 소스 원칙: 존 미지정 시 폴백 프로파일을 세 경로 모두 같은 값으로
-        # 주입한다 (cabinet_type=freezer인데 정산만 냉장 ±3g로 계산되는 불일치 방지).
+        # 주입한다 (cabinet_type=freezer인데 정산만 냉장 ±5g로 계산되는 불일치 방지).
         self.settler = CloseSettler(
             self.settings.error_policy,
             default_profile=self._default_profile,
@@ -179,16 +178,6 @@ class ModelService:
             on_finalize=self._on_session_finalize,
             default_profile=self._default_profile,
         )
-        # 세션 트레이 메모리 — 운영 입력 없는 세션-학습 배치 증거 (정적
-        # planogram 금지 제약의 대체). 세션 OPEN마다 reset.
-        self._tray_memory = (
-            SessionTrayMemory(
-                boost=self.settings.tray_prior_boost,
-                penalty=self.settings.tray_prior_penalty,
-            )
-            if self.settings.tray_prior
-            else None
-        )
         self.pipeline = TriggerPipeline(
             detector, self._profiles, self.snapshots, default_profile=self._default_profile,
             # I-V 판정 노브 (MODEL__JUDGMENT__*, 이슈 #15) — env로 주입된
@@ -211,16 +200,6 @@ class ModelService:
             motion_evidence_floor_px=self.settings.motion_evidence_floor_px,
             motion_unmeasurable_policy=self.settings.motion_unmeasurable_policy,
             motion_measurable_min_obs=self.settings.motion_measurable_min_obs,
-            # 무게 우도 score shadow (MODEL__JUDGMENT__LIKELIHOOD_*, Phase 1):
-            # 판정 미사용 — 아카이브 diff 실측용.
-            likelihood_shadow_enabled=self.settings.likelihood_shadow,
-            likelihood_params={
-                "k": self.settings.likelihood_k,
-                "sigma_db": self.settings.likelihood_sigma_db,
-            },
-            # 세션 트레이 메모리 (MODEL__JUDGMENT__TRAY_PRIOR*): 세션 수명은
-            # ModelService가 관리 — OPEN 새 세션마다 reset (아래 handle_multi_zone).
-            tray_memory=self._tray_memory,
             # 로드셀 안정 판정 (MODEL__WEIGHT__STABLE_WINDOW 등, 이슈 #14):
             # post-roll 샘플 수와 함께 최종 안정 구간 성립 조건을 결정한다.
             # primary는 BOCPD (2026-07-23 정식 승격) — 회귀 시
@@ -285,15 +264,8 @@ class ModelService:
                 "common_class_bonus": self.settings.conf_common_class_bonus,
                 # T2 held 트랙 강등 (MODEL__VISION__HELD_TRACK_DEMOTION)
                 "held_demotion": self.settings.held_track_demotion,
-                # 트랙릿 갭 4종 (0723 문서 §2 잔여, shadow-first — MODEL__
-                # VISION__TUBE_IDENTITY / VOTE_RECOVERY(_FLOOR) / TRACK_MIN_HITS)
-                "tube_identity": self.settings.tube_identity,
-                "vote_recovery": self.settings.vote_recovery,
-                "recovery_floor": self.settings.vote_recovery_floor,
-                "track_min_hits": self.settings.track_min_hits,
             },
             held_track_min_head=self.settings.held_track_min_head,
-            track_max_gap=self.settings.track_max_gap,
             segment_retry_gap_grams=self.settings.segment_retry_gap_grams,
             # 프레임별 bbox 기록 (MODEL__SESSION__SAVE_DETECTIONS) — 아카이브
             # 동봉 후 render-session CLI가 오버레이 영상으로 재구성한다.
@@ -301,7 +273,7 @@ class ModelService:
             side_hand_enabled=self.settings.side_hand_enabled,
             save_detections=self.settings.save_detections,
             camera_crops=self.camera_crops,
-            # T2 (docs/0728_freezer_latency_research.md): 마이크로배치(D8 배선)
+            # T2 (docs/devdoc/research/0728_freezer_latency_research.md): 마이크로배치(D8 배선)
             # + 선행 디코드. 기본값(1/0)이면 기존 경로와 동일.
             batch_size=self.settings.batch_size,
             prefetch_depth=self.settings.prefetch_depth,
@@ -382,12 +354,6 @@ class ModelService:
                         "[MULTI-ZONE OPEN] new session %s (prev_state=%s, products=%d)",
                         session_id, self.gateway.state.value, len(products),
                     )
-                    if self._tray_memory is not None:
-                        # 트레이 증거는 세션 경계를 넘지 않는다 (cold-start
-                        # = prior 0 = 현행 동작). session_id 고정으로 이전
-                        # 세션의 잔여 트리거(워커, 락 밖)가 새 세션 맵에
-                        # 기록/소비하는 순서 역전을 차단 (tray_memory.py 동시성).
-                        self._tray_memory.reset(session_id)
                     # issue #6: class_id==-1(미매핑, http_app._active_product_fields
                     # 참고)인 상품이 있으면 vision_candidates가 비어 weight_only 오청구
                     # 재발 위험 — OPEN마다 매핑 성공률을 즉시 로그로 남긴다.

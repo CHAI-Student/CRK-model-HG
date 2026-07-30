@@ -38,7 +38,7 @@ class VisionCandidate:
     L1 모션 게이트·L2 조기 종료 어느 조합에서도 분모 의미가 바뀌지 않는다.
 
     head_votes/span_ratio/first_pos_ratio: held-object A-1 계측
-    (docs/0713_held_object_demotion.md §3) — "프리롤 첫 프레임부터 영상 전
+    (docs/devdoc/design/0713_held_object_demotion.md §3) — "프리롤 첫 프레임부터 영상 전
     구간 등장"이라는 carried-in 시간 구조의 신호. 판정에는 미사용(계측 전용,
     기본값 하위호환), 아카이브로 임계 확정 후 A-2(soft 강등)에서 소비한다.
     """

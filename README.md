@@ -1,628 +1,206 @@
-# CRK-model-HG — Model Service (Greenfield Redesign)
+# CRK-model-HG — 스마트 자판기 판정 모델 서비스
 
-Last reviewed: 2026-07-24
+무인 자판기에서 **카메라 영상과 무게 변화만으로 "무엇을 몇 개 가져갔는지" 판정해
+결제 금액을 확정**하는 엣지 AI 서비스입니다. 레거시 서비스(CRK-model)의 외부 계약을
+유지하면서 판정 엔진을 계층 구조로 백지 재설계한 구현체입니다.
 
-AI 스마트 자판기 모델 서비스의 백지 재설계 구현. 레거시/참조 서비스인
-[CRK-model](https://github.com/CHAI-Student/CRK-model)(FastAPI + TensorRT)의
-외부 계약을 유지하면서, 설계 문서 3종의 결론을 코드로 옮겼다:
+| 항목 | 상태 |
+|---|---|
+| 자동 검증 | **406건 통과** (2026-07-30) · CI: ruff + pytest |
+| 냉동 실기 | E2E 검증 완료 (OPEN → 추론 → CLOSE 정산 → 결제 연동) |
+| 냉장 실기 | fitting 진행 중 (issue #18) |
+| 런타임 의존성 | 코어 **0** (표준 라이브러리) — 장치 결합은 전부 어댑터 |
+| 실행 환경 | Jetson Orin Nano 4GB · 단일 프로세스 `:8002` |
 
-- `CRK-model/docs/GREENFIELD_DESIGN_GUIDE.md` — 결정 **D1~D10 전부 권장안** 채택
-- `CRK-model/docs/REDESIGN_RATIONALE_QA.md` — 불변식 **I1~I17**을 타입·인터페이스·탐색 공간 제약으로 표현
-- `CRK-model/docs/OPTIMIZED_ARCHITECTURE.md` — 레버 L1(모션 게이트)·L2(조기 종료)·L5(전략 라우터)·L6(단일 정산기) 반영, L3(배치)는 설계만·기본 OFF
+---
 
-순수 파이썬, 런타임 의존성 0. YOLO TensorRT·NVDEC 등 장치 결합 요소는
-프로토콜(`perception.Detector`) 뒤의 어댑터로 주입한다. Jetson 실기 검증(G4)
-전까지 이 레포의 통과 상태는 설계·계약 수준의 증명이다.
+## 문서 안내
 
-## Current Status
+**상세 문서는 [`docs/`](docs/README.md) 문서집에 있습니다.** 이 README는 진입점입니다.
 
-- 로컬 검증 게이트: `pytest tests -q` → **383 passed (2026-07-24)** (+3 ffmpeg 환경 의존 스트리밍 테스트 제외 — numpy/ffmpeg/fastapi 미설치 환경은 해당 테스트 skip), `ruff check .` clean, CI(GitHub Actions) 구동
-- **Jetson 실기 E2E 검증 완료 (2026-07-09)**: 냉동 실기에서 OPEN → 트리거 추론(freezer_vision_first) → CLOSE 정산 → Node 결제 연동까지 통과 (이슈 #6 전 과정). 잔여 실기 항목: 24h+ soak(G4), 원본 정합 웨이브(2026-07-22 도입 당시 left-crop·classes·max-conf, `docs/fix_logs.md` 2026-07-22 — **2026-07-24 center-crop으로 전환**, 아래 참조) 실기 재검증 — side ROI는 crop 좌표계 400으로 재정렬됨(과거 "side 검출 대부분 제거" 문제의 원인이던 squash 좌표계 240은 폐기), 엣지 워터마크 실기 관찰(Edge_Environment `feature/edge-watermark` 브랜치)
-- G0(정적/단위) 커버: 불변식 I1~I17 전건, E2E(OPEN→trigger→CLOSE→결제 페이로드), HTTP 어댑터 E2E, G2.5 훅(저널 replay 등가성)
-- 실기 이슈로 확정·수정된 계약 (상세는 `docs/fix_logs.md`): 확정 결과 1회 전달 후 즉시 idle(에지 device busy 해제), 결제 페이로드 원본 finalize 형식(평탄화 `products`·`productIdx`/`price` 키), CLOSE 유예 3s + 엣지 워터마크(`expected_triggers`) 이중 방어, `MODEL__MACHINE__CABINET_TYPE` 필수(냉동 기기), 상품→YOLO 이름 기반 매핑, 투표 진입 컷 env 튜닝(`.env.example`)
-- 미커버 (착수 전 확보물 대기): 게이트/조기종료 임계값 실측(P1 코퍼스), 세션 아카이브 replay(P2), interim 의미론·에러 정책 Node 합의(P3·P4). 카메라 seq 펌웨어(P5)는 엣지 워터마크로 대체됨
-- 은퇴 이력: static_track·baseline 필터(→ `MOTION_EVIDENCE` 트랙 단위 변위 몰수가 대체)·BOCPD shadow 장치(primary 승격 완료)·cross-zone shadow 정산 러너(Phase 3 승격 완료)는 2026-07-24 삭제 — 경위는 `docs/fix_logs.md` 참조
+| # | 문서 | 이런 게 궁금하면 |
+|---|---|---|
+| 01 | [서비스 개요](docs/01-service-overview.md) | 이 시스템이 무엇을 판단해 매출을 확정하나 (비전공자용) |
+| 02 | [시스템 아키텍처](docs/02-system-architecture.md) | 외부 계약, 계층 구조, 트리거 처리 흐름 |
+| 03 | [판정과 정산](docs/03-judgment-and-settlement.md) | 판정 전략 순서, close 정산 4층, 설계 결정·불변식 |
+| 04 | [설정 레퍼런스](docs/04-configuration.md) | 환경변수 전체 카탈로그, 냉장/냉동 프로파일 |
+| 05 | [운영·진단 가이드](docs/05-operations.md) | 배포, 로그 읽기, 오판정 사후 분석 |
+| 06 | [검증 보고서](docs/06-verification-report.md) | 무엇이 완료됐고 무엇이 남았나 |
+| 07 | [배제·폐기 결정 기록](docs/07-rejected-and-retired.md) | 시도했으나 버린 것과 그 근거 |
+| 08 | [인수인계](docs/08-handover.md) | 남은 작업, 리스크, 재개 절차 |
 
-## Jetson Quick Start
+- 패키지별 세부 기능 문서: `crk_model/<패키지>/README.md` ([아래 표](#저장소-구조) 참조)
+- 개발 당시 원본 자료(히스토리): [`docs/devdoc/`](docs/devdoc/README.md)
 
-Jetson Orin Nano(JetPack, Ubuntu 22.04)에서 1회 준비 후 실행:
+## 30초 요약
+
+```mermaid
+flowchart LR
+    CAM["📷 CRK-CAMERA<br/>AVI 녹화 + 로드셀"]
+    NODE["🗂️ Node.js (8888)<br/>세션 오케스트레이션"]
+    HG["🧠 이 서비스 (:8002)<br/>영상+무게 → '무엇을 몇 개'"]
+    PAY["💳 CRK-PAYMENT"]
+
+    CAM -- "POST /trigger" --> HG
+    NODE -- "POST /api/judge/multi-zone<br/>OPEN / CLOSE" --> HG
+    HG -- "확정 정산 (상품·수량·금액)" --> NODE
+    NODE -. "결제" .-> PAY
+```
+
+- 문이 열리면 판매 상품 목록을 받고, 꺼낼 때마다 즉시 판정하되 **청구는 문 닫힘 후
+  한 번에 정산**합니다 (되돌려 놓은 물건·타 존 오반납까지 여기서 교정).
+- 문이 닫혀도 바로 정산하지 않고 **모든 트리거 처리 완료를 인과적으로 확인한 뒤**
+  확정합니다 (늦게 온 이벤트 유실로 0원 결제가 되는 사고 방지).
+- 핵심 원칙은 **과청구보다 미청구**(fail-closed) — 증거가 애매하면 청구하지 않습니다.
+
+## 빠른 시작
+
+### Jetson 실기
 
 ```bash
-git clone https://github.com/CHAI-Student/CRK-model-HG.git
-cd CRK-model-HG
+git clone <저장소 URL> && cd <저장소>
 
-chmod +x scripts/setup_jetson.sh
-chmod +x scripts/install_jetson_torch.sh
-chmod +x scripts/jetson_env.sh
-./scripts/setup_jetson.sh
-       # system-site venv + 어댑터 의존성
+chmod +x scripts/setup_jetson.sh scripts/install_jetson_torch.sh scripts/jetson_env.sh
+./scripts/setup_jetson.sh          # system-site venv + 어댑터 의존성
+
+cp refrg.env.example .env          # 냉장 기기 (냉동은 freezer.env.example)
+#  → .env에서 MODEL__VISION__YOLO_MODEL_PATH 등 필수값 확인
 
 source .venv/bin/activate
-MODEL__VISION__YOLO_MODEL_PATH=models/set9_doorfas_0323_imbal.engine model-service-hg
+model-service-hg
 ```
-기존 CRK-model을 가동 중이라면 중단 후 model-service-hg 실행. 
-
-`.engine` 파일은 이 레포에 없다 — CRK-model에서 쓰던 엔진 파일을 `models/`에
-복사하거나 절대경로로 지정한다. 기동 시 startup probe가 엔진을 1회 실행하므로
-**로드 실패·CUDA 불가면 서비스가 즉시 죽는다** (무증상 기동 금지, 이관 리뷰 #1).
-
-`.engine`이 없고 `.pt`만 있으면(Jetson 리셋/JetPack 재플래시 후 등) **그 Jetson
-위에서** 직접 빌드한다 — engine은 TensorRT 버전·GPU에 종속이라 다른 기기에서
-빌드한 파일은 못 쓴다:
-
-```bash
-# .pt를 models/에 두고 실행 (어댑터 계약 FP16·imgsz=480은 스크립트가 맞춰준다)
-PT_FILE=0204_morning.pt scripts/convert_engine.sh
-```
-
-스크립트가 NumPy 2.x(Jetson torch 비호환)를 사전 검사하고, 실행 중 의존성
-auto-install이 NumPy를 올리는 것도 차단한다(`YOLO_AUTOINSTALL=false`). export
-의존성(onnx/onnxslim)은 setup_jetson.sh가 NumPy 핀과 함께 미리 설치한다.
-
-코드 업데이트 후. 
-```bash
-deactivate 2>/dev/null
-git pull origin master
-
-source .venv/bin/activate
-MODEL__VISION__YOLO_MODEL_PATH=models/set9_doorfas_0323_imbal.engine model-service-hg
-
-```
-
-
-헬스 체크:
 
 ```bash
 curl http://localhost:8002/api/health
 # {"status":"ok","door_state":"idle","queue_pending":0,"barrier_satisfied":true,...}
 ```
 
-CRK-model의 CUDA/TensorRT 경로 부트스트랩(`scripts/jetson_env.sh`)이 필요한
-환경이면 먼저 그것을 source한 뒤 실행한다. 기존 CRK-model `.venv`를 재사용하는
-방법도 있다: 그 venv를 활성화한 채 `uv pip install --no-deps -e /path/to/CRK-model-HG`
-`uv pip install fastapi "uvicorn[standard]"` 후 `model-service-hg`.
+`.engine` 파일은 저장소에 없습니다 — TensorRT/GPU에 종속이라 **그 Jetson에서 직접
+빌드**해야 합니다(`PT_FILE=<모델>.pt scripts/convert_engine.sh`). 기동 시 프로브가
+엔진을 1회 실행하므로 **로드 실패면 서비스가 즉시 죽습니다**(무증상 기동 금지).
 
-## Operations & Diagnostics
+배포·엔진 빌드·트러블슈팅 상세는 [05. 운영·진단 가이드](docs/05-operations.md).
 
-운영 중 상태 확인·사후 분석용 로그와 아카이브. 정상 동작의 일부이며 별도 설정
-없이도 남는다(아카이브·저널 경로만 env로 조정 가능).
-
-### 운영 로그
-
-- `[OPS][CLOSE]` — 세션 확정(finalize) 시 1회, 존별 분해를 포함한 확정 요약
-  (`session_id`, 존별 `weight_delta`/`products`/`triggers`, 세션 전체
-  `total_weight_delta`/`total_products`/`total_price`).
-- `[OPS][CLOSE_ERROR]` — 에러 세션으로 확정될 때(I13, `blocked=true` 등) 사유와
-  함께 기록.
-- `[OPS][SESSION_ARCHIVE]` — 세션 아카이브 파일 기록 성공/실패 시 기록.
-- `[MULTI-ZONE OPEN] mapped=n/total unmapped=[...]` — OPEN마다 상품→YOLO
-  클래스 매핑 성공률. 매핑 실패 상품이 있으면 이름 목록과 함께 `warning`으로
-  기록(상세는 아래 "상품 → YOLO 클래스 매핑" 참고).
-
-### 상품 → YOLO 클래스 매핑 (issue #6)
-
-Node가 보내는 상품(`active_products`)마다 YOLO `class_id`를 부여한다.
-우선순위는 숫자 필드 별칭(`yolo_class_id`/`yoloClassId`/`trainingIdx`/
-`training_idx`/`trainingidx`) → 실패 시 **엔진 `class_names`(TensorRT
-어댑터의 `class_names` 프로퍼티) 기반 이름 매칭**(`product_eng_name` →
-`product_name`/`productName`/`name` 순 폴백, 대소문자 무시). 어느 경로로도
-못 찾으면 `class_id=0`(hand 클래스와 충돌)이 아니라 `-1`(미매핑 센티널)을
-쓴다 — 매핑 실패 상품이 조용히 손(hand)으로 둔갑해 오청구로 이어지는 사고를
-막기 위함이다. 매핑 결과는 `handle_multi_zone(state="OPEN")`마다
-`[MULTI-ZONE OPEN] mapped=n/total unmapped=[...]` 경고로 남는다.
-
-### weight_only 의미론 (fail-closed)
-
-vision 후보가 0개일 때(`NoCandidateFallbackStrategy`)의 폴백 규칙: freezer
-존(무게가 정체성 판별자 자격이 없음)은 애초에 품목 식별을 포기하고
-`loadcell_identity_suppressed`로 `NO_DETECTION`을 반환한다. 그 외 존은
-전 재고 대상 **단일 품목·유일 매칭만** 시도한다(다품목 조합 탐색은 하지
-않음 — 우연한 무게 합 일치로 인한 오청구 재발 방지). 허용오차 내에 서로
-다른 품목이 2개 이상 그럴듯하면 모호하다고 보고 `weight_only_ambiguous`
-사유로 `NO_DETECTION`을 반환한다(과청구가 미청구보다 나쁘다는 I13/D9
-fail-closed 원칙).
-
-### 세션 아카이브 (오판정 사후 분석용)
-
-세션이 확정(finalize)될 때마다 트리거별 vision 후보·판정 전략·신뢰도·
-`video_paths`까지 포함한 세션 전체 기록을 파일로 남긴다. "왜 이렇게
-과금됐는가"를 로그만으로 재구성하기 위한 것으로, 정산 로직 자체에는
-영향을 주지 않는다. 클래스별 `votes`/`ratio`/`conf`와 탈락 사유
-(`ratio`/`conf_floor` 게이트)를 담은 `vote_summary`도 함께 기록해 "왜 그
-후보가 채택/탈락됐는지"까지 아카이브만으로 재구성할 수 있다.
-
-| 환경변수 | 기본값 | 의미 |
-| --- | --- | --- |
-| `MODEL__SESSION__ARCHIVE_DIR` | `data/sessions` | 아카이브 루트 디렉터리. 빈 문자열(`""`)이면 아카이브 비활성화 |
-| `MODEL__SESSION__ARCHIVE_RETENTION_DAYS` | 14 | 일자별 디렉터리 보존 기간(일) |
-
-파일 경로: `data/sessions/YYYY-MM-DD/<session_id>.yaml` (PyYAML이 없으면
-`.json`으로 자동 폴백).
-
-**정답 라벨 (`ground_truth`)**: 실험 시 실제 취출 품목/수량을 아카이브에
-구조화해 기입한다 — 임계 보정(conformal)·확률화 shadow 정오 판정의 데이터
-소스다 (이슈 코멘트 수기 기록의 대체). 실험 직후 Jetson에서:
+### 개발 PC (도메인 코어)
 
 ```bash
-label-session --latest --zone 2 --take 27x5 --note "1.6s 간격 연속 취출"
-label-session ses-10-1784698526 --take 2:27x1 --take 3:30x1
+git clone <저장소 URL> && cd <저장소>
+pip install -e ".[dev]"     # pytest / ruff / httpx
+pytest -q                   # 코어는 런타임 의존성 0
+ruff check .
 ```
 
-`--take [존:]<class_id|이름>x<개수>` 반복 지정, 재실행 시 기존 라벨 대체
-(오기입 정정). 미라벨 세션은 `ground_truth: null`로 남는다.
-
-**오프라인 실측 리포트 (`analyze-sessions`)**: 아카이브(+정답 라벨)만으로
-① BOCPD·무게 우도 shadow의 mismatch 목록과 라벨 대비 정오 집계(Phase 2 승격
-게이트 실측치), ② 정답 상품의 후보 통계 분위수 → 채택 임계 제안(conformal),
-③ (delta, 정답 배정) 개당 잔차 → `LIKELIHOOD_SIGMA_DB` 제안을 출력한다.
-읽기 전용 — 판정·정산·아카이브를 변경하지 않는다.
-
-```bash
-analyze-sessions                 # data/sessions 전체 리포트
-analyze-sessions --json          # 기계 판독용
-```
-
-### 정산 notes 해석표
-
-`[OPS][CLOSE]`·세션 아카이브 YAML·`[GATEWAY] FINALIZED` 로그의 `notes=[...]`는
-정산기(4층, Architecture §4)가 **증분 집계를 교정한 흔적**이다 — note가 있다는
-것은 "트리거별 판정 그대로가 아니라 close 시점에 재해석했다"는 뜻이므로,
-과금이 이상할 때 가장 먼저 볼 곳이다.
-
-| note | 발생층 | 의미 | 볼 것 |
-| --- | --- | --- | --- |
-| `net_delta_correction:zone{N}:{상품ID}-1` | ② net-delta | 존 청구 합계가 로드셀 순변화보다 무거워 가장 근접한 상품 1개를 감산 — "꺼냈다 되돌림"이 트리거 판정에 잡히지 않았을 때의 교정 | 감산이 정당한지: 해당 존 트리거들의 delta 부호와 반품 세그먼트 |
-| `cross_zone_return:zone{A}->zone{B}:{상품ID}-1` | ③ 교차존 | A존에서 미매칭 반품(+delta)이 B존 장바구니의 상품 무게와 일치 — 존 착오 반납으로 보고 B존에서 1개 감산 | A존 반품 무게와 B존 상품 무게가 실제로 같은 상품인지 |
-| `unmatched_return:zone{N}:{+X.Xg}` | ③ 교차존 | 반품(+delta)이 어느 존 장바구니와도 매칭 실패 — 감산 없이 기록만 (과소 청구 방향으로 안전) | 반품 무게가 상품 DB unit_weight와 얼마나 어긋나는지 (무게 DB 문제 신호) |
-| `freezer_close_resolve:zone{N}:{상품ID}={n}` | ④ freezer | 냉동 존을 close 시점 순변화(net)로 재해석 — 단일 품목 n개로 개수 확정 (±15g 게이트 통과, I3) | n이 실물과 맞는지 — 이 note가 정상 경로다 (증분 판정보다 net이 정확) |
-| `freezer_close_resolve:zone{N}:net~0->clear` | ④ freezer | 냉동 존 순변화가 게이트 이내(사실상 0) — 전량 반품으로 보고 청구 클리어 | 실제로 되돌려놨는지. 아니라면 로드셀 드리프트 의심 |
-| `freezer_close_gate_failed:zone{N}:keep_incremental` | ④ freezer | net 재solve가 ±15g 게이트를 통과하지 못함 — 안전하게 증분(트리거별) 결과 유지 (I3: 게이트 실패 시 재solve 확정 금지) | net과 증분 청구 합의 차이 — 크면 무게 DB/드리프트 문제 |
-| `freezer_close_multi_kind:zone{N}:keep_incremental` | ④ freezer | 냉동 존에 2품목 이상 — 단일 품목 재solve 불가라 증분 유지 (178g 사건 방지: 조합 재solve 금지) | 다품목 청구가 vision 근거(아카이브 judgment)와 일치하는지 |
-| `error_zones_excluded:{존 목록}` | 에러 정책 | `FINALIZE_ERROR_FREE_ZONES` 정책(Node 합의 시)에서 에러 존만 제외하고 확정 | 제외된 존의 매출 누락 — 기본 정책(BLOCK_PAYMENT)에서는 발생 안 함 |
-
-에러 세션(`[OPS][CLOSE_ERROR]`)의 `reason`은 notes가 아니라 차단 사유다:
-`error_trigger_present:zones=[...]`(I13 — 에러 트리거 포함, 결제 차단),
-`all_zones_errored`, `barrier_timeout:...`(I17 — 배리어 미충족 상한 초과,
-카메라/워커 무응답 의심).
-
-### 이벤트 저널
-
-`TriggerEvent` 시퀀스를 JSONL로 append하는 저널. G2.5(정산 등가성) replay와
-장애 후 재구성에 쓰인다.
-
-| 환경변수 | 기본값 | 의미 |
-| --- | --- | --- |
-| `MODEL__LEDGER__JOURNAL_PATH` | `logs/events.jsonl` | 저널 파일 경로. 일자별로 로테이션 |
-| `MODEL__LEDGER__JOURNAL_RETENTION_DAYS` | 14 | 로테이션된 저널 파일 보존 기간(일) |
-
-### 엣지 워터마크 (권장 — Node 측 구현 필요)
-
-CLOSE가 카메라 AVI 업로드보다 먼저 도착하면 배리어(I17)가 자명하게 충족되어
-0원 확정 + late trigger rejected가 날 수 있다 (이슈 #8). 기본 방어는 CLOSE
-유예 3초(`MODEL__CLOSE__GRACE_S`)지만, **Node가 CLOSE payload에 존별 기대
-트리거 수를 실으면** 시간 휴리스틱 없이 인과적으로 정확해진다:
-
-```json
-{ "session_id": "CLOSE", "expected_triggers": { "4": 2, "5": 1 } }
-```
-
-- Node는 녹화 디렉토리(`Edge_Environment/<세션>/inference/zone_N/…`)의
-  소유자이므로 close 시점에 존별 녹화 디렉토리 수를 세기만 하면 된다 —
-  카메라 펌웨어(seq, P5) 변경 불필요.
-- 워터마크가 있으면: 기대 수만큼 도착할 때까지 확정 보류
-  (`awaiting_triggers`), 전부 도착하면 **유예 없이 즉시** 확정. 기대한
-  트리거가 끝내 안 오면 `close_timeout`(10s)에서 에러 세션 (D9 fail-closed).
-- 워터마크가 없으면: 기존 유예 3초 폴백 (하위호환 — Node 무변경으로도 동작).
-
-### 비디오 디코더
-
-| 환경변수 | 기본값 | 의미 |
-| --- | --- | --- |
-| `MODEL__VIDEO__DECODER` | `auto` | `auto`\|`ffmpeg`\|`opencv`. `auto`는 NVDEC(hwaccel cuda) 가용 + numpy 존재 시 ffmpeg 스트리밍 파이프를 쓰고, 아니면 cv2(CPU 디코드)로 폴백 |
-
-## Manual Setup -> 꼭 해야한다면... 
-
-```bash
-uv venv --system-site-packages --python python3.10 .venv
-source .venv/bin/activate
-uv pip install --no-deps -e .
-uv pip install "fastapi>=0.100.0" "uvicorn[standard]>=0.23.0"
-# ultralytics가 system-site에 없을 때만 (CPU torch 오염 방지를 위해 --no-deps):
-uv pip install --no-deps "ultralytics>=8.0.0,<9.0.0" "ultralytics-thop>=2.0.18"
-
-cp ../CRK-model/.env.example .env 2>/dev/null || touch .env
-echo "MODEL__VISION__YOLO_MODEL_PATH=models/siyeon_best.engine" >> .env
-```
-
-원칙은 CRK-model과 동일: venv는 반드시 `--system-site-packages`(JetPack의
-CUDA/TensorRT/torch/OpenCV/numpy<2 사용), ultralytics는 `--no-deps`로만 설치,
-일상 실행에 plain `uv run`/`uv sync` 금지 (환경 재동기화로 CUDA torch가
-CPU wheel로 덮일 수 있음).
-
-## Live Engine Preview
-
-카메라 입력과 TensorRT `.engine` 추론 출력을 실시간 bbox/라벨로 육안 검증하는
-독립 유틸(`scripts/live_engine_preview.py`) — FastAPI 서비스(`model-service-hg`)와
-완전 분리되어 있고 `crk_model` 패키지에도 의존하지 않는다:
-
-```bash
-python scripts/live_engine_preview.py --model models/set9_doorfas_0323_imbal.engine --source 0 --display-backend ffplay
-```
-
-자주 쓰는 옵션:
-
-```bash
-python scripts/live_engine_preview.py \
-  --model models/set9_doorfas_0323_imbal.engine \
-  --source 0 \
-  --width 640 \
-  --height 480 \
-  --imgsz 480 \
-  --conf 0.25 \
-  --display-backend ffplay
-```
-
-- `--backend {auto,v4l2,gstreamer,ffmpeg}` — 캡처 백엔드 선택.
-- `--source`는 카메라 인덱스(`0`), `/dev/videoN` 경로, 비디오 파일, RTSP URL,
-  `csi:N`(Jetson CSI 카메라), `gst:<파이프라인>`(커스텀 GStreamer 파이프라인)을
-  모두 지원한다.
-- `--display-backend auto`는 OpenCV HighGUI가 가능하면 그것을, `GUI: NONE`으로
-  빌드된 헤드리스 OpenCV라면 `ffplay`(rawvideo 파이프)로 자동 폴백한다.
-- `--classes 0,2,5` 같은 콤마 목록으로 특정 YOLO 클래스만 필터링 가능.
-- Jetson CUDA/TensorRT 런타임 경로가 필요하면 실행 전에
-  `source scripts/jetson_env.sh`로 준비한다 (스크립트 자체는 이제 이 부트스트랩을
-  자동으로 재실행하지 않는다 — `model_service.core.runtime_env` 같은 서비스
-  전용 모듈에 의존하지 않는 완전 독립 스크립트이기 때문).
-- 이 스크립트는 Jetson 전용 육안 검증 도구다 — 개발 PC 실행으로 TensorRT/CUDA
-  준비 상태를 판단하지 않는다. cv2/ultralytics를 직접 import하므로(코어의
-  "런타임 의존성 0" 원칙의 명시적 예외), 개발 PC에는 두 패키지가 없어도
-  `--help`는 정상 동작한다.
-
-### 트러블슈팅: 카메라를 열 수 없음 (Jetson)
-
-`--source 0` / `--source 2` 등에서 `can't open camera by index` /
-`camera/video source could not be opened`가 발생하면:
-
-- **카메라 점유(V4L2 배타 오픈 충돌)**: CRK-CAMERA/Edge_Environment의 캡처
-  서비스가 이미 카메라를 열어 AVI로 상시 녹화 중이면 V4L2는 배타적으로만
-  열리므로 프리뷰가 실패한다. 프리뷰 전에 해당 캡처 서비스를 먼저 중지하거나,
-  캡처 서비스가 쓰지 않는 다른 `/dev/videoN`을 지정한다.
-- **CSI 카메라**: `/dev/video*`가 하나도 없거나 V4L2로 열리지 않는 Jetson 온보드
-  카메라는 `--source csi:0` (nvarguscamerasrc 기반 GStreamer 파이프라인)으로
-  연다. 커스텀 파이프라인은 `--source 'gst:<파이프라인>'`으로 직접 전달 가능.
-- **진단**: `python scripts/live_engine_preview.py --list-devices`로 모델 로드
-  없이 `/dev/video*` 목록, `v4l2-ctl --list-devices` 출력, 각 장치를 점유 중인
-  프로세스(pid)를 확인할 수 있다. 카메라 열기 실패 시에도 이 진단이 자동
-  실행된다. USB 카메라는 장치당 노드 2개(캡처+메타데이터)를 만드므로, 홀수
-  번호 노드는 메타데이터용이라 캡처 소스로 열리지 않을 수 있다.
-
-## Quick Start (개발 PC — 도메인 코어)
-
-```bash
-git clone https://github.com/CHAI-Student/CRK-model-HG.git
-cd CRK-model-HG
-pytest tests -q        # 코어는 런타임 의존성 0 (fastapi 있으면 HTTP E2E도 실행)
-```
-
-서비스 사용은 파사드 직접 호출 (HTTP 어댑터는 이 파사드를 감싸기만 한다):
+파사드 직접 호출 (HTTP 어댑터는 이 파사드를 감싸기만 합니다):
 
 ```python
-from crk_model.service import ModelService
 from crk_model.core.config import Settings
+from crk_model.service import ModelService
 
-svc = ModelService(detector=MyTensorRTDetector(),        # Detector 프로토콜 구현
+svc = ModelService(detector=MyTensorRTDetector(),   # Detector 프로토콜 구현
                    settings=Settings.from_env(),
-                   startup_probe_frame=probe)            # 로드 실패 = 기동 실패 (fail-fast)
+                   startup_probe_frame=probe)       # 로드 실패 = 기동 실패
 
 svc.handle_multi_zone({"session_id": s, "state": "OPEN", "active_products": [...]})
 svc.handle_trigger({"zone": 1, "frames": {...}, "loadcells": [...], "video_paths": {...}})
-svc.process_pending()                                    # 전용 스레드에서 주기 호출
+svc.process_pending()                               # 전용 스레드에서 주기 호출
 svc.handle_multi_zone({"session_id": s, "state": "CLOSE"})   # 배리어 충족 시 결제 페이로드
 ```
 
-## Architecture
+> 저장소 폴더를 옮기거나 이름을 바꾼 뒤 import가 깨지면, editable 설치 경로가
+> 옛 위치를 가리키고 있는 것입니다: `pip install --no-deps -e .`를 다시 실행하고
+> `__pycache__`/`.pytest_cache`를 지우면 해결됩니다.
 
-### 1. 시스템 컨텍스트 — 외부 계약 (C4/C5)
+## 저장소 구조
 
-```mermaid
-flowchart LR
-    CAM["CRK-CAMERA<br/>(AVI 녹화 + 로드셀)"]
-    NODE["Node.js (8888)<br/>세션 오케스트레이션"]
-    subgraph HG["CRK-model-HG"]
-        direction TB
-        ADPT["adapters/ HTTP 바인딩 (무로직)<br/>FastAPI + AVI 디코드 + TensorRT Detector"]
-        FAC["ModelService 파사드<br/>handle_trigger / handle_multi_zone"]
-        ADPT --> FAC
-    end
-    PAY["CRK-PAYMENT"]
-
-    CAM -- "POST /trigger<br/>frames + loadcells + zone (+seq)" --> ADPT
-    NODE -- "POST /multi-zone<br/>OPEN/CLOSE + active_products" --> ADPT
-    FAC -- "FinalizedSettlement만<br/>(I10: interim은 TypeError)" --> NODE
-    NODE -. "확정 금액" .-> PAY
+```
+crk_model/          도메인 코어 + 어댑터 (약 10,400행 / 9패키지)
+├── core/           타입 · SensorProfile · 정책 · env 설정
+├── ingest/         로드셀 구간화(BOCPD) · 트리거 멱등성
+├── frames/         모션 게이트 · 손 래치 · 선행 디코드
+├── perception/     검출 필터 · 변위 증거 · 투표 앙상블 · 조기 종료
+├── judgment/       전략 라우터 (순수 판정)
+├── ledger/         이벤트 소싱 · close 정산 · 인과 배리어 · 아카이브
+├── gateway/        OPEN/CLOSE 상태기계 · 결제 페이로드
+├── service/        파사드 · 트리거 파이프라인 · 직렬 워커
+└── adapters/       FastAPI · TensorRT · AVI 디코드 · 진단 CLI 3종
+tests/              자동 검증 406건 (약 7,200행)
+scripts/            Jetson 셋업 · 엔진 변환 · 진단 도구 (crk_model 비의존)
+docs/               문서집 01~08 + devdoc(히스토리)
+*.env.example       설정 템플릿 3종
 ```
 
-### 2. 트리거 파이프라인 — 데이터 평면 (unpaced · event-driven)
+| 패키지 | 책임 | 세부 문서 |
+|---|---|---|
+| `core/` | 도메인 타입(I10 분리), 센서 프로파일, 에러 정책, env 설정 | [문서](crk_model/core/README.md) |
+| `ingest/` | 로드셀 시계열 → 무게 이벤트, 트리거 멱등성 | [문서](crk_model/ingest/README.md) |
+| `frames/` | 프레임 공급: 모션 게이트, 손 래치, 프리페치 | [문서](crk_model/frames/README.md) |
+| `perception/` | 필터 체인, 변위 증거, 투표, 조기 종료 | [문서](crk_model/perception/README.md) |
+| `judgment/` | 선언적 우선순위 전략 라우터 (순수 함수) | [문서](crk_model/judgment/README.md) |
+| `ledger/` | 이벤트 소싱, 정산 4층 + CLOSE 2차 패스, 저널·아카이브 | [문서](crk_model/ledger/README.md) |
+| `gateway/` | 문 세션 상태기계, 결제 페이로드 타입 강제 | [문서](crk_model/gateway/README.md) |
+| `service/` | 파이프라인 오케스트레이션, 단일 소비자 워커 | [문서](crk_model/service/README.md) |
+| `adapters/` | 장치 결합(전부 lazy import) + 진단 CLI | [문서](crk_model/adapters/README.md) |
 
-```mermaid
-flowchart TD
-    T["handle_trigger"] --> IDEM{"멱등성 I7<br/>MD5(zone+paths) TTL 5s"}
-    IDEM -- 중복 --> DROP["드롭"]
-    IDEM -- 신규 --> ENQ["SerialTriggerWorker.submit<br/>barrier.notify_enqueued ★I17①"]
-    ENQ --> Q["단일 소비자 큐 (I7 · C2)"]
+## 설정
 
-    Q --> SNAP{"ActiveProductStore<br/>allowlist?"}
-    SNAP -- "empty" --> FC["추론 차단 (I2 fail-closed)<br/>YOLO 호출 0"]
-    SNAP -- "current / last_valid" --> LC["LoadcellAnalyzer (D4) — 기본 BOCPD<br/>(2026-07-23 승격, plateau=롤백 스위치)<br/>stabilize 후 구간화 → WeightSegment[]"]
+기기 종류에 맞는 템플릿을 복사해 `.env`로 씁니다.
 
-    LC --> LW{"|delta| < 프로파일 게이트?"}
-    LW -- yes --> SKIP["저무게 스킵 (QA Q8)<br/>YOLO 호출 0"]
-    LW -- no --> MG["MotionGate (D6/L1)<br/>absdiff + 손 래치(I16) + keepalive"]
-    MG -- 통과 프레임만 --> DET["Detector (어댑터)"]
-    DET --> FILT["FilterChain 4단 (conf 하한 없음 — I4)<br/>side_roi · vertical_roi(냉동 dual-top)/top_roi(냉장)<br/>hand_conf · hand_path"]
-    FILT --> VOTE["VotingEnsemble + MotionEvidence<br/>변위 없는 카메라×클래스 표는 combine에서 몰수<br/>분모 = 게이트 통과 프레임"]
-    VOTE --> ET{"EarlyTerminator (D7/L2)<br/>removal & 비freezer 한정 (I15)"}
-    ET -- 수렴 --> STOP["추론만 중단"]
-    ET -- 미수렴 --> MG
+| 템플릿 | 용도 |
+|---|---|
+| `refrg.env.example` | **냉장 기기 실기 확정값** |
+| `freezer.env.example` | **냉동 기기 실기 확정값** |
+| `.env.example` | 전체 노브 카탈로그 + 튜닝 가이드 (레퍼런스) |
 
-    VOTE --> RT["JudgmentRouter (D3/L5)<br/>선언적 우선순위 · Stage/Strategy 분리<br/>SensorProfile 주입 · 全결과 I6 강제"]
-    FC --> EV
-    SKIP --> EV
-    RT --> EV["TriggerEvent (불변, I1: 예외→error)<br/>EventLog + EventJournal(JSONL)"]
-    EV --> PROC["barrier.notify_processed ★I17①"]
-```
+반드시 확인할 값:
 
-### 3. 세션 확정 — 제어 평면 (time-paced → causal barrier로 승격, I17)
+| 환경변수 | 왜 |
+|---|---|
+| `MODEL__VISION__YOLO_MODEL_PATH` | 그 기기에서 빌드한 `.engine` 경로 |
+| `MODEL__MACHINE__CABINET_TYPE` | 냉동 기기는 반드시 `freezer` — 미설정 시 전 존이 냉장(±5g) 프로파일로 판정되어 오판정이 재발합니다 |
+| `MODEL__VISION__CAMERA_LAYOUT` | 냉장 `dual` / 냉동 실기 `dual_top_proxy` |
 
-```mermaid
-stateDiagram-v2
-    [*] --> Idle
-    Idle --> Active: OPEN<br/>스냅샷 갱신 + 새 배리어
-    Active --> Active: OPEN 재폴링 → interim<br/>(InterimSummary 타입 — 결제 불가 I10)
-    Active --> PendingClose: CLOSE
-    PendingClose --> PendingClose: 배리어 미충족<br/>(queue_pending / loadcell_unstable / seq_gap)
-    PendingClose --> Finalized: ★배리어 충족 (I17)<br/>enqueued==processed ∧ 로드셀 안정 ∧ seq 도착<br/>→ CloseSettler (즉시, debounce 없음)
-    PendingClose --> Error: 상한 타임아웃 만료<br/>= 에러 세션 (D9 fail-closed)<br/>부분 확정·유실 확정 금지
-    Finalized --> Finalized: 재폴링 → 동일 정산 객체 (I11)
-    Error --> [*]
-    Finalized --> [*]: build_payment_payload<br/>(FinalizedSettlement만 통과)
+전체 환경변수 카탈로그와 현장 튜닝 절차는 [04. 설정 레퍼런스](docs/04-configuration.md).
+게이트·tolerance·구간화 임계는 env가 아니라 `SensorProfile`(코드) 소속입니다 — 존
+타입별 물리 특성이므로 배포 설정으로 흔들리지 않게 합니다.
 
-    note right of PendingClose
-        현행 CRK-model: 3s/1s 고정 debounce
-        HG: 인과 배리어 + 상한 타임아웃
-        큐가 비면 대기 0초 확정
-    end note
-```
+## 운영·진단 도구
 
-### 4. close-time 단일 정산기 (D5/L6) — 반품 복구 4층의 통합
+| 명령 | 용도 |
+|---|---|
+| `model-service-hg` | 서비스 기동 (FastAPI :8002) |
+| `label-session` | 실험 직후 정답 라벨 기입 (무취출은 `--none`) |
+| `analyze-sessions` | 아카이브 오프라인 실측 리포트 (과금 정오·임계 제안·shadow 관측) |
+| `render-session` | 기록된 bbox를 AVI 위에 오버레이해 육안 검증 |
+| `scripts/live_engine_preview.py` | 카메라+엔진 실시간 프리뷰 |
+| `scripts/detection_heatmap.py` | 존×프레임 위치별 검출 분포 계측 |
+| `scripts/camera_luma_probe.py` | 내부 AE·노출 통계 진단 |
 
-```mermaid
-flowchart TD
-    EVS["세션 전체 TriggerEvent[]"] --> ERR{"에러 이벤트 존재?"}
-    ERR -- "yes (I13)" --> POL{"ErrorSessionPolicy (D9)"}
-    POL -- "BLOCK_PAYMENT (기본)" --> BLK["blocked=true → 결제 불가"]
-    POL -- "FINALIZE_ERROR_FREE_ZONES<br/>(Node 합의 시)" --> EXC["에러 존 제외 + 기록"]
-    ERR -- no --> PRE
-    EXC --> PRE
+세션이 확정될 때마다 판정 근거 전체(후보·득표·전략·탈락 사유)가 세션 아카이브
+YAML로 남습니다 — **모든 청구는 사후 재구성이 가능해야 한다**는 원칙입니다.
+읽는 방법은 [05. 운영·진단 가이드](docs/05-operations.md).
 
-    PRE["⓪ 판정 보정 2차 패스 — basket 축적 전<br/>세션 고스트 원장 강등 (ghost_ledger.py, 기본 shadow)<br/>→ 교차존 비전 오염 페널티 (cross_zone.py, 기본 ON)"] --> P1
-    P1["① 동존 즉시: removal 축적<br/>return 무게 매칭 차감"] --> P2
-    P2["② net-delta 교정<br/>과잉 청구 감산 (미매칭 반품 소거)"] --> P3
-    P3["③ 교차존: 미매칭 반품을<br/>타 존 장바구니와 매칭"] --> P4
-    P4["④ freezer 재solve: 부호있는 net<br/>개수 게이트 ±15g (I3) 실패 시 증분 유지<br/>×N 스냅·게이트 실패 시 vision_combo 2종 조합 중재"] --> OUT
+## 개발 규칙
 
-    OUT["FinalizedSettlement<br/>count≥0 (I14) · notes[] (I8)<br/>멱등 캐시 (I11)"]
-```
+이 저장소를 이어받아 수정할 때 반드시 지켜야 하는 것들입니다.
 
-### 5. 판정 전략 라우터 (L5) — 전략 관계도
+1. **fail-closed를 깨지 마세요** — 애매하면 청구하지 않고, 에러 세션은 결제를
+   차단하고, 무게 변화를 전량 설명하지 못하는 판정은 PARTIAL로 강등합니다.
+2. **새 기제는 shadow(관측만)로 먼저** 배포하고, 실기 라벨 실측으로 승격을
+   판정합니다. 승격은 env 한 줄, **폐기는 코드 삭제**입니다(".env에서 0으로 꺼두기"는
+   코드 기본값과 어긋나 부활 경로를 남깁니다 — 실제 사고 전례가 있습니다).
+3. **폐기 근거는 [07번 문서](docs/07-rejected-and-retired.md)에 기록**합니다.
+   남기지 않으면 같은 시도가 반복됩니다.
+4. **env를 추가·삭제하면** 템플릿 3종과 [04번 문서](docs/04-configuration.md)를
+   같은 커밋에서 갱신합니다.
+5. **모듈 경계 = 테스트 경계** — 의존 방향(core ← 도메인 ← service ← adapters)을
+   거스르지 마세요. 코어에 런타임 의존성을 추가하지 마세요.
 
-`judgment/router.py`의 `default_pipeline()` — 위에서 아래로 **첫 non-None이 즉시
-반환**된다 ("누적 + 특이도 우선", QA Q2). Stage는 판정하지 않고 컨텍스트만
-변형한다. 모든 COMPLETE는 라우터에서 `enforce_full_delta_match`(I6: delta 전량
-설명 못 하면 PARTIAL 강등)를 거친다. 세션 아카이브 YAML의
-`judgment.strategy/reason`과 `[OPS][CLOSE]`의 `judgments=`가 이 이름들이다.
+## 관련 저장소
 
-```mermaid
-flowchart TD
-    CTX["JudgmentContext<br/>zone·SensorProfile·delta·segments<br/>vision_candidates·active_products"] --> S0
-
-    subgraph SPEC["특이도 우선 구간 (특수 전제가 앞)"]
-        S0{"0 vision_only<br/>로드셀 신뢰 불가"} -- 해당 --> R0["최다 득표 후보 count=1<br/>conf×0.7"]
-        S0 -- 아니오 --> S1{"1 freezer_vision_first<br/>freezer & removal & 후보 있음"}
-        S1 -- "단일/2정체성 조합<br/>±15g 게이트 통과 (I3)" --> HIT
-        S1 -- 실패 --> S2["2 augment_stage_weight_gate (Stage)<br/>removal 세그먼트 목표무게 힌트 주입"]
-        S2 --> S3{"3 segment_weight_matching<br/>제거 구간 ≥2 & 후보 있음"}
-        S3 -- "구간별 개별 매칭 합산" --> HIT
-        S3 -- 실패 --> S35{"3.5 stage_count_combo<br/>(후보 없음 전용)"}
-    end
-
-    subgraph NOCAND["후보 없음 체인"]
-        S35 -- "세그먼트×동일상품 n개" --> HIT
-        S35 -- 실패 --> S4{"4 no_candidate_fallback<br/>후보 0 (항상 확정 반환)"}
-        S4 -- "freezer → 억제 (QA Q1)" --> SUP["NO_DETECTION<br/>loadcell_identity_suppressed"]
-        S4 -- "냉장 → weight_only<br/>단일 상품 (p,n) 유일 매칭만" --> HIT
-        S4 -- "복수 매칭 모호" --> AMB["NO_DETECTION<br/>weight_only_ambiguous"]
-    end
-
-    subgraph MAIN["기본 경로 (후보 있음)"]
-        S4 -.후보 있으면 skip.-> S5{"5 min_weight_gate<br/>|delta| < 프로파일 최소"}
-        S5 -- 미미 --> ND1["NO_DETECTION"]
-        S5 -- 통과 --> S6{"6 same_weight_collision_guard<br/>동일 무게대 후보 ≥2"}
-        S6 -- "최고 conf 채택" --> HIT
-        S6 -- 해당없음 --> S7{"7 strict<br/>무게 우선 백트래킹 조합"}
-        S7 -- "조합 발견 (I5·I12 강제)" --> HIT
-        S7 -- 실패 --> S75{"7.5 stage_count_combo (재시도)"}
-        S75 -- 성공 --> HIT
-        S75 -- 실패 --> S8{"8 same_product_count<br/>동일 상품 n개"}
-        S8 -- 성공 --> HIT
-    end
-
-    subgraph RELAX["relaxed 계열 (COMPLETE 격상 우선 → partial은 최후)"]
-        S8 -- 실패 --> S9{"9 relaxed<br/>combination tolerance×2"}
-        S9 -- 성공 --> HIT
-        S9 -- 실패 --> S91{"9.1 relaxed_loadcell_only<br/>후보-allowlist 완전 불일치 & 냉장"}
-        S91 -- 성공 --> HIT
-        S91 -- 해당없음 --> S92{"9.2 vision_first_identity_partial<br/>freezer 전용"}
-        S92 -- "무게 검증되면 COMPLETE<br/>아니면 정체성만 PARTIAL" --> HIT
-        S92 -- 해당없음 --> S93{"9.3 detected_single_item_fallback<br/>사실상 단일 감지 & 무게 설명"}
-        S93 -- 성공 --> HIT
-        S93 -- 실패 --> S94{"9.4 relaxed_partial<br/>최다 득표 count=1 PARTIAL"}
-        S94 -- 성공 --> HIT
-        S94 -- 실패 --> S10["10 forced_final<br/>NO_DETECTION (사유 명시, I8)"]
-    end
-
-    HIT["채택"] --> I6{"enforce_full_delta_match (I6)<br/>delta 전량 설명?"}
-    I6 -- yes --> DONE["COMPLETE"]
-    I6 -- no --> PART["PARTIAL 강등<br/>(부분 설명 과금 금지)"]
-
-    classDef gate fill:#fff3d6,stroke:#e0a800;
-    classDef nd fill:#fee,stroke:#c66;
-    class S5,I6 gate;
-    class SUP,AMB,ND1,S10 nd;
-```
-
-원본(다이어그램 5)과 의도적으로 다른 지점: relaxed 하위 순서(9.1~9.4)는 원본에서
-자체 partial이 먼저 반환돼 도달 불가능하던 폴백들을 "무게로 뒷받침된 count 격상 >
-무검증 count=1" 원칙으로 재배치한 것 (`router.py` docstring에 근거 기록).
-freezer(weight_is_discriminative=False)에서는 무게만으로 정체성을 판정하는 경로
-전부(weight_only·relaxed_loadcell_only)가 억제된다 — 로드셀 오차 5~15g (QA Q1).
-
-## Module Map
-
-모듈 경계 = 테스트 경계 (D10). 화살표 방향으로만 의존한다.
-
-요청 흐름 한 줄 요약: `trigger → queue → pipeline(decode→gate→YOLO→filter→vote→judge)
-→ event → close 정산 → 결제 페이로드`.
-
-| 모듈 | 책임 | 주요 파일 | 상태성 | 원본 대응 | 테스트 |
-| --- | --- | --- | --- | --- | --- |
-| `core/` | 타입(I10 분리), SensorProfile(D3), 에러 정책(D9), env 설정 | `types.py`, `profiles.py`(SensorProfile), `config.py`, `policy.py` | 무상태 | core/config.py | (전역) |
-| `ingest/` | 트리거 멱등성(I7), 로드셀 구간화 → WeightSegment[] (D4) | `loadcell.py`, `idempotency.py` | 무상태 | trigger.py 일부 | test_ingest |
-| `frames/` | 프레임 번들, 모션 게이트(L1) + 손 래치(D6/I16), 배치 수집(D8·기본 OFF) | `bundle.py`, `motion_gate.py`(L1), `batch.py` | 트리거 내 | frame_extractor | test_frames |
-| `perception/` | Detector 프로토콜, 필터 체인, 모션 변위 증거, 투표, 조기 종료(L2) | `detector.py`(Detector 프로토콜), `filters.py`, `motion_evidence.py`(변위 몰수), `voting.py`, `early_termination.py`(L2) | 트리거 내 | yolo_wrapper, video_processor | test_perception |
-| `judgment/` | Stage/Strategy 분리, 선언적 우선순위 라우터(L5), 다이어그램5 분기 전략, strict 매처 | `interfaces.py`(Stage\|Strategy), `router.py`(L5), `strategies.py`(다이어그램5 분기), `strict.py`(strict 매처) | 무상태 (순수) | decision_engine (10.4k줄 해체) | test_judgment |
-| `ledger/` | 이벤트 소싱, close-time 단일 정산기(L6) + CLOSE 2차 패스(교차존 페널티·고스트 원장·트레이 메모리), 인과 배리어(I17), 저널, 세션 아카이브 | `events.py`, `settler.py`(L6 단일 정산기), `cross_zone.py`, `ghost_ledger.py`, `tray_memory.py`, `barrier.py`(I17), `journal.py`(일자 로테이션), `archive.py`(세션 YAML) | 영속 | session/* 통합 | test_ledger |
-| `gateway/` | OPEN/CLOSE 상태기계, 결제 페이로드(I10 타입 강제) | `state_machine.py`(OPEN/CLOSE 상태기계, 결제 페이로드) | 상태기계 | multi_zone.py | test_gateway |
-| `service/` | 파이프라인 7단계 오케스트레이션, 단일 소비자 워커, 스냅샷(I2), 파사드 | `model_service.py`(파사드), `pipeline.py`(7단계), `worker.py`(단일 소비자), `snapshot.py`(I2) | 조립 | trigger_service, api/routes | test_service |
-| `adapters/` | 장치 결합: FastAPI, TensorRT Detector, AVI 스트리밍 디코드, 진입점 (전부 lazy import) | `http_app.py`(FastAPI), `yolo_detector.py`(TensorRT), `avi_frames.py`(스트리밍 디코드), `serve.py`(진입점) | I/O 경계 | yolo_wrapper, frame_extractor, main.py | test_adapters |
-| `scripts/` | 개발/운영 보조 스크립트 (패키지 외부, `crk_model` 비의존) | `live_engine_preview.py`, `setup_jetson.sh` 등 | — | — | — |
-
-## Design Decision Map (D1~D10 → 구현)
-
-| 결정 | 권장안 | 구현 위치 |
-| --- | --- | --- |
-| D1 확정 모델 | 인과 배리어(I17), debounce → 상한 타임아웃 강등, 만료 시 에러 세션 | `ledger/barrier.py`, `gateway/state_machine.py` |
-| D2 공통 시간축 | 카메라 seq watermark (선택 — 없어도 동작) | `barrier.set_close_watermark`, `TriggerEvent.seq` |
-| D3 판정 구조 | Stage/Strategy 분리 + 선언적 순서(다이어그램5 보존) + SensorProfile + 텔레메트리 | `judgment/` |
-| D4 구간화 위치 | ingest 소속, stabilize 후 순서 고정 — primary는 BOCPD(2026-07-23 승격), plateau는 롤백 스위치 | `ingest/loadcell.py`, `ingest/bocpd.py` |
-| D5 정산 구조 | 이벤트 소싱 + close 단일 정산기 (구/신 병행 diff는 승격 완료로 은퇴) | `ledger/settler.py`, `journal.py` |
-| D6 프레임 공급 | 모션 게이트 + 손 래치 + keepalive + freezer 별도 임계 | `frames/motion_gate.py` |
-| D7 조기 종료 | removal·비freezer 한정, judge()와 tolerance 단일 소스 | `perception/early_termination.py` |
-| D8 배치 | 설계만, 기본 OFF, 고정 배치+패딩, 카메라 분리 | `frames/batch.py` |
-| D9 에러 세션 | 계약 enum, 기본 fail-closed | `core/policy.py` |
-| D10 모듈 경계 | 경계 = 테스트 경계 | 패키지 구조 |
-
-## Invariant Coverage (I1~I17)
-
-전부 실제 사고(오과금·매출 누락)의 재발 방지책이며, 예외 처리가 아니라 구조로 표현했다:
-
-- **I1** 처리 실패 → `status="error"` 이벤트 (`pipeline.process` except 절) · **I2** 빈 allowlist fail-closed + last_valid (`service/snapshot.py`)
-- **I3** freezer ±15g 게이트 — 판정·정산 양쪽 · **I4** conf 하한은 투표 결합 후에만 · **I5/I12** 매처 탐색 공간에서 원천 배제
-- **I6** `enforce_full_delta_match` 라우터 전건 적용 · **I7** 멱등 TTL + 단일 소비자 큐
-- **I8** reason/notes/pending/trace 사유 코드 · **I9** 시나리오 계약은 G1에서 인수 (P1·P2 후)
-- **I10** Interim/Finalized 타입 분리 — 결제 빌더가 TypeError로 거부 · **I11** 정산 멱등 캐시 + 확정 후 이벤트 거부
-- **I13** 에러 세션 무성 확정 금지 (D9) · **I14** `_Basket.remove_one`이 음수 차단
-- **I15** 조기 종료 removal·비freezer 한정 · **I16** 손 래치 활성 중 스킵 금지 · **I17** 인과 배리어 확정
-
-## 냉장·냉동 겸용
-
-냉동 실기로 검증해 온 코드베이스를 그대로 냉장 실기에 올린다 — 캐비닛 분기는
-전부 아래 세 가드 뒤에 격리되어 있어 냉장 투입에 코드 수정이 필요 없다:
-
-- **SensorProfile (`weight_is_discriminative`)** — 냉장 존은 무게가 정체성
-  판별자(±5g)라 strict 중심 **무게-우선 체인**이 담당한다 (원본 동형).
-  냉동 존은 로드셀 오차(5~15g, QA Q1) 때문에 무게가 **거부권**만 갖고
-  선택은 vision이 한다 (FreezerVisionFirst). 냉동 전용 로직(판정 I-V 노브·
-  우도 shadow·close 4층 재solve 등)은 precondition에서 스스로 꺼진다.
-- **`MODEL__MACHINE__CABINET_TYPE`** — 기기 단위 기본 프로파일. 존 수 가정은
-  어디에도 없다(동적) — 존이 몇 개든 트리거의 zone 필드로만 동작한다.
-  냉장 기기의 냉동 코너는 `MODEL__ZONES__FREEZER`(예: `9,10`) 존 단위
-  오버라이드로 처리한다.
-- **`MODEL__VISION__CAMERA_LAYOUT`** — 냉장 `dual`(top+side) / 냉동 실기
-  `dual_top_proxy`(side 스트림도 top 뷰). 냉장 물리 구성이 top 1대 + 존별
-  side 5대(6카메라)여도 Edge가 존→{top, side} 2스트림으로 매핑해 주므로
-  모델 계약은 불변이다.
-
-env 템플릿도 이원화되어 있다: `.env.example` = **냉장 기본 템플릿**
-(`CABINET_TYPE=refrigerated`, `TOP_ROI_ENABLED=1`), `freezer.env.example` =
-냉동 실기 확정값.
-
-## Configuration
-
-| 환경변수 | 기본값 | 의미 |
-| --- | --- | --- |
-| `MODEL__CLOSE__BARRIER_TIMEOUT_S` | 10.0 | I17 상한 타임아웃 (정상 경로 아님) |
-| `MODEL__CLOSE__GRACE_S` | 3.0 | CLOSE 유예 창 — 문 닫힘/마지막 트리거 후 이 시간 동안 확정 보류 (카메라가 쓰는 중인 AVI의 late trigger 유실 방지, 이슈 #8) |
-| `MODEL__VISION__BATCH_SIZE` | 1 | D8 배치 (1 = OFF) |
-| `MODEL__ZONES__FREEZER` | (없음) | freezer 프로파일 존 목록 (예: `9,10`) — cabinet_type 기본 프로파일에 대한 존 단위 오버라이드 |
-| `MODEL__MACHINE__CABINET_TYPE` | `refrigerated` | 기기 단위 기본 프로파일 `refrigerated`\|`freezer`. **냉동 기기는 반드시 `freezer`로 설정할 것** — 미설정 시 전 존이 냉장(±5g) 프로파일로 판정되어 이슈 #6과 같은 오판정이 재발한다 |
-| `MODEL__SESSION__ERROR_POLICY` | `block_payment` | D9 (변경은 Node 합의 P4 필요) |
-| `MODEL__TRIGGER__IDEMPOTENCY_TTL_S` | 5.0 | I7 멱등 TTL |
-| `MODEL__VIDEO__DECODER` | `auto` | 비디오 디코더 `auto`\|`ffmpeg`\|`opencv` (상세: Operations & Diagnostics) |
-| `MODEL__SESSION__ARCHIVE_DIR` | `data/sessions` | 세션 확정 YAML/JSON 아카이브 루트, 빈 문자열이면 비활성 (상세: Operations & Diagnostics) |
-| `MODEL__SESSION__ARCHIVE_RETENTION_DAYS` | 14 | 세션 아카이브 보존 기간(일) |
-| `MODEL__LEDGER__JOURNAL_PATH` | `logs/events.jsonl` | 이벤트 저널 경로, 일자 로테이션 |
-| `MODEL__LEDGER__JOURNAL_RETENTION_DAYS` | 14 | 이벤트 저널 보존 기간(일) |
-| `MODEL__VISION__TOP_CONFIDENCE_THRESHOLD` | 0.70 | top 카메라 투표 진입 conf 임계 (원본 동명 설정). 후보가 안 잡히면 0.50→0.35 순으로 낮춰 조정 — `.env.example`의 vote_summary 튜닝 가이드 참조 |
-| `MODEL__VISION__SIDE_CONFIDENCE_THRESHOLD` | 0.70 | side 카메라 투표 진입 conf 임계 |
-| `MODEL__VISION__MIN_VOTE_RATIO` | 0.05 | 후보 채택 최소 투표율 (COUNT와 둘 중 하나만 충족하면 유지) |
-| `MODEL__VISION__MIN_VOTE_COUNT` | 3 | 후보 채택 최소 절대 투표 수 |
-| `MODEL__VISION__CONF_FLOOR` | 0.0 | 결합 후 weighted_conf 하한 (원본에 없는 안전판 — 진입 컷을 0으로 낮출 때만 사용) |
-| `MODEL__VISION__SIDE_ROI_MAX_CENTER_X` | 400 | side 카메라 ROI 경계 (center_x ≥ 값이면 존 바깥으로 제거, center-crop 480 좌표계 — 원본 left-crop 좌표계의 side_roi_x_max 값을 그대로 이식, 2026-07-24 center-crop 전환으로 실기 재측정 필요) |
-| `MODEL__VISION__MOTION_EVIDENCE` | 1 | 모션 변위 증거 — 변위 없는 카메라×클래스 표를 결합에서 몰수 (원본 변위 필터 이식, 진열/배경 오투표 차단) |
-| `MODEL__VISION__MOTION_EVIDENCE_FLOOR_PX` | (프로파일) | 변위 하한 px — 미설정 시 냉장 10 / 냉동 12 (원본 운영값) |
-| `MODEL__VISION__HELD_TRACK_DEMOTION` | `shadow` | T2 held 트랙 강등 — carried-in(프리롤부터 지속 관측) 트랙 표 몰수. `off`\|`shadow`(관측만)\|`active` |
-| `MODEL__VISION__HELD_TRACK_MIN_HEAD` | 5 | held 판정 head 관측 임계 (0713 §10 실측 분리 하한) |
-| `MODEL__VISION__TUBE_IDENTITY` | `shadow` | 갭 4/T2' 튜브 정체성 다수결 — 한 궤적 위 결정적 소수 클래스 표 몰수 (의류 산탄 대응). `off`\|`shadow`\|`active` |
-| `MODEL__VISION__VOTE_RECOVERY` | `shadow` | 갭 2 저신뢰 표 회수 — 변위 통과 트랙 + 진입 표 앵커 조건의 저신뢰 표 회수 (빠른 취출 표 기아 대응). `off`\|`shadow`\|`active` |
-| `MODEL__VISION__VOTE_RECOVERY_FLOOR` | 0.35 | 회수 후보 최소 conf — 미만은 회수 대상도 아님 |
-| `MODEL__VISION__TRACK_MIN_HITS` | 0 | 갭 1 probation — 총 관측 < N 트랙의 표 몰수 (0=off, shadow 계측은 tube_shadow.short) |
-| `MODEL__VISION__TRACK_MAX_GAP` | 0 | 갭 1 트랙 소멸 — 공백 > N 추론프레임 트랙 사망 (0=무소멸) |
-| `MODEL__JUDGMENT__LIKELIHOOD_SHADOW` | 1 | 무게 우도 score shadow (Phase 1, 판정 무변경) — 냉동 이벤트별 score 순위와 현행 판정의 diff를 아카이브 `trace.likelihood_shadow`에 기록 (`docs/0722_weight_likelihood_design.md`) |
-| `MODEL__JUDGMENT__LIKELIHOOD_K` | 20.0 | 무게 우도비 상한(clamp) — 1이면 무게 무력(거부권만). conformal 보정 대상 |
-| `MODEL__JUDGMENT__LIKELIHOOD_SIGMA_DB` | 5.0 | DB unit_weight 개당 편차(g) — 아카이브 잔차 실측으로 보정 |
-| `MODEL__VISION__CAMERA_LAYOUT` | `dual` | `dual`(top+side) \| `dual_top_proxy`(냉동 실기 — side 스트림도 top 뷰). freezer와 조합 시 두 카메라 모두 수직 ROI 적용 + side x-ROI 생략 (P1-5 이식) |
-| `MODEL__VISION__FREEZER_ROI_VERTICAL_REGION` | `upper` | dual-top 수직 ROI가 유지할 절반 (`upper`\|`lower`), 분할선은 `FREEZER_ROI_Y_SPLIT`(300, center-crop 480 좌표계 — 세로축이라 crop 원점 이동 영향 없음, 원본 운영값 240에서 2026-07-24 상향) |
-| `MODEL__VISION__TOP_ROI_ENABLED` | 0 | 냉장(dual) 레이아웃 top 카메라 하단 ROI — delta 있을 때 center_y ≥ 240만 유지 (원본 기본 true — 코드 기본은 보수적 off, 냉장 템플릿 `.env.example`은 1로 켠다) |
-| `MODEL__VISION__HAND_CONFIDENCE_THRESHOLD` | 0.30 | 손 검출 conf 하한 (P1-7) — 유령 손의 래치·hand_path 오염 차단. 0 = off |
-| `MODEL__LOADCELL__ANALYZER` | `bocpd` | primary 로드셀 분석기 (`bocpd`\|`plateau`) — 2026-07-23 bocpd 정식 승격 (냉동 실측 63관측/2 mismatch, 이슈 #14). plateau는 롤백 스위치 |
-| `MODEL__VISION__MIN_VOTE_SHARE` | 0.1 | 1위 득표 대비 상대 하한 — 저득표 후보의 "무게 filler" 채택 차단 (이슈 #10). 0 = off |
-| `MODEL__VISION__CONF_WEIGHT_TOP`/`_SIDE`/`_TOP_ONLY`/`_SIDE_ONLY`, `CONF_COMMON_CLASS_BONUS` | 0.60/0.40/0.60/0.40/0.2 | 카메라 conf 결합 가중 5종 (원본 combine() 동형 산식 — 냉동 확정값은 `freezer.env.example`) |
-| `MODEL__JUDGMENT__SINGLE_SHARE`/`COMBO_SHARE`/`NEAR_FACTOR`/`REFIT_SHARE` | 0.5/0.3/2.0/0.1 | 판정 I-V 노브 — FreezerVisionFirst 단계별 임계 (이슈 #15, 냉동 존 전용) |
-| `MODEL__JUDGMENT__COUNT_UNIT_SLACK` | 5.0 | 개수당 게이트 가산(g) — gate_n(n)=gate+slack×(n−1), 판정·정산(4층) 공용 산식 (이슈 #16) |
-| `MODEL__JUDGMENT__CONF_OVERRIDE` / `CONF_MARGIN` | 0.9 / 0.15 | 무게 중재 conf 자격 문턱 / conf가 득표 서열을 뒤집는 최소 격차 (이슈 #16, 2.0 = 비활성) |
-| `MODEL__JUDGMENT__REFIT_ARB_CONF_FLOOR` | 0.8 | refit 복수 적합 중재의 절대 conf 하한 (2.0 = 중재 비활성) |
-| `MODEL__JUDGMENT__PARTIAL_MIN_CONFIDENCE` | 0.18 | 무게 미검증 count=1 partial 청구의 conf 하한 (원본 multi_kind_min_confidence 동형) — 저증거 오과금 차단. 0 = off |
-| `MODEL__JUDGMENT__TRAY_PRIOR`/`_BOOST`/`_PENALTY` | 1 / 0.7 / 2.5 | 세션 트레이 메모리 prior (`ledger/tray_memory.py`) — OPEN마다 리셋(정적 planogram 아님), 현재는 우도 shadow 소비 전용 |
-| `MODEL__CLOSE__VISION_COMBO` | 1 | freezer close 재solve의 비전 조합 중재 — 단일 종 ×N 스냅·게이트 실패 시 자격 표 2종 조합 우선 (0723 이슈 #17) |
-| `MODEL__CROSS_ZONE__PENALTY_ENABLED` | 1 | 교차존 비전 오염 페널티 (CLOSE 2차 패스) — Phase 3 승격 완료(2026-07-21), 기본 ON |
-| `MODEL__CROSS_ZONE__REPLAY_S`/`TRIGGER_S`/`EPSILON_S`/`ALPHA`/`SOURCE_CONF_MIN` | 4.0/4.0/1.0/0.5/0.35 | 오염 창·soft 페널티 세부 (`docs/cross_zone_penalty.md`) |
-| `MODEL__GHOST__MODE` | `shadow` | 세션 고스트 원장 (CLOSE 2차 패스, `ledger/ghost_ledger.py`) — 옷 프린트 유령 표 강등. `off`\|`shadow`\|`active`, 승격은 라벨 실측 후 |
-| `MODEL__GHOST__MIN_ZONES`/`VOTE_FLOOR`/`ALPHA` | 2 / 3 / 0.5 | 유령 판정 최소 존 수 · 자격 표 하한 · soft 페널티 계수 |
-
-위 표는 핵심 노브만 실었다 — **전체 env 목록과 튜닝 가이드는
-`.env.example`(냉장 기본 템플릿)·`freezer.env.example`(냉동 실기 확정값) 참조**
-(`cp .env.example .env` 또는 `cp freezer.env.example .env` 후 수정).
-게이트·tolerance·구간화 임계는 env가 아니라 `SensorProfile`(코드) 소속 —
-존 타입별 물리 특성이므로 배포 설정으로 흔들리지 않게 한다 (C3).
-
-## Verification Gates
-
-| 게이트 | 상태 | 내용 |
-| --- | --- | --- |
-| G0 정적/단위 | ✅ 383 passed (2026-07-24, +3 ffmpeg 환경 의존 스트리밍 테스트 제외) | 불변식 전건 + E2E + 필터/게이트/정산 + CI(ruff+pytest) |
-| G1 판정 등가성 | ⏳ P1·P2 대기 | 924 시나리오 계약 인수 |
-| G2 게이팅 검증 | ⏳ P1 대기 | 현장 AVI 코퍼스 전체 파이프라인 재실행 diff |
-| G2.5 정산 등가성 | 훅 완성 (`EventJournal.replay`) | 세션 아카이브(P2) replay |
-| G3 프로토콜 계약 | 파사드 계약 고정 | interim 의미론 Node 합의(P3) 별도 |
-| G4 장치 검증 | ⏳ Jetson 반입 | 파워모드·스로틀링·OOM·24h soak |
+| 저장소 | 역할 | 이 서비스와의 접점 |
+|---|---|---|
+| CRK-CAMERA | 존별 AVI 녹화 + 로드셀 샘플링 | `POST /trigger` 송신 |
+| Node.js 서버 | 쇼핑 세션 오케스트레이션 | `POST /api/judge/multi-zone` 송수신 |
+| CRK-IO-BOARD | 로드셀 하드웨어 인터페이스 | 5g 양자화·폴링 주기의 물리 계약 |
+| Edge_Environment | 엣지 실행 환경·녹화 디렉토리 | 녹화 경로 소유자 (엣지 워터마크 근거) |
+| CRK-model (레거시) | 참조 원본 서비스 | 외부 계약 호환 대상 |

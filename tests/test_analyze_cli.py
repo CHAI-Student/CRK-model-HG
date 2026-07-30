@@ -38,58 +38,31 @@ def _gt(*items, note=""):
 
 
 class TestAnalyze:
-    def test_old_archive_loadcell_shadow_ignored(self):
-        # BOCPD shadow 은퇴 (2026-07-24, primary 승격 완료) — 구 아카이브에
-        # 남은 loadcell_shadow 필드는 예외 없이 조용히 무시된다 (관용 파싱).
+    def test_old_archive_retired_shadow_fields_ignored(self):
+        # 폐기된 shadow 기제(BOCPD 2026-07-24, 무게 우도·tray prior·튜브 다수결
+        # 2026-07-30)의 구 아카이브 필드는 예외 없이 조용히 무시된다 —
+        # 아카이브는 코드 버전이 섞이므로 관용 파싱이 계약이다.
         doc = _doc(triggers=[_trigger(trace={
             "loadcell_shadow": {
                 "analyzer": "bocpd", "delta": -170.0, "delta_std": 4.9,
                 "primary_delta": 0.0, "primary_reason": "insufficient_stable_regions",
                 "mismatch": True,
-            }
+            },
+            "likelihood_shadow": [{
+                "scorer": "weight_likelihood", "mismatch": True,
+                "current": {"items": [[27, 1]], "score": -5.6},
+                "top": {"items": [[13, 1]], "score": -0.6},
+                "tray_prior": {13: -2.5},
+            }],
+            "vote_summary": {"tube_shadow": {
+                "by_class": {"13": {"votes": 8, "shadow": 0, "minority": 8}},
+                "top_current": 13, "top_shadow": None, "changed": True,
+            }},
         })])
         report = analyze([doc])
-        assert "bocpd" not in report and report["sessions"] == 1
-
-    def test_likelihood_labeled_eval_score_correct(self):
-        # 현행 판정 27×1, score 1위 40×1, GT 40×1 → score만 정답
-        doc = _doc(
-            ground_truth=_gt({"zone": 2, "class_id": 40, "count": 1}),
-            triggers=[_trigger(trace={
-                "likelihood_shadow": [{
-                    "scorer": "weight_likelihood",
-                    "mismatch": True,
-                    "current": {"items": [[27, 1]], "score": -1.0},
-                    "top": {"items": [[40, 1]], "score": -0.2},
-                }]
-            })],
-        )
-        report = analyze([doc])
-        ev = report["likelihood"]["labeled_eval"]
-        assert ev == {"score_correct": 1, "current_correct": 0, "both_wrong": 0}
-        rec = report["likelihood"]["mismatches"][0]
-        assert rec["score_correct"] is True and rec["current_correct"] is False
-
-    def test_likelihood_multi_channel_entries_aggregate(self):
-        # 멀티트레이: 채널별 entry 합이 존 GT와 비교 단위
-        doc = _doc(
-            ground_truth=_gt(
-                {"zone": 2, "class_id": 27, "count": 1},
-                {"zone": 2, "class_id": 40, "count": 1},
-            ),
-            triggers=[_trigger(trace={
-                "likelihood_shadow": [
-                    {"mismatch": False,
-                     "current": {"items": [[27, 1]]}, "top": {"items": [[27, 1]]}},
-                    {"mismatch": True, "channel": 1,
-                     "current": {"items": []}, "top": {"items": [[40, 1]]}},
-                ]
-            })],
-        )
-        report = analyze([doc])
-        rec = report["likelihood"]["mismatches"][0]
-        assert rec["score_top"] == [(27, 1), (40, 1)]
-        assert rec["score_correct"] is True
+        assert report["sessions"] == 1
+        assert "likelihood" not in report and "tray_prior" not in report
+        assert "tube_eval" not in report["tracklet"]
 
     def test_calibration_quantiles_and_missing(self):
         doc = _doc(
@@ -110,7 +83,7 @@ class TestAnalyze:
         assert abs(q["share"]["min"] - 0.5) < 1e-9  # 30/60
         assert len(report["calibration"]["missing_from_candidates"]) == 1
 
-    def test_sigma_db_unit_residuals(self):
+    def test_unit_residual_samples(self):
         # GT 베이글×5, delta −743, unit_weight 155 → 개당 잔차 (743−775)/5 = −6.4
         doc = _doc(
             ground_truth=_gt({"zone": 2, "class_id": 27, "count": 5}),
@@ -121,8 +94,8 @@ class TestAnalyze:
             })],
         )
         report = analyze([doc])
-        assert report["sigma_db"]["unit_residuals"] == [-6.4]
-        assert report["sigma_db"]["suggested_sigma_db"] == 6.4
+        assert report["unit_residual"]["samples"] == [-6.4]
+        assert report["unit_residual"]["suggested_slack"] == 6.4
 
     def test_billing_accuracy_correct_and_wrong(self):
         right = _doc(
@@ -166,58 +139,8 @@ class TestAnalyze:
         assert report["billing"]["correct"] == 0
         assert report["billing"]["wrong"][0]["diffs"][0]["zone"] == 3
 
-    def test_tray_prior_flip_detected_and_labeled_eval(self):
-        # 이슈 #17 ses-5 재현: prior 없으면 44×3이 1위(score −0.476), prior
-        # (−2.5)로 3×1이 1위 — ranking의 score − log_p_tray로 무-prior 순위를
-        # 복원해 flip을 검출하고, GT(3×1) 대비 prior_helped로 집계.
-        doc = _doc(
-            ground_truth=_gt({"zone": 4, "class_id": 3, "count": 1}),
-            triggers=[_trigger(zone=4, delta=-230.0, trace={
-                "likelihood_shadow": [{
-                    "scorer": "weight_likelihood",
-                    "mismatch": True,
-                    "tray_prior": {44: -2.5},
-                    "current": {"items": [[44, 3]], "score": -2.976},
-                    "top": {"items": [[3, 1]], "score": -2.91},
-                    "ranking": [
-                        {"items": [[3, 1]], "score": -2.91},
-                        {"items": [[44, 3]], "score": -2.976, "log_p_tray": -2.5},
-                    ],
-                }]
-            })],
-        )
-        report = analyze([doc])
-        tp = report["tray_prior"]
-        assert tp["observed"] == 1
-        (flip,) = tp["flips"]
-        assert flip["without_prior"] == [(44, 3)]
-        assert flip["with_prior"] == [(3, 1)]
-        assert flip["prior_correct"] is True
-        assert tp["labeled_eval"] == {
-            "prior_helped": 1, "prior_hurt": 0, "both_wrong": 0
-        }
-        assert "tray prior shadow" in render(report)
-
-    def test_tray_prior_without_rank_change_not_a_flip(self):
-        # prior가 실렸지만 1위가 그대로면 개입 계수만 오르고 flip은 아니다
-        doc = _doc(triggers=[_trigger(trace={
-            "likelihood_shadow": [{
-                "mismatch": False,
-                "tray_prior": {44: -2.5},
-                "current": {"items": [[3, 1]]},
-                "top": {"items": [[3, 1]], "score": -0.1},
-                "ranking": [
-                    {"items": [[3, 1]], "score": -0.1},
-                    {"items": [[44, 3]], "score": -4.0, "log_p_tray": -2.5},
-                ],
-            }]
-        })])
-        report = analyze([doc])
-        assert report["tray_prior"]["observed"] == 1
-        assert report["tray_prior"]["flips"] == []
-
     def test_tracklet_head_split_and_fragmentation(self):
-        # T1 (docs/0723_tracklet_cost_benefit.md §8) — 7차 실측 보정 반영:
+        # T1 (docs/devdoc/design/0723_tracklet_cost_benefit.md §8) — 7차 실측 보정 반영:
         # head_obs는 이동(passed)·실질(obs≥3) 트랙만(정답 클래스의 진열
         # 인스턴스와 플리커 잔트랙 배제), 단절 의심은 실질 트랙 ≥ 4,
         # 에피소드 병합으로 영상을 공유한 형제 존 트리거는 1회만 계수.
@@ -281,39 +204,6 @@ class TestAnalyze:
         assert flag["class_id"] == 30 and flag["held_votes"] == 6
         out = render(report)
         assert "held 강등 관측" in out and "active 승격 보류" in out
-
-    def test_tube_shadow_eval_labeled_flip(self):
-        # 트랙릿 갭 shadow 승격 게이트: shadow 1위가 GT와 일치하고 현행
-        # 1위가 오답이면 shadow_correct — TUBE_IDENTITY/VOTE_RECOVERY
-        # active 승격 근거로 집계된다 (likelihood labeled_eval 동일 패턴).
-        doc = _doc(
-            ground_truth=_gt({"zone": 2, "class_id": 23, "count": 1}),
-            triggers=[
-                _trigger(zone=2, trace={"vote_summary": {"tube_shadow": {
-                    "by_class": {
-                        "13": {"votes": 8, "shadow": 0, "minority": 8,
-                               "short": 0, "recovered": 0, "tube_conf": 0.71},
-                        "23": {"votes": 2, "shadow": 9, "minority": 0,
-                               "short": 0, "recovered": 7, "tube_conf": 0.88},
-                    },
-                    "top_current": 13, "top_shadow": 23, "changed": True,
-                }}}),
-                _trigger(zone=2, trace={"vote_summary": {"tube_shadow": {
-                    "by_class": {"23": {"votes": 5, "shadow": 5, "minority": 0,
-                                        "short": 0, "recovered": 0,
-                                        "tube_conf": 0.9}},
-                    "top_current": 23, "top_shadow": 23, "changed": False,
-                }}}),
-            ],
-        )
-        report = analyze([doc])
-        te = report["tracklet"]["tube_eval"]
-        assert te["observed"] == 2 and len(te["changed"]) == 1
-        assert te["labeled_eval"] == {
-            "shadow_correct": 1, "current_correct": 0, "both_wrong": 0,
-        }
-        out = render(report)
-        assert "튜브 shadow" in out and "✓shadow" in out
 
     def test_ghost_shadow_eval_and_gt_flag(self):
         # 세션 고스트 원장 shadow (ghost_ledger): 정산 notes에서 검출 세션·
@@ -393,43 +283,35 @@ class TestAnalyze:
                         "hand_path": {"top": 66, "side": 0},
                     },
                 },
-                # 구 아카이브 잔존 필드 (BOCPD shadow 은퇴) — 덤프에 안 나와야 함
+                # 폐기 shadow 기제의 구 아카이브 필드 — 덤프에 안 나와야 함
                 "loadcell_shadow": {"analyzer": "plateau", "delta": -155.0,
                                     "primary_delta": -155.0, "mismatch": False},
                 "likelihood_shadow": [
-                    {"channel": 0, "mismatch": False,
-                     "current": {"items": [[27, 1]], "score": -0.2},
-                     "top": {"items": [[27, 1]], "score": -0.2}},
                     {"channel": 1, "mismatch": True,
                      "current": {"items": [[27, 1]], "score": -5.6},
-                     "top": {"items": [[13, 1]], "score": -0.6},
-                     "ranking": [{"items": [[13, 1]], "score": -0.6,
-                                  "residual": -0.2}]},
+                     "top": {"items": [[13, 1]], "score": -0.6}},
                 ],
             },
         )])
         out = render_session(doc)
         assert "rejected: c3:4표(share)" in out
         assert "baseline" not in out and "hand_path" in out
-        assert "loadcell_shadow" not in out  # 은퇴 — 구 아카이브 필드 무시
-        assert "likelihood ch0: 일치" in out
-        assert "likelihood ch1 MISMATCH" in out
+        assert "loadcell_shadow" not in out  # 폐기 — 구 아카이브 필드 무시
+        assert "likelihood" not in out
         full = render_session(doc, full=True)
         assert "vote_summary.classes" in full
         assert "loadcell_shadow" not in full
 
-    def test_session_dump_renders_tube_shadow(self):
+    def test_session_dump_renders_tube_diag(self):
         from crk_model.adapters.analyze_cli import render_session
 
-        doc = _doc(triggers=[_trigger(trace={"vote_summary": {"tube_shadow": {
-            "by_class": {"13": {"votes": 8, "shadow": 0, "minority": 8,
-                                "short": 0, "recovered": 0, "tube_conf": 0.7}},
-            "top_current": 13, "top_shadow": None, "changed": True,
+        doc = _doc(triggers=[_trigger(trace={"vote_summary": {"tube_diag": {
+            "by_class": {"13": {"votes": 8, "minority": 8, "tube_conf": 0.7}},
             "tubes": {"top": [{"obs": 30, "classes": {"13": 22, "24": 8}}]},
         }}})])
         out = render_session(doc)
-        assert "tube_shadow: 현행 c13" in out and "[1위 변경]" in out
-        assert "소수8" in out and "tube_shadow.tubes" in out
+        assert "tube_diag: c13:8표(소수8/tconf0.7)" in out
+        assert "tube_diag.tubes" in out
 
     def test_old_archive_without_class_id_skipped_quietly(self):
         doc = _doc(
@@ -439,8 +321,8 @@ class TestAnalyze:
                 "products": [{"product_id": "P27", "count": 1}],  # 구 스키마
             })],
         )
-        report = analyze([doc])  # 예외 없이 완료, σ_db 표본 없음
-        assert report["sigma_db"]["unit_residuals"] == []
+        report = analyze([doc])  # 예외 없이 완료, 잔차 표본 없음
+        assert report["unit_residual"]["samples"] == []
 
 
 class TestCli:
@@ -451,7 +333,7 @@ class TestCli:
         (day / "ses-1.json").write_text(json.dumps(doc), encoding="utf-8")
         assert main(["--dir", str(tmp_path)]) == 0
         out = capsys.readouterr().out
-        assert "무게 우도 shadow" in out and "세션 1개" in out
+        assert "세션 아카이브 리포트" in out and "세션 1개" in out
 
     def test_empty_dir_returns_error(self, tmp_path, capsys):
         assert main(["--dir", str(tmp_path)]) == 1

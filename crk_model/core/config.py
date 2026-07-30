@@ -219,7 +219,8 @@ class Settings:
     judgment_combo_share: float = 0.3
     judgment_near_factor: float = 2.0
     judgment_refit_share: float = 0.1
-    # ---- 무게 중재 재설계 노브 (이슈 #16, docs/0722_issue16_arbitration_design.md) ----
+    # ---- 무게 중재 재설계 노브 (이슈 #16) ----
+    # 설계: docs/devdoc/design/0722_issue16_arbitration_design.md
     # count_unit_slack: 개수당 게이트 가산(g) — gate_n(n)=gate+slack×(n−1) (0=flat)
     # conf_override: ① 자격의 conf 문턱 (share 미달 보완, 2.0=비활성)
     # conf_margin: ① 복수 적합 중재에서 conf가 득표 서열을 뒤집는 최소 격차 (2.0=비활성)
@@ -235,23 +236,6 @@ class Settings:
     # margin 우세만으로 오과금 — 승자는 자체로 선명해야 한다). 2.0 = 중재
     # 비활성(유일-적합만).
     judgment_refit_arb_conf_floor: float = 0.8
-    # ---- 무게 우도 score shadow (docs/0722_weight_likelihood_design.md Phase 1) ----
-    # 판정 미사용 — 이벤트별 score 순위와 현행 판정의 diff만 trace/아카이브에
-    # 기록. k는 우도비 상한(clamp): 1이면 무게 무력(거부권만), 클수록 무게가
-    # vision 사전비를 뒤집을 수 있는 폭이 커진다. sigma_db는 DB unit_weight
-    # 개당 편차(g) — 아카이브 잔차 실측으로 보정한다 (conformal 대상).
-    likelihood_shadow: bool = True
-    likelihood_k: float = 20.0
-    likelihood_sigma_db: float = 5.0
-    # ---- 세션 트레이 메모리 (ledger/tray_memory.py, Phase 1: shadow 소비) ----
-    # 세션 안에서 확정 판정으로 학습하는 (zone, channel)×상품 증거 맵 —
-    # 정적 planogram(금지)과 달리 운영 입력 없음, OPEN마다 리셋(cold-start
-    # = 현행 동작). likelihood shadow의 log_p_tray 항으로만 소비된다.
-    # boost/penalty는 로그 단위 — penalty 2.5는 이슈 #17 ses-5의 순위 격차
-    # (2.43)를 뒤집는 최소값 근방, 아카이브 라벨 실측으로 보정할 것.
-    tray_prior: bool = True
-    tray_prior_boost: float = 0.7
-    tray_prior_penalty: float = 2.5
     # ---- 조기 종료 (D7) — removal & 비freezer에서만 유효 ----
     early_termination_enabled: bool = True
     # ---- 모션 게이트 오버라이드 (None = SensorProfile 기본값 유지) ----
@@ -277,24 +261,6 @@ class Settings:
     # analyze-sessions에서 정답 클래스 held 플래그가 없음을 확인한 뒤.
     held_track_demotion: str = "shadow"
     held_track_min_head: int = 5
-    # ---- 트랙릿 갭 4종 (0723 문서 §2의 잔여 격차 — shadow-first) ----
-    # 갭 4/T2' 튜브 정체성: 클래스 무관 튜브의 다수결에서 결정적 소수인
-    # 클래스 표 몰수(의류 산탄의 "한 궤적, 깜빡이는 클래스" 시그니처).
-    # active는 표 이전이 아니라 몰수라 fail-safe 방향 — 그래도 문서 G1의
-    # 역전 위험 때문에 shadow 실측(tube_shadow eval) 후에만 승격.
-    tube_identity: str = "shadow"
-    # 갭 2 저신뢰 표 회수 (ByteTrack 2단계의 표 버전): 변위 통과 트랙 +
-    # 같은 (클래스, 트랙) 진입 표 앵커가 있는 저신뢰 검출의 표를 회수 —
-    # 빠른 취출 표 기아(5차 23이 1표) 대응. floor 미만은 회수 후보도 아님.
-    vote_recovery: str = "shadow"
-    vote_recovery_floor: float = 0.35
-    # 갭 1 probation: 총 관측 < N 트랙의 표 몰수(0=off). 단명 산탄 억제용
-    # 이나 실패 방향이 fail-closed(단절된 진짜 상품 트랙도 단명) — tube_
-    # shadow의 short 계측(고정 probe 3) 실측 후 env로만 켠다.
-    track_min_hits: int = 0
-    # 갭 1 트랙 소멸: 공백 > N 추론프레임 트랙은 사망(0=무소멸). 같은
-    # fail-closed 방향이라 기본 off — G2 재연관 창과 함께 튜닝.
-    track_max_gap: int = 0
     # ---- 로드셀 안정 판정 (0.8s 캐던스 기준값, 이슈 #14) ----
     loadcell_stable_window: int = 3
     loadcell_stability_threshold_grams: float = 2.5
@@ -309,7 +275,7 @@ class Settings:
     # 값을 넘으면(접촉 하중 오염 서명) delta 타깃 판정 실패 시 세그먼트 합
     # 타깃으로 1회 재판정. 실측 오염 트리거 8~18g / 깨끗한 트리거 0.
     segment_retry_gap_grams: float = 5.0
-    # ---- 교차존 비전 오염 페널티 (docs/cross_zone_penalty.md) ----
+    # ---- 교차존 비전 오염 페널티 (docs/devdoc/design/cross_zone_penalty.md) ----
     # Phase 3 승격 완료 (2026-07-21): 운영 검증(PENALTY_ENABLED=1)을 거쳐
     # 기본 ON. 비활성화하려면 MODEL__CROSS_ZONE__PENALTY_ENABLED=0.
     cross_zone_penalty_enabled: bool = True
@@ -399,9 +365,11 @@ class Settings:
             camera_layout=_env_choice(
                 "MODEL__VISION__CAMERA_LAYOUT", "dual", _VALID_CAMERA_LAYOUTS
             ),
-            freezer_roi_vertical_region=os.environ.get(
-                "MODEL__VISION__FREEZER_ROI_VERTICAL_REGION", "upper"
-            ).strip().lower(),
+            freezer_roi_vertical_region=_env_choice(
+                "MODEL__VISION__FREEZER_ROI_VERTICAL_REGION",
+                "upper",
+                ("upper", "lower", "off"),
+            ),
             freezer_roi_y_split=_env_float("MODEL__VISION__FREEZER_ROI_Y_SPLIT", 300.0),
             top_roi_enabled=_env_bool("MODEL__VISION__TOP_ROI_ENABLED", False),
             top_roi_y_split=_env_float("MODEL__VISION__TOP_ROI_Y_SPLIT", 240.0),
@@ -430,14 +398,6 @@ class Settings:
             judgment_refit_arb_conf_floor=_env_float(
                 "MODEL__JUDGMENT__REFIT_ARB_CONF_FLOOR", 0.8
             ),
-            likelihood_shadow=_env_bool("MODEL__JUDGMENT__LIKELIHOOD_SHADOW", True),
-            likelihood_k=_env_float("MODEL__JUDGMENT__LIKELIHOOD_K", 20.0),
-            likelihood_sigma_db=_env_float("MODEL__JUDGMENT__LIKELIHOOD_SIGMA_DB", 5.0),
-            tray_prior=_env_bool("MODEL__JUDGMENT__TRAY_PRIOR", True),
-            tray_prior_boost=_env_float("MODEL__JUDGMENT__TRAY_PRIOR_BOOST", 0.7),
-            tray_prior_penalty=_env_float(
-                "MODEL__JUDGMENT__TRAY_PRIOR_PENALTY", 2.5
-            ),
             early_termination_enabled=_env_bool(
                 "MODEL__VISION__EARLY_TERMINATION", True
             ),
@@ -460,21 +420,6 @@ class Settings:
                 ("off", "shadow", "active"),
             ),
             held_track_min_head=_env_int("MODEL__VISION__HELD_TRACK_MIN_HEAD", 5),
-            tube_identity=_env_choice(
-                "MODEL__VISION__TUBE_IDENTITY",
-                "shadow",
-                ("off", "shadow", "active"),
-            ),
-            vote_recovery=_env_choice(
-                "MODEL__VISION__VOTE_RECOVERY",
-                "shadow",
-                ("off", "shadow", "active"),
-            ),
-            vote_recovery_floor=_env_float(
-                "MODEL__VISION__VOTE_RECOVERY_FLOOR", 0.35
-            ),
-            track_min_hits=_env_int("MODEL__VISION__TRACK_MIN_HITS", 0),
-            track_max_gap=_env_int("MODEL__VISION__TRACK_MAX_GAP", 0),
             motion_gate_keepalive=_env_opt_int("MODEL__VISION__MOTION_GATE_KEEPALIVE"),
             loadcell_analyzer=_env_choice(
                 "MODEL__LOADCELL__ANALYZER", "bocpd", ("plateau", "bocpd")

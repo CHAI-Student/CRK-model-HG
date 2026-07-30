@@ -2,7 +2,7 @@
 from dataclasses import replace
 
 from crk_model.core.profiles import REFRIGERATOR
-from crk_model.frames import FixedBatchCollector, HandLatch, MotionGate
+from crk_model.frames import HandLatch, MotionGate
 
 
 def frame(value):
@@ -66,21 +66,3 @@ class TestMotionGate:
         gate.evaluate(frame(60))
         # threshold 0.5, |60-10|=50 > 15 → 전 픽셀 변화 → motion
         assert gate.processed_frames == 2
-
-
-class TestBatchCollector:
-    def test_default_off_is_passthrough(self):
-        c = FixedBatchCollector(batch_size=1)  # D8: 기본 OFF
-        assert c.add("top", "f1") == ["f1"]
-
-    def test_cameras_never_interleaved(self):
-        c = FixedBatchCollector(batch_size=2)
-        assert c.add("top", "t1") is None
-        assert c.add("side", "s1") is None
-        assert c.add("top", "t2") == ["t1", "t2"]  # side 프레임 미혼입
-
-    def test_flush_reports_padding(self):
-        c = FixedBatchCollector(batch_size=4)
-        c.add("top", "t1")
-        frames, pad = c.flush("top")
-        assert frames == ["t1"] and pad == 3

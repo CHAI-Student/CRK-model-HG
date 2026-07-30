@@ -1,4 +1,4 @@
-"""교차존 비전 오염 페널티 (docs/cross_zone_penalty.md) — CLOSE 2차 패스.
+"""교차존 비전 오염 페널티 (docs/devdoc/design/cross_zone_penalty.md) — CLOSE 2차 패스.
 
 시나리오 (§1): zone1에서 A 취출 → 세션 유지 중 zone2에서 B 취출 → zone1
 연장창 내 A 재취출. zone2 AVI 프리롤/라이브에 A 장면이 섞여 A가 vision
@@ -149,7 +149,7 @@ class TestCrossZonePenalty:
         # 13이 vision top 오염, 전 후보 3~9표 저득표·저conf): 가드는 잔차가
         # 정확한 z2(46, 잔차 1)를 면제하고, z1 재판정은 오염 top 13에 막혀
         # gate 실패 → 원 판정 유지 + note. 과금은 어느 쪽이든 46×2로 같지만
-        # (구제는 Phase 2 likelihood/tray prior 소관) 관측 note가 남아야 한다.
+        # (구제 경로 없음) 관측 note가 남아야 한다.
         p46 = ActiveProduct("P46", "46", class_id=46, unit_weight=71.0,
                             unit_price=1000, stock_qty=20)
         p40 = ActiveProduct("P40", "40", class_id=40, unit_weight=131.0,

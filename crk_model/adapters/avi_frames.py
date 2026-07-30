@@ -262,7 +262,7 @@ def _gate_view(full, gate_size: int):
     종전(풀 프레임 전체를 float 평균 → 다운샘플)과 결과가 **비트 동일**하면서
     평균 연산 픽셀이 16배 적다 (480²=230,400 → 120²=14,400): nearest는 픽셀
     '선택'이라 채널 평균과 순서 교환이 가능하고, 같은 픽셀의 float 평균값에
-    같은 astype(uint8) 절삭이 적용된다 (docs/0728_freezer_latency_research.md
+    같은 astype(uint8) 절삭이 적용된다 (docs/devdoc/research/0728_freezer_latency_research.md
     T1-2 — 트리거당 0.5~1.5s 절감 실측 대상)."""
     import numpy as np  # lazy
 

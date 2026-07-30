@@ -106,7 +106,8 @@ class FreezerVisionFirstStrategy:
     상품으로 과금). 오검출 억제는 perception 계층(모션 변위 증거/share
     floor)의 책임이고, 판정층은 득표 순위를 신뢰한다 — 층별 단일 책임.
 
-    무게 게이트는 n-스케일이다 (이슈 #16 설계, docs/0722_issue16_arbitration_design.md):
+    무게 게이트는 n-스케일이다 (이슈 #16 설계,
+    docs/devdoc/design/0722_issue16_arbitration_design.md):
     `gate_n(n) = count_gate + count_unit_slack×(n−1)`. DB unit_weight 편차
     (정책상 DB는 고정, 실측과 10~30g 편차)와 접촉 오염은 개수·픽 횟수에
     비례해 누적되므로 flat ±15g는 n≥4에서 정답 상품의 자기 적합을 깨뜨리고

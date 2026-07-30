@@ -1,4 +1,4 @@
-"""T2 (docs/0728_freezer_latency_research.md) — 마이크로배치·프리페치 검증.
+"""T2 (docs/devdoc/research/0728_freezer_latency_research.md) — 마이크로배치·프리페치 검증.
 
 핵심 계약: batch_size/prefetch는 **속도 레버일 뿐 판정을 바꾸지 않는다**.
 - 배치 경로는 프레임별 경로와 소비 순서·의미가 동일 (consume 단일 경로)
@@ -204,14 +204,14 @@ class TestStaticBatchEngineAdapter:
         assert seen == {"n": 1, "allowed": (1, 2)}
 
     def test_non_square_with_static_batch_raises(self):
-        import numpy as np
+        np = pytest.importorskip("numpy")  # 비정방 입력 픽스처 생성용
 
         det = self._bare(batch=4)
         with pytest.raises(ValueError, match="static batch engine"):
             det.detect_batch([np.zeros((240, 480, 3), dtype=np.uint8)])
 
     def test_non_square_with_batch1_falls_back_per_frame(self, monkeypatch):
-        import numpy as np
+        np = pytest.importorskip("numpy")  # 비정방 입력 픽스처 생성용
 
         det = self._bare(batch=1)
         calls = []

@@ -4,7 +4,7 @@
 도구다. 전제: 세션이 `MODEL__SESSION__SAVE_DETECTIONS=1`로 기록됐어야 한다
 (trace.frame_detections — 추론 프레임별 raw 검출 + 필터 통과 여부). live
 preview와 달리 **운영 파이프라인이 그 순간 실제로 본 검출**을 그대로 재생한다
-— 오프라인 재추론은 TensorRT FP16 엔진과 결과가 달라 여기서는 하지 않는다.
+— 오프라인 재추론은 기기의 TensorRT 엔진과 결과가 달라 여기서는 하지 않는다.
 
 사용 예 (Jetson 또는 아카이브+AVI를 내려받은 개발 PC):
 

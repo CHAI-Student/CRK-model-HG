@@ -1,23 +1,34 @@
+# Python
 __pycache__/
 *.pyc
-.pytest_cache/
 *.egg-info/
 .venv/
-reference/
-<<<<<<< HEAD
+
+# 도구 캐시
+.pytest_cache/
 .ruff_cache/
 
-
+# 로컬 설정 (템플릿 3종은 추적: .env.example / refrg.env.example / freezer.env.example)
 .env
 .env.*
 !.env.example
 *.local
 
+# 런타임 산출물
 *.log
 *.log.*
 data/
 logs/
 models
 
+# 레거시 참조 저장소 (로컬에만 둔다)
+reference/
+
+# 잠금 파일 (Jetson은 system-site 의존이라 잠금이 오히려 방해)
 uv.lock
 
+# 개발 세션 원문 (로컬 참고용 — 버전 관리 대상 아님, docs/devdoc/README.md 참조)
+docs/devdoc/transcripts/
+
+# OS
+.DS_Store

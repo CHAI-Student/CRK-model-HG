@@ -1,7 +1,7 @@
 """BOCPD 로드셀 분석기 (primary) — 베이지안 온라인 변화점 검출.
 
 Adams & MacKay 2007 (arXiv:0710.3742)의 run-length 사후분포 재귀를 이 도메인에
-맞게 축소 구현한 것 (claudedocs/research_judgment_performance_20260722.md §2).
+맞게 축소 구현한 것 (docs/devdoc/research/research_judgment_performance_20260722.md §2).
 
 왜: 현행 `_stable_plateaus`는 "3연속 샘플 std ≤ 2.5g"라는 경성 창을 요구한다.
 0.8s 캐던스에서 이 조건은 — post-roll 4s = 5샘플이면 마진 1샘플(#14
@@ -157,10 +157,10 @@ def _logsumexp(vals: list[float]) -> float:
 
 
 class BocpdLoadcellAnalyzer:
-    """BOCPD를 primary 분석기로 승격할 때의 어댑터 — LoadcellAnalyzer 계약 동형.
+    """primary 로드셀 분석기 — LoadcellAnalyzer 계약 동형.
 
-    `MODEL__LOADCELL__ANALYZER=bocpd`로 선택된다 (기본 plateau — 승격은
-    아카이브 실측에서 shadow가 우세할 때만, 레포 관행). 반환 계약은
+    `MODEL__LOADCELL__ANALYZER`의 **기본값**(=`bocpd`, 2026-07-23 승격)이 이
+    어댑터다. `=plateau`가 롤백 스위치 (구 3연속 안정 창). 반환 계약은
     LoadcellAnalysis 그대로: reason 문자열(insufficient_* /
     needs_return_stabilization), min_weight_change 채널 게이트, 세그먼트
     스텝 임계, 반품 안정화 대기(QA Q3 ①), 채널 이벤트(멀티트레이 2단계)

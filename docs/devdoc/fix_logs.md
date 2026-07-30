@@ -1613,3 +1613,72 @@ unit_weight는 정책상 고정이고 실측과 10~30g 편차가 있으므로(�
 
 - **전체 상태 (2026-07-30 기준)**: `pytest -q` → **449 passed**,
   `ruff check .` → All checks passed.
+
+---
+
+## 2026-07-30 인수인계 대청소 — 미채택 shadow 5종 삭제 + 문서집 재구성
+
+- **목표**: 저장소를 회사에 전달할 수 있는 상태로 정리한다. ① 실측에서 채택되지
+  못한 shadow 기제를 코드째 제거하고, ② 폴더별 세부 기능 문서와 비즈니스/개발
+  완료 문서집을 만들고, ③ 기존 문서를 히스토리 폴더로 격리한다.
+
+- **삭제 (사용자 승인, 근거는 `docs/devdoc/field-tests/0724_shadow_status_review.md`)**:
+  - **vote_recovery** (갭 2 저신뢰 표 회수): 긍정 증거 0, 부정 증거만 —
+    0724 리뷰가 유일하게 "폐기 후보 — 명시 제안"으로 지정한 항목.
+  - **tube_identity** (갭 4/T2' 튜브 다수결 표 몰수): 10차 라벨 정오 0:3:2로
+    현행 우세. **계측은 유지** — `MotionEvidence`의 튜브 층과
+    `VotingEnsemble.tube_summary()`가 아카이브 `vote_summary.tube_diag`
+    (클래스별 유효표·결정적 소수 표 수·tube_conf + 튜브 구성)로 남아 "한 궤적,
+    여러 클래스" 실패 모드를 진단만 한다. 표 몰수 경로와 env만 삭제.
+  - **track_min_hits / track_max_gap** (갭 1 probation·트랙 소멸): 발동 이력 0회.
+  - **likelihood(무게 우도 score) + tray_prior(세션 트레이 메모리)**: Phase 2
+    부결(4차 3:4:4 → 11차 2/1/1)의 원인이 파라미터가 아니라 구조적 한계
+    (배정 후보군에 다품종 조합이 없어 log_p_vision이 count에 무감 → "동일 상품
+    n개 우연 적합" 선호)이고, 순냉장 기기에서는 applicable 조건상 구조적 휴면.
+  - **FixedBatchCollector** (`frames/batch.py`, D8 설계 산출물): 07-28 T2
+    실구현(파이프라인 마이크로배치 + `detect_batch`)이 대체해 운영 경로 미사용.
+  - 부수: `analyze-sessions`의 우도/tray/튜브 shadow 섹션 삭제, 리포트 키
+    `sigma_db` → `unit_residual`(제안 대상이 `COUNT_UNIT_SLACK`으로 변경),
+    아카이브 `trace.likelihood_shadow` 제거·`tube_shadow` → `tube_diag`.
+    구 아카이브의 폐기 필드는 조용히 무시(관용 파싱) — 회귀 테스트 동봉.
+  - 규모: `crk_model/`+`tests/`에서 1,926줄 삭제 / 211줄 삽입 = **순감 1,715줄**,
+    파일 5개 삭제, env 노브 11종 제거.
+
+- **문서 정합 정정 (코드 대조에서 드러난 낡은 서술)**:
+  - `scripts/convert_engine.sh`는 `half=False`(FP32)로 export하는데 어댑터·렌더러
+    docstring이 "FP16 엔진"이라고 적고 있었다 → 스크립트를 정본으로 보고 주석 정정.
+  - `REFRIGERATOR.tolerance_grams`는 5.0인데 env 템플릿 2종·`model_service`
+    docstring·테스트 주석이 "±3g"였다 → ±5g로 정정.
+  - `BocpdLoadcellAnalyzer` docstring이 "기본 plateau"였다(실제 기본은 bocpd,
+    07-23 승격) → 정정. `ingest/__init__`도 BOCPD를 primary로 재수출.
+  - `MODEL__VISION__FREEZER_ROI_VERTICAL_REGION`만 `_env_choice`를 안 써서
+    dual 레이아웃에서 오타가 조용히 무시됐다 → fail-closed 원칙에 맞춰 통일.
+
+- **잔재 정리**: `scripts/setup_jetson.sh`의 레거시 잔재(존재하지 않는
+  `model_service` 패키지 import, `model-service` 엔트리포인트, 없는
+  `install_model_service_launcher.sh` 단계 — 실행 시 실패하던 구간)를 현행
+  패키지·엔트리포인트로 교체하고 단계 번호를 10단계로 통일. `.gitignore`에 남아
+  있던 병합 충돌 마커(`<<<<<<< HEAD`) 제거 + `.DS_Store` 무시.
+  numpy 미설치 환경에서 **실패**하던 배치 테스트 2건을 `importorskip`으로 전환.
+
+- **문서집 재구성**: `docs/` 최상위에 정본 8종 신설
+  (`01-service-overview` / `02-system-architecture` / `03-judgment-and-settlement` /
+  `04-configuration` / `05-operations` / `06-verification-report` /
+  `07-rejected-and-retired` / `08-handover`) + `docs/README.md` 인덱스.
+  기존 설계·리서치·실기 문서와 `claudedocs/`는 `docs/devdoc/`
+  (design / field-tests / research / transcripts)로 이관 — **소급 수정 금지,
+  추가만** 규칙을 `docs/devdoc/README.md`에 명시. `crk_model/` 9개 패키지에
+  세부 기능 문서(`README.md`) 신설. 루트 `README.md`는 진입점으로 재작성
+  (629행 → 약 210행, 상세는 문서집으로 이관).
+
+- **관련 파일**: `crk_model/core/config.py`, `crk_model/perception/voting.py`·
+  `motion_evidence.py`, `crk_model/service/pipeline.py`·`model_service.py`,
+  `crk_model/adapters/analyze_cli.py`·`yolo_detector.py`·`render_cli.py`,
+  `crk_model/ledger/archive.py`, `crk_model/frames/__init__.py`,
+  `crk_model/ingest/__init__.py`·`bocpd.py`·`idempotency.py`,
+  삭제: `crk_model/judgment/likelihood.py`·`crk_model/ledger/tray_memory.py`·
+  `crk_model/frames/batch.py`·`tests/test_likelihood.py`·`tests/test_tray_memory.py`,
+  env 템플릿 3종, `scripts/setup_jetson.sh`, `.gitignore`, 문서 다수.
+
+- **전체 상태 (2026-07-30 정리 후)**: `pytest -q` → **406 passed**,
+  `ruff check .` → All checks passed. 문서 상호 링크 37파일 전수 검사 0 오류.

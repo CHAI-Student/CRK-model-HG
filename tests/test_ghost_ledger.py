@@ -82,7 +82,7 @@ class TestDetection:
 
     def test_near_gate_billing_is_not_backing(self):
         # COMPLETE라도 near_gate(무게가 고른 예외 경로)는 뒷받침이 아니다
-        # (tray_memory 등록 게이트와 동일 원리).
+        # (무게가 delta 전량을 설명한 판정만 뒷받침으로 인정한다).
         near = JudgmentResult(
             JudgmentStatus.COMPLETE, (ProductCount(G13, 1),), 0.6,
             "freezer_vision_first_near_gate",

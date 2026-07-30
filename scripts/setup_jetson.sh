@@ -44,19 +44,15 @@ install_activation_hook() {
 
     # Persist the Jetson runtime linker setup across future shells so users only
     # need `source .venv/bin/activate` before starting the service.
-    hook_block=$'\n# model-service Jetson runtime hook\nif [ -n "${VIRTUAL_ENV:-}" ] && [ -f "${VIRTUAL_ENV}/../scripts/jetson_env.sh" ]; then\n    . "${VIRTUAL_ENV}/../scripts/jetson_env.sh"\nfi\n'
+    hook_block=$'\n# model-service-hg Jetson runtime hook\nif [ -n "${VIRTUAL_ENV:-}" ] && [ -f "${VIRTUAL_ENV}/../scripts/jetson_env.sh" ]; then\n    . "${VIRTUAL_ENV}/../scripts/jetson_env.sh"\nfi\n'
 
-    if grep -Fq 'model-service Jetson runtime hook' "${activate_path}"; then
+    if grep -Fq 'model-service-hg Jetson runtime hook' "${activate_path}"; then
         print_ok "Jetson activation hook already installed"
         return
     fi
 
     printf '%s' "${hook_block}" >> "${activate_path}"
     print_ok "Installed Jetson activation hook into .venv/bin/activate"
-}
-
-install_user_launcher() {
-    bash "${PROJECT_ROOT}/scripts/install_model_service_launcher.sh"
 }
 
 install_project_packages() {
@@ -101,7 +97,7 @@ install_project_packages() {
     fi
 }
 
-print_step "1/9" "Checking Jetson prerequisites"
+print_step "1/10" "Checking Jetson prerequisites"
 
 if [[ ! -f /etc/nv_tegra_release ]]; then
     print_err "This script must be run on a Jetson device."
@@ -138,7 +134,7 @@ else
     print_warn "The setup will try to install a Jetson-compatible torch wheel into .venv."
 fi
 
-print_step "2/9" "Checking uv"
+print_step "2/10" "Checking uv"
 
 if ! command -v uv >/dev/null 2>&1; then
     print_warn "uv not found. Installing to ~/.local/bin"
@@ -148,7 +144,7 @@ else
     print_ok "uv detected: $(uv --version)"
 fi
 
-print_step "3/9" "Preparing virtual environment"
+print_step "3/10" "Preparing virtual environment"
 
 if [[ -d "${VENV_PATH}" && "${FORCE_RECREATE_VENV}" == "1" ]]; then
     print_warn "Removing existing .venv because FORCE_RECREATE_VENV=1"
@@ -167,7 +163,7 @@ source "${VENV_PATH}/bin/activate"
 # below exercise the same CUDA/TensorRT environment that normal runtime uses.
 . "${PROJECT_ROOT}/scripts/jetson_env.sh"
 
-print_step "4/9" "Ensuring Jetson-compatible torch"
+print_step "4/10" "Ensuring Jetson-compatible torch"
 
 if python -c "import torch; assert torch.cuda.is_available()" >/dev/null 2>&1; then
     print_ok "Current venv PyTorch can see CUDA"
@@ -180,7 +176,7 @@ else
     "${PROJECT_ROOT}/scripts/install_jetson_torch.sh"
 fi
 
-print_step "5/9" "Installing project dependencies"
+print_step "5/10" "Installing project dependencies"
 
 install_project_packages
 print_ok "Project dependencies installed without replacing Jetson torch"
@@ -193,7 +189,7 @@ if [[ "${NUMPY_VERSION}" == 2.* ]]; then
 fi
 print_ok "NumPy ${NUMPY_VERSION}"
 
-print_step "6/9" "Preparing runtime configuration"
+print_step "6/10" "Preparing runtime configuration"
 
 if [[ ! -f "${PROJECT_ROOT}/.env" ]]; then
     cp "${PROJECT_ROOT}/.env.example" "${PROJECT_ROOT}/.env"
@@ -210,14 +206,20 @@ else
     find "${PROJECT_ROOT}/models" -maxdepth 1 -name '*.engine' -print
 fi
 
-print_step "7/9" "Verifying imports inside the venv"
+print_step "7/10" "Verifying imports inside the venv"
 
 python <<'PY'
-from model_service.core.config import Settings
+import os
 
-settings = Settings()
-print(f"Resolved engine path: {settings.yolo_model_path}")
-print(f"Resolved host/port: {settings.host}:{settings.port}")
+from crk_model.core.config import Settings
+
+settings = Settings.from_env()
+engine = os.environ.get(
+    "MODEL__VISION__YOLO_MODEL_PATH", "models/set9_doorfas_0323_imbal.engine"
+)
+print(f"Resolved engine path: {engine}")
+print(f"Cabinet type: {settings.cabinet_type} / camera layout: {settings.camera_layout}")
+print(f"Batch size: {settings.batch_size} / prefetch: {settings.prefetch_depth}")
 PY
 
 python <<'PY'
@@ -238,14 +240,22 @@ if not torch.cuda.is_available():
     raise SystemExit("PyTorch can import, but CUDA is still unavailable inside .venv.")
 PY
 
-print_step "8/9" "Verifying entry points"
+print_step "8/10" "Verifying entry points"
 
-if model-service --help >/dev/null 2>&1; then
-    print_ok "model-service entry point is available"
+if command -v model-service-hg >/dev/null 2>&1; then
+    print_ok "model-service-hg entry point is available"
 else
-    print_err "model-service entry point is not available after install"
+    print_err "model-service-hg entry point is not available after install"
     exit 1
 fi
+
+for cli in label-session analyze-sessions render-session; do
+    if command -v "${cli}" >/dev/null 2>&1; then
+        print_ok "${cli} entry point is available"
+    else
+        print_warn "${cli} entry point is missing (진단 CLI — 서비스 기동에는 무관)"
+    fi
+done
 
 if pytest --version >/dev/null 2>&1; then
     print_ok "pytest is available"
@@ -254,23 +264,21 @@ else
     exit 1
 fi
 
-print_step "9/11" "Installing activation hook"
+print_step "9/10" "Installing activation hook"
 
 install_activation_hook
 
-print_step "10/11" "Installing user launcher"
-
-install_user_launcher
-
-print_step "11/11" "Done"
+print_step "10/10" "Done"
 
 echo -e "${BLUE}Recommended runtime commands${NC}"
-echo "  model-service"
-echo "  pytest services/model/tests/test_fastapi_imports.py -q"
-echo ""
-echo -e "${BLUE}Manual venv activation remains available${NC}"
 echo "  source .venv/bin/activate"
+echo "  cp refrg.env.example .env      # 냉장 기기 (냉동은 freezer.env.example)"
+echo "  model-service-hg"
+echo ""
+echo -e "${BLUE}Verification${NC}"
+echo "  curl -s http://localhost:8002/api/health"
+echo "  pytest -q"
 echo ""
 echo -e "${BLUE}Optional uv commands without re-sync${NC}"
-echo "  uv run --no-sync model-service"
-echo "  uv run --no-sync pytest services/model/tests -q"
+echo "  uv run --no-sync model-service-hg"
+echo "  uv run --no-sync pytest -q"

@@ -524,7 +524,7 @@ class TestCabinetTypeDefaultProfile:
         """CLOSE 정산도 기본 프로파일을 따라야 한다 (판정·정산 tolerance 단일
         소스). removal -100g(콜라 1) 후 return +90g: freezer tolerance(±15g)면
         |90-100|=10g ≤ 15g로 반품이 매칭돼 청구 0원. settler/gateway 폴백이
-        REFRIGERATOR(±3g)로 남아 있으면 반품 미매칭 → 콜라 1개가 그대로
+        REFRIGERATOR(±5g)로 남아 있으면 반품 미매칭 → 콜라 1개가 그대로
         청구된다 (net_delta 교정도 cola 100g > excess+tol=93g라 불가) —
         이 delta는 정확히 폴백 프로파일 차이만 가른다."""
         settings = Settings(cabinet_type="freezer", close_grace_s=0.0)

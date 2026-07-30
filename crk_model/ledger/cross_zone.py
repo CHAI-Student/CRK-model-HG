@@ -1,4 +1,4 @@
-"""교차존 비전 오염 페널티 — CLOSE 2차 패스 (docs/cross_zone_penalty.md).
+"""교차존 비전 오염 페널티 — CLOSE 2차 패스 (docs/devdoc/design/cross_zone_penalty.md).
 
 문제: zone1 세션 유지 중 zone2 취출이 일어나면 zone2 판별용 AVI의 프리롤
 (4s)·라이브 구간에 zone1 취출 장면이 물리적으로 섞인다 (F3). zone2의
@@ -39,7 +39,7 @@ logger = logging.getLogger(__name__)
 class CrossZonePenaltyConfig:
     """카메라 계약 상수(replay/trigger)는 CRK-CAMERA 설정과 단일 소스 유지 —
     env(MODEL__CROSS_ZONE__*)로 조정한다. α·ε·θ 초기값은 Phase 1 계측으로
-    보정 예정 (docs/cross_zone_penalty.md §7)."""
+    보정 예정 (docs/devdoc/design/cross_zone_penalty.md §7)."""
 
     enabled: bool = False
     # 카메라 프리롤 (CRK-CAMERA replay_duration=4.0, 120프레임)

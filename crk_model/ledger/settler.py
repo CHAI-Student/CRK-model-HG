@@ -163,7 +163,7 @@ class CloseSettler:
         active_products_provider: Callable[[], Sequence[ActiveProduct]] | None = None,
         count_unit_slack: float = 5.0,
         # 냉동 close 재solve의 개수당 게이트 가산(g) — 판정층 gate_n과 동일
-        # 원칙 (설계 3a, docs/0722_issue16_arbitration_design.md). I3 게이트를
+        # 원칙 (설계 3a, docs/devdoc/design/0722_issue16_arbitration_design.md). I3 게이트를
         # 쓰는 두 지점(판정·정산)이 같은 산식을 유지해야 한다. 0 = flat 게이트.
         vision_combo: bool = True,
         # 0723 이슈 #17: 단일 종 ×N 스냅(N≥2)·게이트 실패 시, 존의 자격 표를
@@ -179,8 +179,9 @@ class CloseSettler:
         # 보였거나 확실하게 보였거나. 보호 케이스(3+44 실사고 7회)의 c3은
         # 8/14표(57%) 혹은 conf .89로 통과한다. ratio=0으로 비활성.
         combo_session_guard: bool = True,
-        # 세션 관측 증거 기반 콤보 자격 제외 (planogram 아님 — tray_memory와
-        # 동일 태도): ① ghost_ledger가 유령으로 판명한 클래스, ② 다른 존의
+        # 세션 관측 증거 기반 콤보 자격 제외 (배치 사전정보(planogram)가 아니라
+        # 이 세션에서 관측된 증거만 쓴다): ① ghost_ledger가 유령으로 판명한
+        # 클래스, ② 다른 존의
         # 무게 뒷받침 과금이 이미 설명한 클래스(동시 멀티존 취출의 공유 영상
         # 표 유입 차단 — 12차 ses-5: z3에서 과금된 27이 z1 콤보에 유입),
         # ④ 이 존의 COMPLETE 판정이 보고도 기각한 "과금 클래스 이상 득표"

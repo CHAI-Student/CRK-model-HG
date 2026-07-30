@@ -7,14 +7,14 @@ c23 5표). **트리거 안에서는 진짜 취출과 구분 불가** — 구분 
 사이에 있다: 유령은 여러 존에서 반복 등장하면서 세션 전체에서 단 한 번도
 무게의 뒷받침을 받지 못한다.
 
-정의 (배치 사전정보 아님 — 이 세션에서 관측된 증거만, tray_memory와 동일 태도):
+정의 (배치 사전정보 아님 — 이 세션에서 관측된 증거만):
 
   ghost(c) ⇔ c가 서로 다른 존 ≥ min_zones의 removal 이벤트에서 자격 표
   (vote_count ≥ vote_floor)를 얻었고, 세션 내 어떤 무게 뒷받침 판정에도
   c가 없다.
 
   무게 뒷받침 = COMPLETE이고 reason에 refit/near_gate가 없는 판정의 과금
-  (tray_memory 등록 게이트와 동일 원리 — PARTIAL·near_gate·refit은 무게가
+  (PARTIAL·near_gate·refit은 무게가
   delta 전량 설명을 보증하지 않는 예외 경로라 뒷받침으로 안 친다. 실측
   ses-4-1784807732: 유령 c24가 z1에서 identity_partial로 과금됐지만 무게
   잔차 93g — 이런 과금은 뒷받침이 아니다).
@@ -72,8 +72,8 @@ class GhostLedgerConfig:
 
 
 def _weight_backed_classes(events: Sequence[TriggerEvent]) -> set[int]:
-    """세션 내 무게 뒷받침 과금을 받은 클래스 집합 (tray_memory 등록 게이트와
-    동일 원리 — COMPLETE + refit/near_gate 아님)."""
+    """세션 내 무게 뒷받침 과금을 받은 클래스 집합
+    (COMPLETE + refit/near_gate 아님)."""
     backed: set[int] = set()
     for e in events:
         if e.status != "ok" or e.judgment.status is not JudgmentStatus.COMPLETE:
