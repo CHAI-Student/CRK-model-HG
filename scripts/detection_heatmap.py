@@ -210,7 +210,7 @@ def print_ascii(data: dict) -> None:
             if not cg.total:
                 continue
             print(f"\n[{cam}] zone {zone} — {kind} mean conf (n={cg.total}, 위=프레임 상단)")
-            for r, row in enumerate(cg.mean()):
+            for row in cg.mean():
                 print(
                     "  "
                     + " ".join(

@@ -1340,3 +1340,276 @@ unit_weight는 정책상 고정이고 실측과 10~30g 편차가 있으므로(�
   섹션).
 - 순감 약 500줄(코드+테스트). 전체 **383 passed**(+3 env-fail: macOS ffmpeg
   dyld — 기존, 무관; 삭제된 기능의 테스트 13건 정리분 반영), ruff clean.
+
+---
+
+## 2026-07-27 12~14차 배치 — close 콤보가 정답 판정을 뒤집는 오과금 (issue #17, 가드 4중 강화)
+
+- **증상**: 냉동 실기 12~14차에서 판정층이 맞춘 존을 CLOSE 정산의 vision combo
+  재solve가 반대로 뒤집는 사고가 연속 6건. 12차 ses-11 `13x2 → 13x1+24x1`,
+  12차 ses-3 `3x4 → 3x3+30x3`, 12차 ses-5 z1/z3, 13차 ses-20 `23x4 →
+  13x1+23x3`, 14차 ses-1 `3x4 → 3x3+30x3`, 14차 ses-2 `13x4 → 13x3+24x1`.
+
+- **원인**: 콤보 재료로 쓰일 소수 클래스의 자격 요건이 "표 3개 이상"뿐이었다.
+  그 문턱은 ① 오분류 플리커(7~9표), ② 멀티존 공유 영상으로 유입된 타존 표,
+  ③ 판정층이 이미 명시적으로 기각한 클래스를 전부 통과시킨다. 게다가 정산은
+  판정보다 적은 정보(무게 산수)만 보는데도, 잔차가 몇 g 더 작다는 이유만으로
+  판정 결과를 덮을 수 있었다 (13차 ses-20: 잔차 2g vs 스냅 11g).
+
+- **해결방안** — 콤보 자격 5중 가드. 실패 방향은 전부 "콤보 미형성 = 비전 판정
+  유지"라 fail-safe 쪽으로만 틀어진다 (`crk_model/ledger/settler.py`):
+  1. **실존 증거 하한** (12차): top 대비 득표율 ≥ 0.5 **또는** conf ≥ 0.8
+     (`MODEL__CLOSE__COMBO_MIN_VOTE_RATIO` / `..._MIN_CONF`).
+  2. **교차존 설명 제외** (12차): 다른 존의 무게 뒷받침 과금이 이미 설명한
+     클래스는 재료 금지.
+  3. **고스트 제외** (12차): `ghost_ledger`가 유령으로 검출한 클래스 금지
+     (`MODEL__CLOSE__COMBO_SESSION_GUARD`).
+  4. **판정 기각 존중** (13차 → 14차 일반화): 13차엔 "원본 풀 득표 1위가 이 존
+     COMPLETE 과금에 없으면 재료 금지"(`top_rejected_by_judgment`)로 넣었으나,
+     14차 ses-1에서 차순위 c30(48표, conf .94 — 실존 하한 통과)이 같은 구멍으로
+     빠져나갔다. 그래서 **존의 COMPLETE 과금 클래스보다 표가 많거나 같은 미과금
+     클래스는 전부 판정의 명시적 기각으로 간주**(`rejected_by_judgment`)하도록
+     일반화. 콤보가 추가할 수 있는 건 과금 클래스보다 표가 적은 진짜 소수
+     클래스뿐. 과금 클래스가 풀에 없으면(weight_only) 득표 1위만 기각 취급,
+     존에 COMPLETE 과금이 없으면(partial 등) 미적용.
+  5. **확신 스냅 보호** (14차 ses-2): 게이트 안 스냅을 콤보가 뒤집으려면 존
+     판정(COMPLETE) conf < 0.95 (`MODEL__CLOSE__COMBO_OVERRIDE_MAX_CONF`, >1로
+     비활성). 실측 분리선 — 오버라이드 오답 6건은 전부 conf 0.96~1.0, 보호
+     케이스(3+44 앨리어싱 구제)는 0.9/0.72. 자격 임계 미세조정만으로는 보호
+     픽스처 c3(conf .89)와 c24(conf .84)가 0.05 차이라 분리 불가능했다.
+
+- **회귀 안전**: 콤보의 존재 이유인 보호 케이스(0723부터 7회 재현된
+  `3+44 → 44x4` 앨리어싱 구제)는 c3이 57% 득표 또는 conf .89로 자격을 유지하고,
+  표 시그니처(8표 < 14/46표)가 규칙 ④의 "소수 클래스" 정의와 정확히 일치해
+  기존 테스트 5건 전부 무손실 통과. 게이트 실패 구제 경로는 무변경.
+
+- **관측**: 억제 시 `freezer_combo_suppressed:zone{N}:...`,
+  규칙 ⑤ 기각 시 `freezer_combo_rejected_confident_snap:zone{N}:...` 노트를
+  정산에 남겨 analyze-sessions로 가드 정오를 실측할 수 있다.
+
+- **관련 파일**: `crk_model/ledger/settler.py`, `crk_model/core/config.py`
+  (COMBO 노브 4종), `crk_model/service/model_service.py`(배선),
+  `tests/test_ledger.py`(+7건 — 사고 4건 재구성 + 보호 케이스 고정).
+
+---
+
+## 2026-07-28 프레임별 bbox 기록 + render-session 오버레이 CLI — 지각 실패의 육안 검증 수단
+
+- **배경**: 11차 이후 반복된 미해결 관측이 "정답 상품이 후보에 아예 없다"(지각
+  레벨 실패)인데, vote_summary·filter_drops 숫자만으로는 **모델이 실제로 무엇을
+  보고 있었는지** 확인할 방법이 없었다. 실기 결제 세션 사후에 검출 품질을
+  눈으로 볼 수 있어야 한다.
+
+- **구현**:
+  - `MODEL__SESSION__SAVE_DETECTIONS=1`(기본 off)이면 추론 프레임별 검출을
+    세션 아카이브 trace(`frame_detections`)에 동봉. 최초 구현은 raw 검출 +
+    필터 pass/fail 플래그였으나, 후속 커밋에서 **판정에 실제로 투입된 것만**
+    남기도록 축소했다(필터 체인 생존 && 카메라별 투표 진입 conf 이상, 체인을
+    통과한 hand) — kept-flag raw 덤프는 은퇴, 렌더러는 legacy `kept=false`
+    항목을 건너뛴다.
+  - `render-session` CLI 신설(`crk_model/adapters/render_cli.py`, console
+    script 등록): 기록된 bbox를 트리거 AVI 위에 오버레이(numpy 드로잉 +
+    ffmpeg 파이프). 라이브 파이프라인과 **동일한 480×480 크롭 기하**를 재현한다.
+  - 합성 캔버스를 560×624 마진 캔버스로 변경 — 세션 헤더는 프레임 위 밴드,
+    bbox 라벨은 마진으로 흘려서 클리핑·헤더 겹침으로 정보가 가려지지 않게 함.
+
+- **파생 수정 — 냉장 side 카메라 크롭**: 냉장 side는 left-crop(x=0..480,
+  `MODEL__VIDEO__SIDE_CROP=left`)으로 디코드하고, **크롭 원점을 아카이브에
+  스탬프**(`trace.camera_crops`)해 render-session이 기록 당시 좌표계를 정확히
+  재현하도록 계약화. `refrg.env.example` 신설(냉장 템플릿, side ROI 0..300 —
+  현장 결정값).
+
+- **성능 결함 정정**: `_compose_frame`이 프레임당 ~11ms(실기 480프레임 듀얼
+  카메라 트리거 기준 순수 합성만 ~10초) — 매 프레임 1MB 캔버스 배경 재충전,
+  테두리 재drawing, 정적 헤더 3줄 글리프 단위 재stamp, 문자마다 `np.kron` 재실행.
+  캔버스(배경+테두리+정적 헤더)를 트리거/카메라당 1회만 렌더해 복사하고 스케일된
+  글리프 마스크를 `(char, scale)` 키로 캐시 — 프레임당은 카메라 영상·bbox·상태
+  줄만 stamp. 데모 렌더 0.64s → 0.28s, **mp4 바이트 동일**.
+
+- **관련 파일**: `crk_model/adapters/render_cli.py`(신규),
+  `crk_model/service/pipeline.py`(`_record_frame_detections`, camera_crops),
+  `crk_model/ledger/archive.py`, `crk_model/adapters/avi_frames.py`(side 크롭),
+  `crk_model/core/config.py`, `crk_model/adapters/http_app.py`,
+  `pyproject.toml`(render-session), `freezer.env.example`,
+  `refrg.env.example`(신규), `tests/test_render_cli.py`(신규)·
+  `tests/test_service.py`·`tests/test_session_archive.py`(+19건).
+
+---
+
+## 2026-07-28 analyze-sessions --session이 아카이브 전체를 파싱 (단일 조회 9.7s)
+
+- **증상**: 세션 1개 상세 덤프를 뽑는 `analyze-sessions --session <id>`가 수 초씩
+  걸림. SAVE_DETECTIONS를 켠 뒤로는 세션당 수백 KB라 체감이 급격히 악화.
+
+- **원인**: `--session`이 **아카이브의 모든 YAML을 파싱한 뒤** 그중 하나를 고르는
+  구조 — 단일 조회 비용이 O(전체 아카이브 바이트)였다. 파싱 비용의 지배분은
+  순수 파이썬 `yaml.SafeLoader`.
+
+- **해결방안**: ① `SessionArchive.find`로 파일을 직접 해석(파일명 stem ==
+  session_id 계약)하고 그 파일만 파싱. ② `--since`는 파싱 **전에** 파일명 epoch로
+  프리필터. ③ 문서 load/dump에 libyaml `CSafeLoader`/`CDumper`가 있으면 우선 사용
+  — 부수 효과로 finalize 시점의 아카이브 덤프도 워커 임계 경로에서 빠진다.
+
+- **벤치마크**: 20세션 × 354KB, 단일 조회 **9.7s → 80ms**.
+
+- **관련 파일**: `crk_model/adapters/analyze_cli.py`, `crk_model/ledger/archive.py`,
+  `tests/test_analyze_cli.py`(+3건).
+
+---
+
+## 2026-07-28~29 냉동 트리거 13.7s — 레이턴시 T1/T2 레버 + 배치 엔진 도입 결함 4종
+
+- **배경 (`docs/0728_freezer_latency_research.md` 신규)**: 실기 34개 트레이스
+  전수 회귀로 비용 모델 확정 — `processing_time_ms ≈ 40.1ms × yolo_calls`
+  (평균 절대오차 4.4%). 냉동 평균 **13.7s/트리거** vs 냉장 5.7~6.8s이고,
+  `close_timeout 10s < 13.7s`라 구조적으로 추론이 배리어보다 길다. 40ms의
+  **~72%가 CPU측 오버헤드**(ultralytics 프레임별 letterbox/BGR→RGB/HWC→CHW//255)
+  이고 GPU는 논다. NVDEC이 MJPEG를 디코드 못 한다는 점, Orin Nano 4GB 전력
+  모드 램프업 비용 등 "하지 말 것"도 문서에 확정 기록.
+
+- **T1 — 무위험(판정 비트 동일)**:
+  - `EarlyTerminator.should_stop`이 candidates를 **lazy callable**로 받도록 변경,
+    파이프라인은 `voting.combine`을 미평가로 넘긴다. 냉동 트리거(I15로 항상
+    False)와 hand-exit/return 검사에만 걸리는 냉장 프레임이 추론 프레임마다
+    치르던 O(votes²) combine 비용이 사라진다.
+  - ffmpeg 디코드가 120×120 게이트 뷰를 **채널 평균 전에** nearest-downsample —
+    픽셀 16배 감소, 출력 비트 동일(등가성 회귀 테스트 동봉).
+
+- **T2 — 구조 개선(기본 off: `BATCH_SIZE=1` / `PREFETCH=0`이면 기존 경로 그대로)**:
+  - `UltralyticsEngineDetector.detect_batch`: 게이트 통과 프레임을 전처리 완료
+    GPU 텐서(BCHW/RGB/0-1, uint8 업로드 후 device-side 변환)로 **단일 predict**에
+    투입 — ultralytics의 프레임별 CPU 전처리(측정 비용의 ~72%)를 생략.
+    고정 배치 + zero-frame 패딩(D8 계획). 입력이 imgsz-square가 아니면
+    프레임별 detect로 폴백해 박스 좌표계가 항상 프레임 공간에 남도록 보장.
+  - `TriggerPipeline`에 `batch_size`/`prefetch_depth`: 단일 `consume()` 경로
+    (filters→record→evidence→voting→latch→early-exit)가 프레임별 루프와 배치
+    루프 양쪽을 서비스하므로 **배치가 판정을 바꿀 수 없다**. 배치 중간 조기
+    종료는 남은 배치 결과를 폐기해 투표 동등성 보존. `PrefetchFrames`는 카메라별
+    bounded queue로 선행 디코드하고 트리거 시작에 전 카메라를 열어 side 디코드가
+    top 추론과 겹치게 한다(조기 종료 시 `close()`가 ffmpeg까지 전파).
+  - 기동 프로브가 배치 구성일 때 `detect_batch`를 1회 실행 — 엔진 배치/dtype
+    불일치를 기동 실패로 노출(fail-fast). `convert_engine.sh`에 `BATCH=N`.
+  - 판정 동등성 테스트: 냉동 batch4 vs 비배치, 나머지 flush, 배치 중간 조기 종료,
+    프리페치 순서/에러/close 시맨틱.
+
+- **도입 결함 4종 (07-29 정정)**:
+  1. **기동 크래시** — static batch-4 TRT 엔진은 배치 차원이 정확히 4가 아닌
+     predict를 거부(`input size torch.Size([1,3,480,480]) not equal to max model
+     size (4,3,480,480)`)해서, 기동 프로브의 단일 프레임 `detect()`가 첫 트리거
+     전 웜업에서 죽었다. batch>1이면 `detect()`가 `detect_batch`로 위임
+     (zero-frame 패딩 후 첫 결과 슬라이스)하고, `detect_batch`의 non-square
+     폴백은 batch-1 재귀 대신 계약 오류를 raise.
+  2. **PREFETCH=0 동작 변화** — 프리페치가 꺼져 있어도 트리거 시작에 전 카메라
+     스트림 dict를 즉시 만들어서, `LazyAviFrames`가 side ffmpeg 디코더를 master
+     대비 top 추론 1회분 **일찍** 열고 있었다. 프리페치가 아닐 때는 각 카메라의
+     처리 차례에 열도록 되돌리고 오픈 타이밍을 회귀 테스트로 고정.
+  3. **엔진 파일 조용한 덮어쓰기** — ultralytics export는 항상 `{stem}.engine`을
+     쓰므로 batch-4 재빌드가 배포된 batch-1 파일을 조용히 대체하는데 `.env`는
+     옛 `BATCH_SIZE`를 선언한 채였다. export를 `{stem}_batch{N}.engine`으로
+     rename하고 env 템플릿·문서가 접미사 파일을 가리키게 변경 — 짝이 어긋난
+     조합은 기동 프로브에서 즉시 실패.
+  4. **두 T2 이득의 측정 분리 불가** — GPU 텐서 전처리가 `BATCH_SIZE>1` 뒤에만
+     있어서, 정적 배치 엔진 재export 없이는 "전처리 GPU 이관"과 "배치 상각"을
+     따로 잴 수 없었다. `MODEL__VISION__TENSOR_INPUT=1`이면 단일 프레임 배치로
+     `detect_batch`를 경유(batch-1 엔진이 그대로 수용) — 엔진 재빌드 없이
+     전처리만 GPU로 넘어간다. 기동 프로브도 이 구성에서 `detect_batch`를
+     검증하고, 리서치 문서에 A/B/C/D 측정 매트릭스 추가.
+
+- **관련 파일**: `crk_model/perception/early_termination.py`,
+  `crk_model/perception/detector.py`, `crk_model/adapters/yolo_detector.py`,
+  `crk_model/adapters/avi_frames.py`, `crk_model/adapters/serve.py`,
+  `crk_model/frames/prefetch.py`(신규), `crk_model/service/pipeline.py`,
+  `crk_model/service/model_service.py`, `crk_model/core/config.py`,
+  `scripts/convert_engine.sh`, `freezer.env.example`·`refrg.env.example`,
+  `docs/0728_freezer_latency_research.md`(신규),
+  `tests/test_t2_batch.py`(신규)·`tests/test_perception.py`·
+  `tests/test_frames_streaming.py`(+22건).
+
+- **미검증**: Jetson 실기에서의 실제 절감(40ms/call → 15~20ms 가설, 냉동
+  13.7s → 5~7s)은 A/B/C/D 매트릭스 측정 대기. Tier 3(냉동 게이트 정상화)는
+  판정이 바뀔 수 있어 별도 배치로 분리.
+
+---
+
+## 2026-07-29 detection-heatmap — zone×프레임 위치 검출 분포 계측 (issue #18)
+
+- **배경**: 냉장 실기(issue #18)에서 "side 카메라가 zone 2에서만 제대로
+  일반화된다"는 가설이 제기됨(오른쪽 로드셀들이 side 카메라에 더 가까워
+  움직임·블러가 심하다는 관찰 포함). 세션 로그의 후보 목록만으로는 검출이
+  **프레임 어느 위치에서** 얼마나 잡히는지 알 수 없었다.
+
+- **구현**: `scripts/detection_heatmap.py` — 아카이브의 `frame_detections`
+  (`SAVE_DETECTIONS=1` 필요)를 파싱해 카메라별로 존×프레임 격자의 상품/hand
+  검출 밀도와 평균 conf를 히트맵으로 렌더. PyYAML만 필수, matplotlib은 선택
+  (없으면 ASCII/CSV 폴백).
+
+- **후속 보정(실기 1회 실행에서 드러난 집계 왜곡 2종)**:
+  - 모든 존의 top 카메라 셀 (0,6)에 **고정 위치 class-48 유령**(conf~0.1,
+    1400+ 레코드)이 있어 raw count를 부풀림 → `--min-conf`로 임계 미만 레코드
+    제외.
+  - raw count가 존별 세션 수에 그대로 편향 → frames/per-frame 표를 추가해
+    존 간 비교의 공정한 분모 제공.
+
+- **관련 파일**: `scripts/detection_heatmap.py`(신규).
+
+- **후속 lint 정정 (07-30)**: `print_ascii`의 `for r, row in enumerate(cg.mean())`
+  가 행 인덱스 `r`을 쓰지 않아 ruff `B007`로 걸렸고, CI의 `ruff check .` 단계가
+  실패 중이었다(`detection_heatmap.py:213`). `enumerate`를 제거해
+  `for row in cg.mean()`로 정리 — 출력 동일.
+
+---
+
+## 2026-07-29 issue #18 냉장 fitting — heatmap 진단 후속 지각 노브 3종 (전부 기본 off)
+
+- **배경**: 위 detection-heatmap으로 냉장 아카이브를 실측해 구조적 문제 3종이
+  드러났다 — ① side 카메라의 정적 진열 오투표(zone1 class43이 450검출 @
+  conf 0.21), ② 정답 상품의 vote_ratio가 0.03~0.07로 플리커와 구분 불가한
+  분모 희석(실기 ses-6: class 49, 10표/186 = 0.054), ③ 빠른 취출에서 정답
+  클래스가 `no_motion`으로 몰수. 세 수정 모두 **기본값이 기존 동작**이고 env로만
+  켜진다 — 냉장 실기 A/B 후 승격 판단.
+
+**① side 카메라 hand 추론 opt-in** (`MODEL__VISION__SIDE_HAND_ENABLED=1`)
+- side allowlist에 hand(0)를 추가해 카메라별 래치(I16)와 hand_path 근접 필터가
+  side에서도 무장하도록 한다 — 손 경로에서 먼 정적 진열 검출이 투표에 들어오지
+  못한다.
+- side hand 검출 **1건**이 hand_path를 무장시키는 트리거이므로 오검출 1건이
+  필터를 무력화할 수 있다. 그래서 side 전용(더 엄격한) 하한
+  `MODEL__VISION__SIDE_HAND_CONFIDENCE_THRESHOLD`를 분리 — 음수(기본 -1.0)면
+  `HAND_CONFIDENCE_THRESHOLD`(0.30)를 상속.
+- 07-22 P0-2 이식 때 "원본은 side에서 hand를 추론하지 않는다"를 따랐던 결정을
+  냉장 환경에 한해 선택적으로 뒤집는 것 — 기본 off라 냉동 배포는 무영향.
+
+**② vote_ratio 분모 선택** (`MODEL__VISION__VOTE_RATIO_DENOMINATOR=hand_window`)
+- 원인: 기존 분모(`gate`)는 **양 카메라의 게이트 통과 추론 프레임 전체**
+  (프리롤·포스트롤·상대 카메라 스트림 포함)를 세는데 분자는 취출 창 안으로
+  제한된다. 그래서 실제 상품이 ratio 0.03~0.07에 떨어져 플리커 노이즈와 같은
+  구간에 놓이고, **영상이 길수록 정답이 불리해지는** 길이 의존 지표였다.
+- `hand_window`는 카메라별로 hand-active 프레임(손이 보이거나 래치가 열린
+  프레임)만 센다 — "취출이 보일 수 있었던 프레임"이라는 길이 불변 밀도.
+  손을 한 번도 못 본 카메라는 자기 gate 수로 폴백.
+- 기본값 `gate` 유지. 변경 시 세션에 `vote_summary.ratio_denominator`를 기록해
+  두 정의의 아카이브가 섞여 비교되는 사고를 막는다.
+
+**③ 모션 측정 불가 클래스 면제** (`MODEL__VISION__MOTION_UNMEASURABLE=exempt`)
+- 원인: 관측 1개짜리 트랙은 path=0·max_disp=0이라 `passes()`가 **구조적으로
+  도달 불가**다 — 1~2프레임만 보인 빠른 취출(또는 max_jump 파편화)이 "너무 빨리
+  움직였다"는 바로 그 이유로 정답 클래스를 `no_motion` 몰수당한다.
+- `exempt`는 측정 가능한 트랙이 아예 없는 클래스(전 관측이
+  `MOTION_MEASURABLE_MIN_OBS`=3 미만)를 면제 — zero-bbox 면제와 같은 fail-open
+  방향이며, 근거는 "측정 불가 트랙은 정지의 증거가 되지 못한다"는 것.
+- 정밀도 보존: **측정된** 정지(긴 트랙, path≈0 = 진열)는 그대로 몰수하고,
+  파편이라도 같은 클래스에 측정 가능한 형제 트랙이 있으면 몰수를 유지한다
+  (진열+취출 동시 케이스의 정밀도).
+- 기본값 `forfeit`. `debug_summary`의 `rejected_by`를 `no_motion` /
+  `no_motion_unmeasurable`로 분리하고 모션 요약에 `unmeasurable: true`를 표시해
+  실기 아카이브로 승격 근거를 모을 수 있게 했다.
+
+- **관련 파일**: `crk_model/perception/filters.py`(side hand allowlist·conf),
+  `crk_model/perception/voting.py`(분모 선택·몰수 사유 분리),
+  `crk_model/perception/motion_evidence.py`(측정 가능성 판정),
+  `crk_model/core/config.py`(노브 5종), `crk_model/service/pipeline.py`·
+  `crk_model/service/model_service.py`(배선), `refrg.env.example`,
+  `tests/test_perception.py`·`tests/test_service.py`(+14건).
+
+- **전체 상태 (2026-07-30 기준)**: `pytest -q` → **449 passed**,
+  `ruff check .` → All checks passed.
