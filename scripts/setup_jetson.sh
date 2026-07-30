@@ -75,10 +75,14 @@ install_project_packages() {
         "scipy>=1.4.1" \
         "matplotlib>=3.3.0" \
         "psutil>=5.8.0" \
-        "polars>=0.20.0" \
-        "ultralytics-thop>=2.0.18"
+        "polars>=0.20.0"
 
-    uv pip install --no-deps "ultralytics>=8.0.0,<9.0.0"
+    # --no-deps 필수: 둘 다 torch를 의존성으로 선언한다. 의존성을 해석하게 두면
+    # PyPI의 x86 기준 CUDA 빌드(cu130 등)를 venv에 끌어와 JetPack torch를 가린다
+    # (2026-07-30 실기: 드라이버 12.6 vs torch cu130 → 기동 불가).
+    uv pip install --no-deps \
+        "ultralytics>=8.0.0,<9.0.0" \
+        "ultralytics-thop>=2.0.18"
 
     # TensorRT engine export deps (scripts/convert_engine.sh). NumPy 핀과 한
     # 명령으로 설치해야 resolver가 NumPy를 2.x로 올리지 않는다 — 미리 안 깔면
@@ -154,8 +158,11 @@ if [[ -d "${VENV_PATH}" && "${FORCE_RECREATE_VENV}" == "1" ]]; then
 fi
 
 if [[ ! -d "${VENV_PATH}" ]]; then
-    uv venv --system-site-packages --python "${PYTHON_BIN}" "${VENV_PATH}"
-    print_ok "Created .venv with system site packages"
+    # --seed: venv 안에 pip를 심는다. 없으면 활성화 상태에서 `pip list`가 조용히
+    # 시스템 pip로 떨어져 **venv 밖 패키지 목록**을 보여준다 — 2026-07-30 실기에서
+    # "pip list는 torch 2.8.0인데 import는 2.13.0+cu130" 오진의 원인이었다.
+    uv venv --seed --system-site-packages --python "${PYTHON_BIN}" "${VENV_PATH}"
+    print_ok "Created .venv with system site packages (pip seeded)"
 else
     print_ok "Reusing existing .venv"
 fi
@@ -165,23 +172,15 @@ source "${VENV_PATH}/bin/activate"
 # below exercise the same CUDA/TensorRT environment that normal runtime uses.
 . "${PROJECT_ROOT}/scripts/jetson_env.sh"
 
-print_step "4/10" "Ensuring Jetson-compatible torch"
-
-if python -c "import torch; assert torch.cuda.is_available()" >/dev/null 2>&1; then
-    print_ok "Current venv PyTorch can see CUDA"
-else
-    if [[ "${INSTALL_JETSON_TORCH}" != "1" ]]; then
-        print_err "PyTorch inside .venv cannot see CUDA and INSTALL_JETSON_TORCH=0."
-        exit 1
-    fi
-
-    "${PROJECT_ROOT}/scripts/install_jetson_torch.sh"
-fi
-
-print_step "5/10" "Installing project dependencies"
+# 순서 주의: 의존성 설치가 **먼저**다. 반대로 하면(구 순서) torch 검증이 통과한
+# 뒤에 의존성 설치가 venv로 PyPI torch를 끌어와 검증 결과를 무효로 만든다 —
+# 2026-07-30 실기 사고: 시스템 torch로 검증을 통과한 뒤 ultralytics-thop의 의존성
+# 해석이 torch 2.13.0+cu130(CUDA 13 빌드)을 venv에 설치해, 드라이버 12.6에서
+# "Nvidia driver ... too old (found version 12060)"로 기동 불가.
+print_step "4/10" "Installing project dependencies"
 
 install_project_packages
-print_ok "Project dependencies installed without replacing Jetson torch"
+print_ok "Project dependencies installed"
 
 NUMPY_VERSION="$(python -c 'import numpy; print(numpy.__version__)')"
 if [[ "${NUMPY_VERSION}" == 2.* ]]; then
@@ -190,6 +189,51 @@ if [[ "${NUMPY_VERSION}" == 2.* ]]; then
     NUMPY_VERSION="$(python -c 'import numpy; print(numpy.__version__)')"
 fi
 print_ok "NumPy ${NUMPY_VERSION}"
+
+print_step "5/10" "Ensuring Jetson-compatible torch"
+
+torch_report() {
+    python - <<'PY' 2>/dev/null
+import torch
+
+print(f"{torch.__version__} cuda={torch.version.cuda} available={torch.cuda.is_available()}")
+print(torch.__file__)
+PY
+}
+
+torch_cuda_ok() {
+    python -c "import torch; assert torch.cuda.is_available()" >/dev/null 2>&1
+}
+
+if torch_cuda_ok; then
+    print_ok "PyTorch can see CUDA: $(torch_report | head -1)"
+    print_note "  imported from $(torch_report | tail -1)"
+else
+    TORCH_LINE="$(torch_report | head -1)"
+    print_warn "PyTorch cannot see CUDA. Current import: ${TORCH_LINE:-import failed}"
+
+    # venv 안의 torch가 정상 동작하는 외부 torch(JetPack dist-packages 또는
+    # 사용자 사이트)를 가리고 있을 수 있다 — 의존성 해석이 PyPI 휠을 끌어온
+    # 경우가 그렇다. 휠 재다운로드 전에 먼저 venv 로컬 torch를 걷어내고
+    # 외부 torch로 되돌려 본다 (네트워크 불필요, 2026-07-30 실기 복구 절차).
+    VENV_SITE="$(python -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"
+    if [[ -d "${VENV_SITE}/torch" ]]; then
+        print_warn "torch exists inside the venv (${VENV_SITE}/torch) and shadows the outer install. Removing it."
+        uv pip uninstall torch torchvision torchaudio >/dev/null 2>&1 || true
+        # torch를 끌어온 유일한 패키지를 의존성 없이 복구
+        uv pip install --no-deps "ultralytics-thop>=2.0.18" >/dev/null 2>&1 || true
+    fi
+
+    if torch_cuda_ok; then
+        print_ok "Outer PyTorch restored: $(torch_report | head -1)"
+        print_note "  imported from $(torch_report | tail -1)"
+    elif [[ "${INSTALL_JETSON_TORCH}" != "1" ]]; then
+        print_err "PyTorch cannot see CUDA and INSTALL_JETSON_TORCH=0."
+        exit 1
+    else
+        "${PROJECT_ROOT}/scripts/install_jetson_torch.sh"
+    fi
+fi
 
 print_step "6/10" "Preparing runtime configuration"
 
@@ -231,15 +275,29 @@ import torch
 
 print(f"FastAPI: {fastapi.__version__}")
 print(f"NumPy: {numpy.__version__}")
-print(f"PyTorch: {torch.__version__}")
-print(f"CUDA version: {torch.version.cuda}")
+print(f"PyTorch: {torch.__version__} (built for CUDA {torch.version.cuda})")
+# 어느 경로의 torch가 import됐는지 반드시 남긴다 — venv 안/JetPack dist-packages/
+# 사용자 사이트(~/.local) 중 어디인지가 장애 진단의 첫 갈림길이다.
+print(f"PyTorch origin: {torch.__file__}")
 print(f"CUDA available: {torch.cuda.is_available()}")
 
 if torch.version.cuda is None:
-    raise SystemExit("PyTorch is still CPU-only inside .venv.")
+    raise SystemExit("PyTorch is still CPU-only. Verify the Jetson wheel source.")
 
 if not torch.cuda.is_available():
-    raise SystemExit("PyTorch can import, but CUDA is still unavailable inside .venv.")
+    # 대표적 원인: torch의 빌드 CUDA가 드라이버보다 새것 (PyPI 휠이 섞였을 때).
+    # 그 경우 torch가 "Nvidia driver ... too old (found version NNNNN)"을 던지는데,
+    # NNNNN은 드라이버 CUDA(예: 12060 = 12.6)이지 드라이버 자체의 문제가 아니다.
+    raise SystemExit(
+        "PyTorch imports but CUDA is unavailable.\n"
+        f"  built for CUDA {torch.version.cuda}, imported from {torch.__file__}\n"
+        "  If the build CUDA is newer than this Jetson's driver, a PyPI wheel got\n"
+        "  mixed in. Remove it from the venv and fall back to the JetPack build:\n"
+        "    uv pip uninstall torch torchvision torchaudio\n"
+        "    uv pip install --no-deps 'ultralytics-thop>=2.0.18'\n"
+        "  Note: inside a uv-created venv, `pip list` may report the *system*\n"
+        "  packages; trust `torch.__file__` above instead."
+    )
 PY
 
 print_step "8/10" "Verifying entry points"

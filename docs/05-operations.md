@@ -52,6 +52,24 @@ chmod +x scripts/setup_jetson.sh scripts/install_jetson_torch.sh scripts/jetson_
 이 스크립트는 `.env`를 **`.env.example`(냉장 기본)** 에서 생성합니다. 냉동 기기라면
 1.3에서 `freezer.env.example`로 덮어쓰세요.
 
+#### torch 그림자 — 이 환경의 가장 흔한 기동 실패
+
+Jetson에서 정상 동작하는 torch는 **venv 밖**(JetPack `dist-packages` 또는 사용자
+사이트 `~/.local/...`)에 있고, venv는 `--system-site-packages`로 그것을 빌려 씁니다.
+그래서 **venv 안에 torch가 하나라도 설치되면 밖의 정상 torch를 가립니다.**
+
+- 어떻게 들어오나: `torch`를 의존성으로 선언한 패키지(`ultralytics`,
+  `ultralytics-thop`)를 `--no-deps` 없이 설치하면 resolver가 PyPI의 CUDA 13 빌드를
+  venv에 넣습니다. 2026-07-30 실기에서 `.venv`를 지우고 재설치한 직후 발생했습니다.
+- 증상: 기동 시 `Nvidia driver ... too old (found version 12060)`.
+- 진단: `torch.__file__`가 `.venv/lib/.../site-packages/torch`를 가리키면 그림자입니다
+  (정상은 `~/.local/...` 또는 `/usr/lib/python3/dist-packages/...`).
+- 복구: `uv pip uninstall torch torchvision torchaudio` →
+  `uv pip install --no-deps "ultralytics-thop>=2.0.18"`.
+- 예방: 현재 `setup_jetson.sh`는 ① 의존성 설치를 torch 검증보다 **먼저** 하고,
+  ② 검증 실패 시 venv 로컬 torch를 자동으로 걷어내 밖의 torch로 되돌리며,
+  ③ 7단계 검증이 `PyTorch origin` 경로를 항상 출력합니다.
+
 ### 1.3 환경 파일과 기동
 
 기기 종류에 맞는 템플릿을 `.env`로 복사합니다. `.env`는 기동 시 자동 로드되며,
@@ -531,6 +549,8 @@ vision 후보가 0개일 때의 폴백 규칙입니다.
 |---|---|---|
 | `model-service`가 이 서비스가 아니라 **레거시 CRK-model을 띄운다** | 레거시 서비스도 같은 이름의 콘솔 스크립트를 등록한다 — 한 venv에 두 패키지가 설치되면 나중에 설치된 쪽이 이름을 차지한다 | `which model-service`로 어느 venv인지 확인 → 이 저장소 venv에서 `pip install --no-deps -e .` 재실행. 애초에 두 서비스를 같은 venv에 섞지 않는다 |
 | 업데이트 후 `model-service: command not found` | 2026-07-30 이전 버전은 엔트리포인트 이름이 `model-service-hg`였다 — 이름이 바뀌면 재설치 전까지 새 이름이 생기지 않는다 | `pip install --no-deps -e .` 재실행(1.4절). systemd·기동 스크립트의 명령 이름도 함께 갱신 |
+| `Nvidia driver on your system is too old (found version 12060)` | 드라이버 문제가 **아니다** — 12060은 이 Jetson의 정상 드라이버 CUDA(12.6). venv에 CUDA 13 빌드 PyPI torch가 섞여 JetPack torch를 가린 것 | `python -c "import torch; print(torch.__version__, torch.version.cuda, torch.__file__)"` → 빌드 CUDA가 12.6보다 새것이면 `uv pip uninstall torch torchvision torchaudio` 후 `uv pip install --no-deps "ultralytics-thop>=2.0.18"`. 자세한 배경은 아래 "torch 그림자" |
+| `pip list`와 `import`의 패키지 버전이 다르다 | `uv venv`로 만든 venv에는 pip가 없어(`--seed` 미사용 시) 활성화 상태의 `pip`가 **시스템 pip**로 떨어진다 — 즉 venv 밖 목록을 보여준다 | 진단은 `pip list`가 아니라 `python -c "import <pkg>; print(<pkg>.__file__)"`로 한다. `ls .venv/bin | grep ^pip`이 비어 있으면 이 상황 |
 | 기동 직후 프로세스가 죽는다 (엔진 로드 실패) | `.engine` 경로 오류, 또는 다른 기기/TensorRT 버전에서 빌드한 엔진 | `MODEL__VISION__YOLO_MODEL_PATH` 확인 → 그 Jetson에서 `scripts/convert_engine.sh`로 재빌드(1.5절) |
 | 기동 시 CUDA 관련 실패 | venv가 `--system-site-packages` 없이 만들어져 CPU torch를 씀, 또는 CUDA/TensorRT 경로 미설정 | venv 재생성(`uv venv --system-site-packages`) → `source .venv/bin/activate`(활성화 훅이 `jetson_env.sh`를 source) |
 | 추론/export가 NumPy 오류로 죽는다 | venv에 NumPy 2.x가 들어옴(Jetson torch는 1.x 빌드). 보통 ultralytics 자동 설치가 원인 | `uv pip install onnx onnxslim "numpy>=1.24.0,<2.0.0"` (핀과 함께 한 명령으로). `convert_engine.sh`는 사전 검사로 미리 차단한다 |

@@ -1692,3 +1692,49 @@ unit_weight는 정책상 고정이고 실측과 10~30g 편차가 있으므로(�
   `docs/08-handover.md` §4 리스크 등록부에 명시. `setup_jetson.sh`의 활성화 훅
   중복 삽입 가드는 구 이름 훅도 인식하도록 'Jetson runtime hook'으로 완화.
   기존 배포는 `pip install --no-deps -e .` 재실행 전까지 새 이름이 생기지 않는다.
+
+---
+
+## 2026-07-30 Jetson 재설치 후 기동 불가 — venv가 JetPack torch를 가림 (setup_jetson.sh 결함)
+
+- **증상**: `.venv`를 지우고 `./scripts/setup_jetson.sh`를 다시 돌린 뒤 서비스가
+  기동하지 않고 `Nvidia driver on your system is too old (found version 12060)`.
+  스크립트 자체도 7/10 검증 단계에서 실패하며 멈췄다.
+
+- **오진 2회 (기록)**: ① 드라이버 노후 — 아니다. 12060은 이 Jetson의 정상 드라이버
+  CUDA(12.6)이고 torch가 자기 빌드 CUDA와 비교해 던지는 메시지다. ② 사용자
+  사이트(`~/.local`) 그림자 — `PYTHONNOUSERSITE=1`로 재현되지 않아 배제. **정상
+  torch가 오히려 `~/.local`에 있었다**(2.8.0/cu126) — 그래서 이 환경에
+  `PYTHONNOUSERSITE`를 넣으면 안 된다.
+
+- **원인 (2단)**:
+  1. `pip list`는 venv를 보고 있지 않았다. `uv venv`는 venv에 pip를 넣지 않으므로
+     활성화 상태의 `pip`가 조용히 시스템 pip로 떨어져 **venv 밖 목록**(JetPack
+     torch 2.8.0)을 보여줬다. 실제 import되던 것은 venv 안의 **2.13.0+cu130**.
+     진단이 두 라운드 지연된 직접 원인이다.
+  2. 스크립트의 단계 순서와 의존성 설치가 충돌했다. 4단계 torch 검증은 갓 만든
+     `--system-site-packages` venv에서 **밖의 정상 torch**로 통과하므로
+     `install_jetson_torch.sh`가 실행되지 않고, 이어지는 5단계 의존성 설치가
+     `ultralytics-thop`(torch를 의존성으로 선언)을 `--no-deps` 없이 깔면서 PyPI의
+     **CUDA 13 빌드 torch를 venv에 설치**해 밖의 정상 torch를 가렸다.
+
+- **해결방안** (`scripts/setup_jetson.sh`):
+  - `ultralytics-thop`을 `ultralytics`와 함께 **`--no-deps` 목록으로 이동** — torch를
+    끌어오는 경로를 없앤다.
+  - **의존성 설치(4)와 torch 검증(5)의 순서를 교환** — 설치가 검증을 무효화하지
+    못하게 한다. NumPy 1.x 강제 블록도 함께 앞으로 이동.
+  - 검증 실패 시 **venv 로컬 torch를 먼저 회수**하고 밖의 torch로 되돌려 재검사한다
+    (휠 재다운로드 없이 복구 — 이번 수동 복구 절차를 코드화). 그래도 실패하면 기존대로
+    `install_jetson_torch.sh`.
+  - venv 생성에 **`uv venv --seed`** — venv 안에 pip를 심어 `pip list`가 venv를
+    보게 한다. 이번 오진의 재발 방지.
+  - 7단계 검증이 `PyTorch origin`(`torch.__file__`)을 **항상 출력**하고, CUDA 불가 시
+    빌드 CUDA·경로·복구 명령·"`pip list`를 믿지 말 것"을 에러 메시지에 담는다.
+
+- **관련 파일**: `scripts/setup_jetson.sh`, `docs/05-operations.md`(§1.2 "torch 그림자"
+  소절 + 트러블슈팅 2행), `docs/08-handover.md`(§4 리스크 등록부 1행).
+
+- **미해결**: 정상 torch가 `~/.local`(사용자 사이트)에 있는 현 구성은 venv
+  `--system-site-packages`에 의존한다 — JetPack `dist-packages`로 옮기는 정리는
+  하지 않았다(동작 중인 실기를 건드리지 않기 위해). 사용자 사이트를 지우면 기동이
+  깨진다는 점만 기록한다.
