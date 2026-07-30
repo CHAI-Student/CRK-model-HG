@@ -1738,3 +1738,24 @@ unit_weight는 정책상 고정이고 실측과 10~30g 편차가 있으므로(�
   `--system-site-packages`에 의존한다 — JetPack `dist-packages`로 옮기는 정리는
   하지 않았다(동작 중인 실기를 건드리지 않기 위해). 사용자 사이트를 지우면 기동이
   깨진다는 점만 기록한다.
+
+- **후속 회귀 정정 (같은 날)**: 위 수정으로 들어간 5단계가 **다른 Jetson에서 단계
+  제목만 찍고 조용히 종료**됐다(`[5/10]` 직후 exit). 원인 2개 모두 이번 수정이
+  넣은 것:
+  1. `TORCH_LINE="$(torch_report | head -1)"` — torch가 아예 없으면 python이 1로
+     끝나고 `pipefail`이 그것을 파이프라인 상태로 올린다. 실패한 명령치환을 변수에
+     대입하면 `set -e`가 즉시 종료시킨다(재현 확인). torch 미설치 기기는
+     `install_jetson_torch.sh`로 넘어가야 하는데 그 전에 죽었다.
+  2. `print_note`는 `install_jetson_torch.sh`에만 있는 헬퍼인데 `setup_jetson.sh`에서
+     호출했다 → `command not found`(127) + `set -e`로 종료. torch가 정상인 기기는
+     이쪽으로 죽는다.
+  정정: `torch_report`를 `|| true`로 무해화하고 결과를 1회만 캡처, `print_note`를
+  이 스크립트에도 정의, `set -E` + **ERR 트랩**을 추가해 `set -e` 종료 시 실패 행
+  번호와 종료 코드를 반드시 출력하게 했다(조용한 종료 금지). NumPy 확인과
+  `VENV_SITE` 조회도 같은 패턴이라 명시적 실패/무해화로 바꿨다.
+  같은 계열의 **선존 결함**도 함께 수정: 6단계 `ENGINE_COUNT` 산출이
+  `find models/ ... | wc -l`인데 `models/`는 .gitignore 대상이라 **새 클론에는 없고**,
+  find의 비영 종료가 pipefail로 대입에 실려 6단계에서 종료됐다 → 디렉터리 존재
+  검사로 감쌌다.
+  검증: torch 상태 4종(미설치 / 정상 / venv 그림자 / 그림자+회수)을 python shim으로
+  모사해 5단계를 전부 완주시킴.

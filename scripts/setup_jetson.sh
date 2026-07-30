@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-set -euo pipefail
+set -Eeuo pipefail
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -32,6 +32,15 @@ print_warn() {
 print_err() {
     echo -e "${RED}ERROR${NC} $1"
 }
+
+print_note() {
+    echo -e "${BLUE}$1${NC}"
+}
+
+# set -e로 종료될 때 조용히 사라지지 않게 한다. 2026-07-30 회귀: 5단계가 단계
+# 제목만 찍고 종료됐는데(① 실패한 파이프라인을 변수에 대입 ② 미정의 함수 호출)
+# 아무 메시지가 없어 원인 파악이 늦었다.
+trap 'rc=$?; print_err "setup_jetson.sh aborted at line ${LINENO} (exit ${rc})"; exit ${rc}' ERR
 
 install_activation_hook() {
     local activate_path hook_block
@@ -182,18 +191,24 @@ print_step "4/10" "Installing project dependencies"
 install_project_packages
 print_ok "Project dependencies installed"
 
-NUMPY_VERSION="$(python -c 'import numpy; print(numpy.__version__)')"
+NUMPY_VERSION="$(python -c 'import numpy; print(numpy.__version__)' 2>/dev/null || true)"
+if [[ -z "${NUMPY_VERSION}" ]]; then
+    print_err "NumPy import failed inside the venv after installing dependencies."
+    exit 1
+fi
 if [[ "${NUMPY_VERSION}" == 2.* ]]; then
     print_warn "NumPy ${NUMPY_VERSION} detected. Reinstalling NumPy 1.x for Jetson compatibility."
     uv pip install "numpy>=1.24.0,<2.0.0" --force-reinstall
-    NUMPY_VERSION="$(python -c 'import numpy; print(numpy.__version__)')"
+    NUMPY_VERSION="$(python -c 'import numpy; print(numpy.__version__)' 2>/dev/null || true)"
 fi
-print_ok "NumPy ${NUMPY_VERSION}"
+print_ok "NumPy ${NUMPY_VERSION:-unknown}"
 
 print_step "5/10" "Ensuring Jetson-compatible torch"
 
+# torch가 설치돼 있지 않아도 이 함수는 성공해야 한다 — 실패한 파이프라인을
+# 변수에 대입하면 set -euo pipefail이 그 자리에서 스크립트를 죽인다.
 torch_report() {
-    python - <<'PY' 2>/dev/null
+    python - <<'PY' 2>/dev/null || true
 import torch
 
 print(f"{torch.__version__} cuda={torch.version.cuda} available={torch.cuda.is_available()}")
@@ -205,19 +220,23 @@ torch_cuda_ok() {
     python -c "import torch; assert torch.cuda.is_available()" >/dev/null 2>&1
 }
 
+TORCH_INFO="$(torch_report)"
+
 if torch_cuda_ok; then
-    print_ok "PyTorch can see CUDA: $(torch_report | head -1)"
-    print_note "  imported from $(torch_report | tail -1)"
+    print_ok "PyTorch can see CUDA: $(printf '%s\n' "${TORCH_INFO}" | head -1)"
+    print_note "  imported from $(printf '%s\n' "${TORCH_INFO}" | tail -1)"
 else
-    TORCH_LINE="$(torch_report | head -1)"
-    print_warn "PyTorch cannot see CUDA. Current import: ${TORCH_LINE:-import failed}"
+    print_warn "PyTorch cannot see CUDA. Current import: $(printf '%s\n' "${TORCH_INFO}" | head -1)"
+    if [[ -z "${TORCH_INFO}" ]]; then
+        print_warn "  torch is not importable at all — the Jetson wheel installer will run."
+    fi
 
     # venv 안의 torch가 정상 동작하는 외부 torch(JetPack dist-packages 또는
     # 사용자 사이트)를 가리고 있을 수 있다 — 의존성 해석이 PyPI 휠을 끌어온
     # 경우가 그렇다. 휠 재다운로드 전에 먼저 venv 로컬 torch를 걷어내고
     # 외부 torch로 되돌려 본다 (네트워크 불필요, 2026-07-30 실기 복구 절차).
-    VENV_SITE="$(python -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"
-    if [[ -d "${VENV_SITE}/torch" ]]; then
+    VENV_SITE="$(python -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])' 2>/dev/null || true)"
+    if [[ -n "${VENV_SITE}" && -d "${VENV_SITE}/torch" ]]; then
         print_warn "torch exists inside the venv (${VENV_SITE}/torch) and shadows the outer install. Removing it."
         uv pip uninstall torch torchvision torchaudio >/dev/null 2>&1 || true
         # torch를 끌어온 유일한 패키지를 의존성 없이 복구
@@ -225,8 +244,9 @@ else
     fi
 
     if torch_cuda_ok; then
-        print_ok "Outer PyTorch restored: $(torch_report | head -1)"
-        print_note "  imported from $(torch_report | tail -1)"
+        TORCH_INFO="$(torch_report)"
+        print_ok "Outer PyTorch restored: $(printf '%s\n' "${TORCH_INFO}" | head -1)"
+        print_note "  imported from $(printf '%s\n' "${TORCH_INFO}" | tail -1)"
     elif [[ "${INSTALL_JETSON_TORCH}" != "1" ]]; then
         print_err "PyTorch cannot see CUDA and INSTALL_JETSON_TORCH=0."
         exit 1
@@ -244,7 +264,13 @@ else
     print_ok ".env already present"
 fi
 
-ENGINE_COUNT="$(find "${PROJECT_ROOT}/models" -maxdepth 1 -name '*.engine' 2>/dev/null | wc -l | tr -d ' ')"
+# models/는 .gitignore 대상이라 새 클론에는 없다. find가 없는 디렉터리에서 1을
+# 반환하고 pipefail이 그것을 대입에 실어 나르면 스크립트가 여기서 종료된다.
+if [[ -d "${PROJECT_ROOT}/models" ]]; then
+    ENGINE_COUNT="$(find "${PROJECT_ROOT}/models" -maxdepth 1 -name '*.engine' | wc -l | tr -d ' ' || true)"
+else
+    ENGINE_COUNT=0
+fi
 if [[ "${ENGINE_COUNT}" == "0" ]]; then
     print_warn "No .engine file found under models/. Update .env after copying your engine file."
 else
