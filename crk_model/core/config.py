@@ -236,6 +236,18 @@ class Settings:
     # margin 우세만으로 오과금 — 승자는 자체로 선명해야 한다). 2.0 = 중재
     # 비활성(유일-적합만).
     judgment_refit_arb_conf_floor: float = 0.8
+    # ① 개수 오컴 (0730 냉동 시나리오, strategies._occam_filter): n=1 적합이
+    # 있으면 그보다 잘 맞지 않는 n≥2 단일 가설을 적합 후보에서 실격한다 —
+    # 저중량 상품이 n을 키워 아무 중량대나 덮는 "만능 filler"가 되던 통로
+    # (2-8 잭슨빌1 → 라라스윗2, 5-3 청양만두1 → 라라스윗3). 0 = 구 동작.
+    judgment_count_occam: bool = True
+    # ①⁺ 세그먼트 근거 조합 도전 (strategies._segment_combo_challenge): "A×2"와
+    # "A1+B1"은 무게로 구분 불가라 ①이 항상 ×N 단일로 확정한다 (0730 2-4:
+    # 메로나+월드콘 −150 → 월드콘×2). removal 세그먼트 ≥ MIN_SEGMENTS가 분리
+    # 취출을 증언할 때만 ③ 조합이 ①을 뒤집는다. 실측 1건 + 세그먼트 구조
+    # 미확인이라 기본 off — 아카이브로 확인 후 승격.
+    judgment_segment_combo: bool = False
+    judgment_segment_combo_min_segments: int = 2
     # ---- 조기 종료 (D7) — removal & 비freezer에서만 유효 ----
     early_termination_enabled: bool = True
     # ---- 모션 게이트 오버라이드 (None = SensorProfile 기본값 유지) ----
@@ -397,6 +409,13 @@ class Settings:
             ),
             judgment_refit_arb_conf_floor=_env_float(
                 "MODEL__JUDGMENT__REFIT_ARB_CONF_FLOOR", 0.8
+            ),
+            judgment_count_occam=_env_bool("MODEL__JUDGMENT__COUNT_OCCAM", True),
+            judgment_segment_combo=_env_bool(
+                "MODEL__JUDGMENT__SEGMENT_COMBO", False
+            ),
+            judgment_segment_combo_min_segments=_env_int(
+                "MODEL__JUDGMENT__SEGMENT_COMBO_MIN_SEGMENTS", 2
             ),
             early_termination_enabled=_env_bool(
                 "MODEL__VISION__EARLY_TERMINATION", True
