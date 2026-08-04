@@ -989,3 +989,52 @@ class TestSegmentBackedCombo0730Case24:
         assert result is not None
         assert result.reason == "freezer_vision_first_single"
         assert [(pc.product.class_id, pc.count) for pc in result.products] == [(51, 2)]
+
+
+class TestRelaxedPartialWeightRefute:
+    """이슈 #22 ses-4 z3 재구성: 다종 동시 취출로 이웃 존 상품(보리차 525g)이
+    교차존 오염 표로 득표 1위가 된 상태에서, strict/relaxed가 전부 실패하자
+    최종 폴백 relaxed_partial이 무게 검증 없이 Δ-80g에 525g 상품을 count=1
+    청구했다. 무게 반증 거부권: unit_weight가 최대 removal 관측량 +
+    tolerance×3을 넘는 후보는 1개 취출조차 물리적으로 불가능 — 청구 부적격."""
+
+    BARLEY = ActiveProduct(
+        "P35", "보리차", class_id=35, unit_weight=525.0, unit_price=1800, stock_qty=5
+    )
+    # 진짜 취출 상품 — DB 무게가 실측 delta(-80)와 15g 어긋나 strict(±5)/
+    # relaxed(±10)에 안 걸리는 상태 (relaxed_partial까지 내려오는 조건)
+    TEA = ActiveProduct(
+        "P28", "둥굴레차", class_id=28, unit_weight=95.0, unit_price=1500, stock_qty=5
+    )
+    CANDS = [cand(35, conf=0.54, votes=13), cand(28, conf=0.66, votes=5)]
+
+    def test_impossible_top_is_refuted_next_candidate_billed(self):
+        # 525g 상품은 Δ-80 이벤트에서 1개 취출조차 불가능 → 거부권 발동,
+        # 남은 후보 중 증거 서열대로 28이 청구된다 (후보 쇼핑 아님 — 배제).
+        result = JudgmentRouter().judge(ctx(-80.0, [self.BARLEY, self.TEA], self.CANDS))
+        assert result.strategy == "relaxed_partial"
+        assert [(pc.product.class_id, pc.count) for pc in result.products] == [(28, 1)]
+
+    def test_all_candidates_impossible_no_billing(self):
+        # 생존 후보가 없으면 청구하지 않는다 (I13: 과청구 > 미청구)
+        result = JudgmentRouter().judge(
+            ctx(-80.0, [self.BARLEY], [cand(35, conf=0.54, votes=13)])
+        )
+        assert result.status is JudgmentStatus.NO_DETECTION
+
+    def test_return_mixed_trigger_uses_max_removal_segment(self):
+        # net delta가 반품으로 줄어든 트리거: removal 세그먼트 최대값(-525)이
+        # 상한 — 525g 상품은 여전히 청구 가능해야 한다 (거부권 오발동 방지)
+        segs = [WeightSegment(1.0, 1.5, -525.0), WeightSegment(2.0, 2.5, 445.0)]
+        result = JudgmentRouter().judge(
+            ctx(-80.0, [self.BARLEY], [cand(35, conf=0.54, votes=13)], segments=segs)
+        )
+        assert result.strategy == "relaxed_partial"
+        assert [(pc.product.class_id, pc.count) for pc in result.products] == [(35, 1)]
+
+    def test_factor_zero_restores_old_behavior(self):
+        # 롤백 계약: MODEL__JUDGMENT__PARTIAL_IMPOSSIBLE_FACTOR=0 → 구 동작
+        router = JudgmentRouter(default_pipeline(partial_impossible_factor=0.0))
+        result = router.judge(ctx(-80.0, [self.BARLEY, self.TEA], self.CANDS))
+        assert result.strategy == "relaxed_partial"
+        assert [(pc.product.class_id, pc.count) for pc in result.products] == [(35, 1)]

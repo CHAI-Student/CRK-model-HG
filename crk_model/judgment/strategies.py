@@ -957,12 +957,24 @@ class RelaxedIdentityPartialStrategy:
 
     name = "relaxed_partial"
 
-    def __init__(self, min_confidence: float = 0.18):
+    def __init__(self, min_confidence: float = 0.18, impossible_factor: float = 3.0):
         # 청구 conf 하한 (원본 multi_kind_min_confidence=0.18 동형) — 실기
         # ses-3-1784788285: 5표/청구 conf 0.157짜리 identity partial이 잔차
         # 65g 오상품을 과금했다. 무게 미검증 count=1 청구는 최소한의 vision
         # 증거를 요구한다. 0 = 비활성 (구 동작).
         self._min_conf = min_confidence
+        # 무게 반증 거부권 (이슈 #22 ses-4 z3): 이 프로파일은 무게가 판별자
+        # (weight_is_discriminative)인데, 최종 폴백이 무게를 전혀 안 보면
+        # 교차존 오염으로 득표 1위가 된 이웃 존 상품이 그대로 청구된다 —
+        # Δ-80g 이벤트에 단위무게 525g 상품 count=1 청구 (1개만 꺼내도
+        # -525g여야 하므로 물리적으로 불가능). unit_weight가 "한 번의
+        # 취출로 관측 가능한 최대 감소량 + tolerance×이 계수"를 넘는 후보는
+        # 청구 부적격 — 9.3(detected_single, tolerance×3 창)이 이미 반증한
+        # top을 9.4가 무검증으로 되살리지 않도록 같은 ×3 창을 쓴다.
+        # conf 하한과 달리 다음 후보로 넘어간다: 하한은 증거 강도 문턱이라
+        # 폴스루가 후보 쇼핑이 되지만, 이것은 무게의 거부권(물리적 배제)이라
+        # 남은 후보 중 증거 서열 그대로 고르는 것이 맞다. 0 = 비활성 (구 동작).
+        self._impossible_factor = impossible_factor
 
     def precondition(self, ctx: JudgmentContext) -> bool:
         return bool(ctx.vision_candidates) and ctx.profile.weight_is_discriminative
@@ -970,16 +982,27 @@ class RelaxedIdentityPartialStrategy:
     def solve(self, ctx: JudgmentContext) -> JudgmentResult | None:
         by_class = _product_by_class(ctx)
         ranked = sorted(ctx.vision_candidates, key=lambda c: (-c.vote_count, -c.confidence))
+        # 취출 1개 가설의 무게 상한: 최대 removal 세그먼트(동일 트리거 안에
+        # 반품이 섞여 net delta가 줄어든 경우 보호) 또는 |delta| 중 큰 쪽.
+        removal_bound = max(
+            [abs(s.delta_grams) for s in ctx.segments if s.delta_grams < 0]
+            + [abs(ctx.delta_weight)]
+        )
+        refute_ceiling = (
+            removal_bound + ctx.profile.tolerance_grams * self._impossible_factor
+        )
         for cand in ranked:
             if cand.class_id not in by_class:
                 continue
+            p = by_class[cand.class_id]
+            if self._impossible_factor > 0 and p.unit_weight > refute_ceiling:
+                continue  # 무게 반증 — 1개 취출조차 불가능한 정체성 (docstring)
             confidence = cand.confidence * 0.5
             if confidence < self._min_conf:
                 # 저증거 청구 금지 (I13 fail-closed). 다음 순위로 넘어가지
                 # 않는다 — 하위 후보를 뒤지는 것은 "청구되는 후보"를 증거
                 # 순위가 아니라 하한 통과 여부가 고르게 만드는 후보 쇼핑이다.
                 return None
-            p = by_class[cand.class_id]
             return JudgmentResult(
                 JudgmentStatus.PARTIAL,
                 (ProductCount(p, 1),),

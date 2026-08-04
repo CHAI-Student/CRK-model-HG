@@ -40,6 +40,10 @@ def default_pipeline(
     partial_min_confidence: float = 0.18,
     # 무게 미검증 count=1 partial 청구의 conf 하한 (원본
     # multi_kind_min_confidence 동형, MODEL__JUDGMENT__PARTIAL_MIN_CONFIDENCE).
+    partial_impossible_factor: float = 3.0,
+    # relaxed_partial 무게 반증 거부권 (이슈 #22 ses-4 z3,
+    # MODEL__JUDGMENT__PARTIAL_IMPOSSIBLE_FACTOR): unit_weight가 최대 removal
+    # 관측량 + tolerance×계수를 넘는 후보는 count=1 청구 부적격. 0 = 비활성.
 ) -> list[PipelineEntry]:
     """다이어그램 5 순서 보존 — "누적 + 특이도 우선" (QA Q2).
 
@@ -103,7 +107,8 @@ def default_pipeline(
             min_confidence=partial_min_confidence),            # 9.2 — freezer 전용
         DetectedSingleItemFallbackStrategy(),                  # 9.3
         RelaxedIdentityPartialStrategy(
-            min_confidence=partial_min_confidence),            # 9.4 — 일반 최종 폴백
+            min_confidence=partial_min_confidence,
+            impossible_factor=partial_impossible_factor),      # 9.4 — 일반 최종 폴백
         FinalFallbackStrategy(),                               # 10
     ]
 

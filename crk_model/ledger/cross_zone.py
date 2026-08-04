@@ -78,6 +78,19 @@ def contamination_window(
     )
 
 
+def windows_mutually_overlap(
+    e1: TriggerEvent, e2: TriggerEvent, cfg: CrossZonePenaltyConfig
+) -> bool:
+    """두 이벤트의 오염 창이 **양방향**으로 겹치는가 — 같은 물리적 장면을
+    공유한다는 판별. _mutual_exemptions(상호 강등 가드)와 ghost_ledger의
+    에피소드 중복 제거(이슈 #22 ses-6)가 공유하는 단일 소스."""
+    lo1, hi1 = contamination_window(e1, cfg)
+    lo2, hi2 = contamination_window(e2, cfg)
+    return any(lo1 <= t <= hi1 for t in sub_event_anchors(e2)) and any(
+        lo2 <= t <= hi2 for t in sub_event_anchors(e1)
+    )
+
+
 def _penalty_sources(
     e: TriggerEvent,
     events: Sequence[TriggerEvent],
@@ -194,12 +207,7 @@ def _mutual_exemptions(
             shared = {cid for cid in shared if cid > 0}
             if not shared:
                 continue
-            lo1, hi1 = contamination_window(e1, cfg)
-            lo2, hi2 = contamination_window(e2, cfg)
-            if not (
-                any(lo1 <= t <= hi1 for t in sub_event_anchors(e2))
-                and any(lo2 <= t <= hi2 for t in sub_event_anchors(e1))
-            ):
+            if not windows_mutually_overlap(e1, e2, cfg):
                 continue  # 양방향 겹침이 아니면 상호 강등이 성립하지 않는다
             r1, r2 = _judgment_residual(e1), _judgment_residual(e2)
             for cid in shared:
@@ -337,7 +345,15 @@ def _repass_event(
     if not penalized:
         return None  # 오염 창 겹침 없음 또는 후보와 무관 — 기존 동작과 동일
     profile = profiles.get(e.zone, default_profile)
-    if not _weight_ambiguous(e, active_products, profile):
+    # ④의 KEEP 전제("무게가 유일 해 → 기존 무게 매칭이 이미 방어했다")는 원
+    # 판정이 COMPLETE(무게 검증 통과)일 때만 참이다 — 이슈 #22 ses-4 z3:
+    # 무게 무검증 relaxed_partial이 오염 후보(단위무게 525g)를 Δ-80g에
+    # 과금했는데 ④가 침묵 KEEP해 재판정 기회 자체가 없었다. PARTIAL 원
+    # 판정은 ④를 건너뛰고 재판정으로 — ⑥ COMPLETE 게이트가 여전히
+    # "보정하려다 더 나빠지는" 경로를 막는다 (R2).
+    if e.judgment.status is JudgmentStatus.COMPLETE and not _weight_ambiguous(
+        e, active_products, profile
+    ):
         return None  # ④ 무게가 유일 해 → 원 판정 유지 (KEEP)
 
     ctx = JudgmentContext(

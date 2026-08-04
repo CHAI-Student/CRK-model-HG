@@ -45,11 +45,16 @@ def ghost_billed_event():
 
 
 def clean_backed_event():
-    """z2: 30이 무게 뒷받침(COMPLETE)으로 과금 — 유령 13이 후보에 또 등장."""
+    """z2: 30이 무게 뒷받침(COMPLETE)으로 과금 — 유령 13이 후보에 또 등장.
+
+    ts=60.0: z1(ts=1.0)과 오염 창(±replay/trigger+ε ≈ ±5s)이 안 겹치는 별개
+    에피소드 — settler 통합처럼 window_cfg가 전달되는 경로에서도 breadth가
+    성립해야 하는 픽스처다 (같은 순간이면 이슈 #22 에피소드 병합으로 유령
+    불성립이 옳다)."""
     j = JudgmentResult(
         JudgmentStatus.COMPLETE, (ProductCount(R30, 1),), 0.9, "strict"
     )
-    return event(2, 2.0, j, -100.0,
+    return event(2, 60.0, j, -100.0,
                  [cand(30, conf=0.9, votes=20), cand(13, conf=0.7, votes=9)])
 
 
@@ -146,6 +151,59 @@ class TestDetection:
         e2 = event(2, 2.0, j, -100.0,
                    [cand(30, conf=0.9, votes=20), cand(13, conf=0.7, votes=2)])
         assert detect_ghosts([ghost_billed_event(), e2], GhostLedgerConfig()) == {}
+
+
+class TestIssue22EpisodeWindowMerge:
+    """이슈 #22 ses-6 재구성: 동시 다존 취출(z4:11, z5:35, 양존 Δ-525)의 존별
+    트리거는 **다른 녹화 파일**을 가져 video_paths 동일성 dedup이 뚫린다 —
+    GT class35(10표 득표 1위)가 "2존 등장 + 무게 뒷받침 0"으로 유령 오플래그.
+    오염 창이 양방향으로 겹치면(같은 물리적 순간의 같은 장면) 파일명과
+    무관하게 같은 에피소드다 — window_cfg로 병합한다."""
+
+    A11 = ActiveProduct("P11", "실물11", class_id=11, unit_weight=525.0,
+                        unit_price=2000, stock_qty=5)
+    CANDS = [cand(35, conf=0.72, votes=10), cand(11, conf=0.68, votes=6),
+             cand(10, conf=0.72, votes=5)]
+
+    def zone_events(self, ts4=100.0, ts5=100.2):
+        j = JudgmentResult(
+            JudgmentStatus.COMPLETE, (ProductCount(self.A11, 1),), 0.664, "strict"
+        )
+        e4 = TriggerEvent(
+            "s", 4, ts4, -525.0, (), j, vision_candidates=tuple(self.CANDS),
+            video_paths=(("top", f"/z4_{ts4}.avi"),), change_timestamps=(ts4,),
+        )
+        e5 = TriggerEvent(
+            "s", 5, ts5, -525.0, (), j, vision_candidates=tuple(self.CANDS),
+            video_paths=(("top", f"/z5_{ts5}.avi"),), change_timestamps=(ts5,),
+        )
+        return e4, e5
+
+    def test_same_moment_different_files_is_single_episode(self):
+        from crk_model.ledger import CrossZonePenaltyConfig
+
+        e4, e5 = self.zone_events()
+        # 창 겹침 병합: 35·10 모두 에피소드 1개 → breadth 불성립 → 유령 아님
+        assert detect_ghosts(
+            [e4, e5], GhostLedgerConfig(), CrossZonePenaltyConfig()
+        ) == {}
+
+    def test_distinct_moments_still_count_as_breadth(self):
+        from crk_model.ledger import CrossZonePenaltyConfig
+
+        e4, e5 = self.zone_events(ts4=100.0, ts5=200.0)
+        # 창이 안 겹치는 별개 에피소드 반복 등장 — 기존 유령 정의 그대로
+        assert detect_ghosts(
+            [e4, e5], GhostLedgerConfig(), CrossZonePenaltyConfig()
+        ) == {35: (4, 5), 10: (4, 5)}
+
+    def test_without_window_cfg_old_behavior(self):
+        # window_cfg 미전달(구 호출) — 파일 동일성만으로는 못 걸러 유령 플래그
+        # (이 케이스가 바로 ses-6의 오플래그 — settler는 이제 window를 넘긴다)
+        e4, e5 = self.zone_events()
+        assert detect_ghosts([e4, e5], GhostLedgerConfig()) == {
+            35: (4, 5), 10: (4, 5)
+        }
 
 
 class TestShadow:

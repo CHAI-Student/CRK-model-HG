@@ -232,6 +232,12 @@ class Settings:
     # conf 0.157 identity partial이 잔차 65g 오상품을 과금 — 저증거 청구 차단.
     # 0 = 비활성 (구 동작).
     judgment_partial_min_confidence: float = 0.18
+    # relaxed_partial 무게 반증 거부권 (이슈 #22 ses-4 z3): 무게 무검증
+    # count=1 폴백이 교차존 오염 득표 1위를 그대로 청구하던 구멍 — Δ-80g
+    # 이벤트에 단위무게 525g 상품 청구 (1개 취출조차 물리적으로 불가능).
+    # unit_weight > 최대 removal 관측량 + tolerance×이 계수 → 청구 부적격,
+    # 다음 후보로 (무게의 거부권, 후보 쇼핑 아님). 0 = 비활성 (구 동작).
+    judgment_partial_impossible_factor: float = 3.0
     # ④ refit 복수 적합 중재의 절대 conf 하한 (실기 ses-1 ch1: 0.69 유령이
     # margin 우세만으로 오과금 — 승자는 자체로 선명해야 한다). 2.0 = 중재
     # 비활성(유일-적합만).
@@ -406,6 +412,9 @@ class Settings:
             judgment_conf_margin=_env_float("MODEL__JUDGMENT__CONF_MARGIN", 0.15),
             judgment_partial_min_confidence=_env_float(
                 "MODEL__JUDGMENT__PARTIAL_MIN_CONFIDENCE", 0.18
+            ),
+            judgment_partial_impossible_factor=_env_float(
+                "MODEL__JUDGMENT__PARTIAL_IMPOSSIBLE_FACTOR", 3.0
             ),
             judgment_refit_arb_conf_floor=_env_float(
                 "MODEL__JUDGMENT__REFIT_ARB_CONF_FLOOR", 0.8

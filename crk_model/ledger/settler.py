@@ -237,6 +237,9 @@ class CloseSettler:
                 self.ghost,
                 notes,
                 self.default_profile,
+                # 에피소드 중복 제거의 오염 창 상수 (이슈 #22 ses-6) — 카메라
+                # 계약 상수라 cross_zone.enabled와 무관하게 항상 전달한다.
+                window_cfg=self.cross_zone,
             )
         # 0711 교차존 비전 오염 페널티 (CLOSE 2차 패스) — 워터마크(F8) 덕분에
         # 이 시점에는 늦게 도착한 연장 병합 이벤트까지 전부 EventLog에 있다.
@@ -390,7 +393,7 @@ class CloseSettler:
         backed_zones: dict[int, set[int]] = {}
         if self.combo_session_guard and self.vision_combo:
             if self.ghost.mode != "off":
-                ghosts = detect_ghosts(events, self.ghost)
+                ghosts = detect_ghosts(events, self.ghost, self.cross_zone)
             backed_zones = self._backed_zones_by_class(events)
         for zone, b in list(baskets.items()):
             prof = _profile(profiles, zone, default_profile)

@@ -199,6 +199,9 @@ class ModelService:
                     ),
                 ),
                 partial_min_confidence=self.settings.judgment_partial_min_confidence,
+                partial_impossible_factor=(
+                    self.settings.judgment_partial_impossible_factor
+                ),
             ), count_unit_slack=self.settings.judgment_count_unit_slack),
             early_termination_enabled=self.settings.early_termination_enabled,
             motion_evidence_enabled=self.settings.motion_evidence_enabled,

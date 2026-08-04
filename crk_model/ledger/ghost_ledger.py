@@ -33,8 +33,9 @@ c40 위상 — 2존 자격 + 뒷받침 0; 11차 ses-9의 3·27 — 오과금이 
 뒷받침을 가로챔). 또한 side 카메라가 한 채널의 여러 존 트레이를 동시에
 비추는 광학 구조상, **다른 에피소드라도 존 breadth가 독립 증거가 아닐 수
 있다** (11차 ses-9: z5 반품 영상에 z3 진열 27이 잡힘). 에피소드 중복
-제거(detect_ghosts)가 공유 영상 케이스는 걸러내지만 광학 공유는 남는
-한계 — 승격 게이트의 정답 오플래그율이 이를 감시한다.
+제거(detect_ghosts)가 공유 영상·같은 순간(오염 창 상호 겹침, 이슈 #22
+ses-6) 케이스는 걸러내지만 광학 공유는 남는 한계 — 승격 게이트의 정답
+오플래그율이 이를 감시한다.
 min_zones·vote_floor가 1차 방어이고,
 active의 실제 개입은 soft 페널티(α) + COMPLETE 게이트 + 승자 유지 원칙
 (cross_zone ⑤·⑥ 준용)으로 한정된다. 승격 절차는 held/tube shadow와 동일:
@@ -51,7 +52,12 @@ from crk_model.core.profiles import REFRIGERATOR, SensorProfile
 from crk_model.core.types import ActiveProduct, JudgmentStatus
 from crk_model.judgment.interfaces import JudgmentContext
 from crk_model.judgment.router import JudgmentRouter
-from crk_model.ledger.cross_zone import _penalize_candidates, _same_products
+from crk_model.ledger.cross_zone import (
+    CrossZonePenaltyConfig,
+    _penalize_candidates,
+    _same_products,
+    windows_mutually_overlap,
+)
 from crk_model.ledger.events import TriggerEvent
 
 logger = logging.getLogger(__name__)
@@ -86,8 +92,40 @@ def _weight_backed_classes(events: Sequence[TriggerEvent]) -> set[int]:
     return backed
 
 
+def _episode_ids(
+    events: Sequence[TriggerEvent], window_cfg: CrossZonePenaltyConfig | None
+) -> list[int]:
+    """이벤트 → 에피소드 클러스터 id (detect_ghosts의 breadth 분모).
+
+    같은 에피소드 판별 2기준: ① video_paths 동일 (11차 ses-2 — 연장 병합
+    영상 공유), ② 오염 창 양방향 겹침 (이슈 #22 ses-6 — 동시 다존 취출은
+    존별 녹화 **파일명이 달라도** 같은 물리적 순간의 같은 장면이다.
+    cross_zone 상호 강등 가드와 같은 판별식 windows_mutually_overlap 공유).
+    window_cfg 미제공 시 ②는 비활성 — 구 동작(파일 동일성만)."""
+    n = len(events)
+    parent = list(range(n))
+
+    def find(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            e1, e2 = events[i], events[j]
+            same = bool(e1.video_paths) and e1.video_paths == e2.video_paths
+            if not same and window_cfg is not None:
+                same = windows_mutually_overlap(e1, e2, window_cfg)
+            if same:
+                parent[find(j)] = find(i)
+    return [find(i) for i in range(n)]
+
+
 def detect_ghosts(
-    events: Sequence[TriggerEvent], cfg: GhostLedgerConfig
+    events: Sequence[TriggerEvent],
+    cfg: GhostLedgerConfig,
+    window_cfg: CrossZonePenaltyConfig | None = None,
 ) -> dict[int, tuple[int, ...]]:
     """{ghost class_id: 자격 표를 얻은 존 튜플} — 정의는 모듈 docstring.
 
@@ -95,16 +133,21 @@ def detect_ghosts(
     **연장 병합된 같은 에피소드 영상**을 공유해 후보 집합이 동일하다 (11차
     ses-2: z5/z3 트리거의 candidates가 완전히 같음 — 모든 클래스가 공짜로
     "2존 등장"이 되어 정답 27·30이 오플래그됐다). 같은 영상은 존 breadth
-    증거가 될 수 없으므로, 서로 다른 **에피소드(video_paths)** ≥ 2에서
-    등장한 클래스만 유령 후보로 남긴다 (analyze-sessions 트랙릿 집계의
-    detail 동일성 중복 제거와 같은 원리). video_paths 미기록(구 스키마)
-    이벤트는 각각을 별개 에피소드로 취급 — 기존(보수적) 동작 유지."""
+    증거가 될 수 없으므로, 서로 다른 **에피소드** ≥ 2에서 등장한 클래스만
+    유령 후보로 남긴다 (analyze-sessions 트랙릿 집계의 detail 동일성 중복
+    제거와 같은 원리).
+
+    에피소드 판별은 _episode_ids — video_paths 동일성에 더해, window_cfg가
+    주어지면 **오염 창 양방향 겹침**도 같은 에피소드로 묶는다 (이슈 #22
+    ses-6: 동시 다존 취출의 존별 트리거는 각자 다른 녹화 파일을 갖고 있어
+    파일 동일성 dedup이 뚫렸다 — GT class35가 10표 득표 1위인데 "2존 등장
+    + 무게 뒷받침 0"으로 유령 오플래그. 같은 순간의 장면은 파일명과 무관하게
+    breadth 증거가 아니다). window_cfg 미제공(구 호출) 시 기존 동작."""
+    considered = [e for e in events if e.status == "ok" and e.delta_weight < 0]
+    episode_of = _episode_ids(considered, window_cfg)
     zones_seen: dict[int, set[int]] = defaultdict(set)
-    episodes_seen: dict[int, set] = defaultdict(set)
-    for e in events:
-        if e.status != "ok" or e.delta_weight >= 0:
-            continue
-        episode = e.video_paths if e.video_paths else ("__ts__", e.zone, e.ts)
+    episodes_seen: dict[int, set[int]] = defaultdict(set)
+    for e, episode in zip(considered, episode_of, strict=True):
         for c in e.vision_candidates:
             if c.class_id > 0 and c.vote_count >= cfg.vote_floor:
                 zones_seen[c.class_id].add(e.zone)
@@ -127,15 +170,19 @@ def apply_ghost_demotion(
     notes: list[str],
     default_profile: SensorProfile = REFRIGERATOR,
     router: JudgmentRouter | None = None,
+    window_cfg: CrossZonePenaltyConfig | None = None,
 ) -> list[TriggerEvent]:
     """CLOSE 2차 패스 — cross_zone 페널티보다 **먼저** 실행한다: active에서
     유령 후보를 전 이벤트에서 강등해 두면 cross_zone 재판정의 채택 후보에서도
     밀려난다 (10차 ses-11: 진짜 27을 강등한 뒤 유령 13을 채택한 사고의 차단).
 
+    window_cfg: 에피소드 중복 제거의 오염 창 상수 (detect_ghosts 참조) —
+    카메라 계약 상수라 cross_zone 페널티 enabled 여부와 무관하게 유효하다.
+
     반환: 판정/후보가 교체된 이벤트를 포함한 새 리스트 (원본 불변, I8 notes)."""
     if cfg.mode == "off" or not active_products:
         return list(events)
-    ghosts = detect_ghosts(events, cfg)
+    ghosts = detect_ghosts(events, cfg, window_cfg)
     if not ghosts:
         return list(events)
     notes.append(

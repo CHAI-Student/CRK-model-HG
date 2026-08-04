@@ -438,13 +438,15 @@ class TestVisionComboResolve:
         )
         s = self.settler(self.P3, self.P44, p27)
         # c44가 두 존·두 에피소드에서 자격 표(conf .9 — 실존 하한은 통과)를
-        # 얻지만 어느 존에서도 무게 뒷받침 과금이 없음 → ghost.
+        # 얻지만 어느 존에서도 무게 뒷받침 과금이 없음 → ghost. ts 간격은
+        # 오염 창(±5s)이 안 겹치게 60s — 같은 순간이면 이슈 #22 에피소드
+        # 병합으로 유령 불성립이 옳다.
         e_z8 = self.removal_with_cands(
             "s1", 8, 1.0, p27, 2, -356.0,
             [cand(27, conf=1.0, votes=30), cand(44, conf=0.9, votes=8)],
         )
         e_z9 = self.removal_with_cands(
-            "s1", 9, 5.0, self.P3, 2, -448.0,
+            "s1", 9, 60.0, self.P3, 2, -448.0,
             [cand(3, conf=1.0, votes=40), cand(44, conf=0.9, votes=8)],
         )
         result = s.settle("s1", [e_z8, e_z9], profiles)

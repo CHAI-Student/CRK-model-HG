@@ -364,3 +364,82 @@ class TestChangeTimestampsPersistence:
         d = event_to_dict(event("s", 1, 5.0, judged(cola), -100.0))
         d.pop("change_timestamps")  # 구버전 저널 라인
         assert event_from_dict(d).change_timestamps == ()
+
+
+class TestIssue22PartialOriginalBypassesWeightGate:
+    """이슈 #22 ses-4 z3 재구성: ④ KEEP의 전제("무게가 유일 해 → 기존 무게
+    매칭이 이미 방어")는 원 판정이 COMPLETE일 때만 참이다. 무게 무검증
+    relaxed_partial이 오염 후보(525g)를 Δ-80g에 과금한 경우 ④가 침묵
+    KEEP하면 재판정 기회 자체가 사라진다 — PARTIAL 원 판정은 ④를 건너뛰고
+    재판정한다 (⑥ COMPLETE 게이트는 그대로 방어)."""
+
+    BARLEY = ActiveProduct(
+        "P35", "보리차", class_id=35, unit_weight=525.0, unit_price=1800, stock_qty=5
+    )
+    TEA = ActiveProduct(
+        "P28", "둥굴레차", class_id=28, unit_weight=80.0, unit_price=1500, stock_qty=5
+    )
+
+    def zone_events(self):
+        # z5: 보리차(525g) 실취출 — PARTIAL이지만 conf 0.375 ≥ θ라 소스 자격.
+        z5 = event(
+            "s", 5, 100.0,
+            JudgmentResult(
+                JudgmentStatus.PARTIAL, (ProductCount(self.BARLEY, 1),), 0.375,
+                "relaxed_combination+full_delta_unexplained",
+            ),
+            -525.0, candidates=[cand(35, conf=0.83, votes=20)],
+            change_ts=(100.0,),
+        )
+        # z3: Δ-80인데 오염 표로 c35가 득표 1위 → relaxed_partial이 35 과금
+        # (conf 0.269 < θ라 z3은 상호 강등 가드의 valid에도 못 든다).
+        z3 = event(
+            "s", 3, 100.5,
+            JudgmentResult(
+                JudgmentStatus.PARTIAL, (ProductCount(self.BARLEY, 1),), 0.269,
+                "relaxed_partial",
+            ),
+            -80.0,
+            candidates=[cand(35, conf=0.54, votes=13), cand(28, conf=0.66, votes=5)],
+            change_ts=(100.5,),
+        )
+        return z5, z3
+
+    def test_partial_original_is_rejudged_to_weight_fit(self):
+        z5, z3 = self.zone_events()
+        notes: list[str] = []
+        out = apply_cross_zone_penalty(
+            [z5, z3], {3: REFRIGERATOR, 5: REFRIGERATOR},
+            (self.BARLEY, self.TEA), CFG, notes,
+        )
+        # 구 동작: ④가 "무게 유일 해(28만 80g 설명)"로 침묵 KEEP → 35x1 유지.
+        # 수정 후: PARTIAL 원 판정은 재판정 — 페널티 먹은 35 대신 무게가
+        # 뒷받침하는 28x1 COMPLETE 채택.
+        assert [(pc.product.product_id, pc.count) for pc in out[1].judgment.products] == [
+            ("P28", 1)
+        ]
+        assert out[1].judgment.reason.endswith("+cross_zone_vision_penalty")
+        assert any(
+            n.startswith("zone3:cross_zone_vision_penalty:demoted=P35:adopted=P28x1")
+            for n in notes
+        )
+
+    def test_complete_original_still_kept_by_weight_gate(self):
+        # ④ 보존 검증: 원 판정이 COMPLETE(무게 검증 통과)면 무게 유일 해
+        # KEEP은 그대로다 — 재판정 안 함, 무기록.
+        z5, z3 = self.zone_events()
+        z3_complete = TriggerEvent(
+            "s", 3, 100.5, -80.0, (),
+            JudgmentResult(
+                JudgmentStatus.COMPLETE, (ProductCount(self.TEA, 1),), 0.9, "strict"
+            ),
+            vision_candidates=z3.vision_candidates,
+            change_timestamps=(100.5,),
+        )
+        notes: list[str] = []
+        out = apply_cross_zone_penalty(
+            [z5, z3_complete], {3: REFRIGERATOR, 5: REFRIGERATOR},
+            (self.BARLEY, self.TEA), CFG, notes,
+        )
+        assert out[1] is z3_complete
+        assert not any(n.startswith("zone3:cross_zone_vision_penalty") for n in notes)
