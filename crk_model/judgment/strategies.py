@@ -124,11 +124,20 @@ class FreezerVisionFirstStrategy:
        vision 증거로 중재: 최고 conf가 최다 득표 적합보다 conf_margin(기본
        0.15) 이상 우세할 때만 conf 승(reason "…single_arbitrated"), 아니면
        득표 서열. 잔차는 중재 기준이 아니다 (무게 = 거부권 원칙).
+       적합 수집 직후 **개수 오컴**을 한 번 통과한다 (_occam_filter): n=1
+       적합이 있으면 그보다 잘 맞지 않는 n≥2 적합은 실격 — 무게가 역산한
+       개수 가설이 vision이 본 그대로의 단품을 밀어내는 통로를 막는다
+       (0730 시나리오 실패 6/7건의 서명). count_occam=False로 롤백.
        margin 비교는 conf 상한 1.0에서 포화시킨다(min(0.99, vt+margin)) —
        vt conf > 0.85면 어떤 후보도 margin 우세가 원리적으로 불가능해지는
        구조적 결함 (실기 ses-10 z1: 정답 conf 1.0이 0.855+0.15=1.005에 패배).
        단 vt conf가 conf_override(0.9) 이상이면 포화하지 않는다 — 둘 다
        천장권이면 conf 차이는 압축 노이즈, 득표 서열 유지 (8차 ses-4 실사고).
+    ①⁺ 세그먼트 근거 조합 도전 (기본 off, _segment_combo_challenge): 단위무게가
+       비슷한 두 상품을 1개씩 꺼낸 delta는 "A×2"와 "A1+B1"을 무게로 구분할 수
+       없고, ①이 ③보다 먼저라 항상 ×N 단일이 이긴다 (2-4 실측: 메로나+월드콘
+       = −150 → 월드콘×2). removal 세그먼트가 분리 취출을 증언할 때만 ③ 조합이
+       ① 승자를 뒤집는다 — 동시 취출(한 세그먼트)에서는 도전 자체가 봉쇄된다.
     ② top 근접 실패 (gate_n < 잔차 ≤ near_factor×gate_n): 접촉 하중 오염이
        실측 8~18g(segment_retry_gap 주석) — "delta가 오염됐다"가 "정체성이
        틀렸다"보다 우세. top 정체성·개수를 보존한 PARTIAL 반환
@@ -180,6 +189,17 @@ class FreezerVisionFirstStrategy:
         # 24(0.35)를 margin으로 꺾고 오과금됐고, 정당 케이스(ses-3-1784790444
         # ch0의 40)는 conf 0.82였다. 중재 승자는 자체로도 선명해야 한다.
         # 2.0 = 중재 비활성 (유일-적합만, 구 동작).
+        count_occam: bool = True,
+        # ① 개수 오컴 (0730 냉동 시나리오 배치, _occam_filter 참조): 무게가
+        # 역산한 n≥2 가설은, 같은 delta를 더 작은 잔차로 설명하는 n=1 적합이
+        # 있으면 적합 후보에서 실격. False = 구 동작 (롤백).
+        segment_combo: bool = False,
+        # ①⁺ 세그먼트 근거 조합 도전 (_segment_combo_challenge 참조): removal
+        # 세그먼트가 분리 취출을 증언할 때만 ③ 조합이 ①의 ×N 확정을 뒤집는다.
+        # 실측 근거가 2-4 한 건이고 세그먼트 구조가 아카이브로 미확인이라
+        # **기본 off** — 레포 관행(신규 판정 기제는 기본값 = 기존 동작).
+        segment_combo_min_segments: int = 2,
+        # 도전 자격의 removal 세그먼트 최소 수 (ⓒ). 올리면 더 보수적.
     ):
         self._max_kinds = max_kinds
         self._identity_pool = identity_pool
@@ -192,6 +212,44 @@ class FreezerVisionFirstStrategy:
         self._conf_override = conf_override
         self._conf_margin = conf_margin
         self._refit_arb_floor = refit_arb_conf_floor
+        self._count_occam = count_occam
+        self._segment_combo = segment_combo
+        self._segment_combo_min_segments = segment_combo_min_segments
+
+    @staticmethod
+    def _occam_filter(
+        fits: list[tuple[ActiveProduct, VisionCandidate, int, float]],
+    ) -> list[tuple[ActiveProduct, VisionCandidate, int, float]]:
+        """① 개수 오컴 — "무게가 지어낸 n≥2 가설"의 실격 (0730 시나리오 실측).
+
+        `fit()`은 개수를 무게에서 역산하고(n = round(target/unit_weight)),
+        게이트는 gate_n(n) = gate + slack×(n−1)로 n에 비례해 넓어진다. 그래서
+        저중량 상품은 n을 키워 거의 모든 중량대를 덮는 "만능 filler"가 된다 —
+        라라스윗 70g은 n=2에서 [120,160], n=3에서 [185,235]. 그런데 ①의 중재는
+        득표·conf만 보므로 **잔차 0짜리 n=1 정답이 잔차 15~24짜리 저중량 ×N에게
+        득표만으로 진다**. 0730 냉동 시나리오 실패 7건 중 6건이 이 서명이었다:
+
+          2-8  잭슨빌 155×1 (잔차 0)    → 라라스윗 70×2 (잔차 15, gate_n(2)=20)
+          5-3  청양만두 225×1 (잔차 8.8) → 라라스윗 70×3 (잔차 23.8, gate_n(3)=25)
+          6-1  잭슨빌 155×1 (잔차 0)    → 요맘때 95×2  (잔차 5)
+
+        규칙: n=1 적합이 존재하면, 그 최소 잔차보다 **엄격히 더 잘 맞지 않는**
+        n≥2 적합을 후보에서 제외한다. n=1 적합이 없으면(진짜 다량 취출) 무발동.
+
+        I-V 정합 (이슈 #15): 이것은 정체성 **선택**이 아니라 개수 가설의 자격
+        심사다 — "지목된 정체성의 개수 산정·검증"은 I-V가 무게에 명시적으로
+        부여한 권한(⑴)이다. #15 사고는 1위가 게이트를 **넘지 못해** 탈락한 뒤
+        배경 후보가 채택된 것인데, 여기서는 경쟁자가 전부 이미 게이트 안이고
+        뒤집히는 방향이 항상 "무게를 더 잘 설명 + 개수가 더 적음"이라 반대다.
+        살아남은 후보들의 최종 선택은 종전 그대로 vision 증거가 한다.
+
+        ④ 유일-적합 구제에는 적용하지 않는다 — 거기서 후보를 줄이면 "정확히
+        하나" 성립이 늘어 **채택이 증가**하는 방향이라 실패 방향이 뒤집힌다.
+        """
+        best_single = min((r for _, _, n, r in fits if n == 1), default=None)
+        if best_single is None:
+            return fits
+        return [f for f in fits if f[2] == 1 or f[3] < best_single]
 
     def _arb_threshold(self, rival_conf: float) -> float:
         """중재 승리에 필요한 bc conf — 상한 포화 (docstring ①).
@@ -249,14 +307,16 @@ class FreezerVisionFirstStrategy:
                 and cand.vote_count >= self._refit_share * top_c.vote_count
             )
 
-        fits: list[tuple[ActiveProduct, VisionCandidate, int]] = []
+        fits: list[tuple[ActiveProduct, VisionCandidate, int, float]] = []
         for p, cand in identities:
             if not eligible(cand):
                 continue
             count, residual = fit(p)
             if residual <= gate_n(count):
-                fits.append((p, cand, count))
-        winner: tuple[ActiveProduct, VisionCandidate, int] | None = None
+                fits.append((p, cand, count, residual))
+        if self._count_occam:
+            fits = self._occam_filter(fits)
+        winner: tuple[ActiveProduct, VisionCandidate, int, float] | None = None
         arbitrated = False
         if len(fits) == 1:
             winner = fits[0]
@@ -274,7 +334,17 @@ class FreezerVisionFirstStrategy:
                 winner = vt  # 전역 득표 1위가 적합 — 종전 서열 존중
             # else: 전역 top 미적합 + conf 격차 부족 → 모호, ② near로 폴스루
         if winner is not None:
-            p, cand, count = winner
+            # ①⁺ 세그먼트 근거 조합 도전 (_segment_combo_challenge, 기본 off):
+            # "A×2"와 "A1+B1"은 무게로 구분 불가 — 분리 취출의 물증(removal
+            # 세그먼트)이 있을 때만 조합이 ①을 뒤집을 수 있다.
+            challenge = self._segment_combo_challenge(
+                ctx, identities, top_c, winner, target, gate
+            )
+            if challenge is not None:
+                return self._combo_result(
+                    *challenge, "freezer_vision_first_segment_combo"
+                )
+            p, cand, count, _ = winner
             return JudgmentResult(
                 JudgmentStatus.COMPLETE,
                 (ProductCount(p, count),),
@@ -297,31 +367,10 @@ class FreezerVisionFirstStrategy:
             )
 
         # ③ k정체성 조합 (top 포함 필수, 멤버 combo_share 이상, I3 필수)
-        rest = [
-            (p, c)
-            for p, c in identities[1:]
-            if c.vote_count >= self._combo_share * top_c.vote_count
-        ]
-        for k in range(2, min(self._max_kinds, len(rest) + 1) + 1):
-            best: tuple[tuple[float, int], tuple, tuple] | None = None
-            for tail in itertools.combinations(rest, k - 1):
-                subset = ((top_p, top_c),) + tail
-                for alloc in self._allocations([p for p, _ in subset], target, gate):
-                    weight = sum(c * p.unit_weight for (p, _), c in zip(subset, alloc, strict=True))
-                    key = (
-                        abs(target - weight),
-                        -sum(cand.vote_count for _, cand in subset),
-                    )
-                    if best is None or key < best[0]:
-                        best = (key, subset, alloc)
-            if best is not None:
-                _, subset, alloc = best
-                return JudgmentResult(
-                    JudgmentStatus.COMPLETE,
-                    tuple(ProductCount(p, c) for (p, _), c in zip(subset, alloc, strict=True)),
-                    confidence=sum(cand.confidence for _, cand in subset) / len(subset),
-                    reason="freezer_vision_first_combo",
-                )
+        combo = self._best_combo(identities, top_c, target, gate)
+        if combo is not None:
+            subset, alloc, _ = combo
+            return self._combo_result(subset, alloc, "freezer_vision_first_combo")
 
         # ④ 유일-적합 구제 — top 결정적 반증 시, 나머지 중 near 내 적합이
         # 정확히 하나일 때만 (둘 이상이면 무게로는 못 고른다, I-V).
@@ -384,6 +433,109 @@ class FreezerVisionFirstStrategy:
                 ),
             )
         return None
+
+    def _best_combo(
+        self,
+        identities: list[tuple[ActiveProduct, VisionCandidate]],
+        top_c: VisionCandidate,
+        target: float,
+        gate: float,
+    ) -> tuple[tuple, tuple, float] | None:
+        """③ 조합 탐색 (③과 ①⁺ 도전이 공유하는 단일 소스).
+
+        top 정체성 포함 필수 + 멤버 combo_share 이상 + flat 게이트. 종류 수 k를
+        2부터 올리며 **처음 성립하는 k**에서 멈춘다(종류 최소). 같은 k 안에서는
+        잔차 → 득표합 순으로 최선을 고른다.
+
+        반환: (subset, alloc, residual) 또는 None.
+        """
+        rest = [
+            (p, c)
+            for p, c in identities[1:]
+            if c.vote_count >= self._combo_share * top_c.vote_count
+        ]
+        for k in range(2, min(self._max_kinds, len(rest) + 1) + 1):
+            best: tuple[tuple[float, int], tuple, tuple] | None = None
+            for tail in itertools.combinations(rest, k - 1):
+                subset = (identities[0],) + tail
+                for alloc in self._allocations([p for p, _ in subset], target, gate):
+                    weight = sum(c * p.unit_weight for (p, _), c in zip(subset, alloc, strict=True))
+                    key = (
+                        abs(target - weight),
+                        -sum(cand.vote_count for _, cand in subset),
+                    )
+                    if best is None or key < best[0]:
+                        best = (key, subset, alloc)
+            if best is not None:
+                (residual, _), subset, alloc = best
+                return subset, alloc, residual
+        return None
+
+    @staticmethod
+    def _combo_result(subset: tuple, alloc: tuple, reason: str) -> JudgmentResult:
+        return JudgmentResult(
+            JudgmentStatus.COMPLETE,
+            tuple(ProductCount(p, c) for (p, _), c in zip(subset, alloc, strict=True)),
+            confidence=sum(cand.confidence for _, cand in subset) / len(subset),
+            reason=reason,
+        )
+
+    def _segment_combo_challenge(
+        self,
+        ctx: JudgmentContext,
+        identities: list[tuple[ActiveProduct, VisionCandidate]],
+        top_c: VisionCandidate,
+        winner: tuple[ActiveProduct, VisionCandidate, int, float],
+        target: float,
+        gate: float,
+    ) -> tuple[tuple, tuple] | None:
+        """①⁺ 세그먼트 근거 조합 도전 (0730 시나리오 2-4). 기본 off.
+
+        문제: 단위무게가 비슷한 두 상품 A·B를 1개씩 꺼낸 delta는 "A×2" "B×2"
+        "A1+B1"을 **무게로는 구분할 수 없다**. ①이 ③보다 먼저이므로 항상 ×N
+        단일이 이긴다 (실측 2-4: 메로나 80 + 월드콘 70 = −150 → 월드콘 70×2
+        = 140, 잔차 10 ≤ gate_n(2)=20으로 ①이 확정. 정답 조합은 잔차 0인데
+        도달조차 못 한다). 개수 오컴(_occam_filter)은 여기서 무발동이다 —
+        경쟁 적합이 전부 n=2라 n=1 기준점이 없다.
+
+        해결의 열쇠는 vision도 잔차도 아니라 **로드셀 세그먼트**다: 순차 취출은
+        분리된 removal 세그먼트를 남기고(냉동 segment_step=20g이라 70~80g 취출은
+        확실히 분리된다), 동시 취출은 한 세그먼트로 뭉친다. "몇 번의 분리된
+        취출이 있었나"는 I-V가 무게에 부여한 권한(⑴ 개수 산정) 안이다.
+
+        도전 자격 (전부 충족해야 하고, 하나라도 어긋나면 ① 유지 = fail-safe):
+          ⓐ ① 승자의 개수 ≥ 2 — 단품 확정은 절대 건드리지 않는다.
+          ⓑ ① 승자의 잔차 > 0 — 완벽 설명은 도전 대상이 아니다.
+          ⓒ removal 세그먼트 ≥ min_segments(기본 2) — 분리 취출의 물증.
+          ⓓ 조합이 ③과 **동일한 자격 규칙**으로 성립 (top 포함, combo_share,
+             flat 게이트) 하고 종류 ≥ 2.
+          ⓔ 조합 잔차 < ① 잔차 (엄격히 더 잘 설명).
+          ⓕ 조합 총 개수 ≤ ① 개수 — 오컴 유지. "1종 2개"를 "2종 3개"로 부풀리는
+             도전 금지.
+          ⓖ 조합 총 개수 ≤ removal 세그먼트 수 — 조합이 주장하는 물건 수만큼
+             분리된 취출이 실제로 관측됐어야 한다.
+
+        ⓒ가 핵심 방어선이다: 동시 다량 취출(3-2 널담 2개 동시, 1세그먼트)은
+        조합 잔차가 더 작아도(널담1+잭슨빌1 = 307.5, 잔차 2.5 < ①의 5) 도전
+        자체가 봉쇄된다 — 세그먼트가 "한 번의 취출"이라고 말하고 있기 때문.
+        """
+        if not self._segment_combo:
+            return None
+        _, _, count, residual = winner
+        if count < 2 or residual <= 0:  # ⓐⓑ
+            return None
+        removals = sum(1 for s in ctx.segments if s.delta_grams < 0)
+        if removals < self._segment_combo_min_segments:  # ⓒ
+            return None
+        combo = self._best_combo(identities, top_c, target, gate)  # ⓓ
+        if combo is None:
+            return None
+        subset, alloc, combo_residual = combo
+        if len(subset) < 2 or combo_residual >= residual:  # ⓓⓔ
+            return None
+        if sum(alloc) > count or sum(alloc) > removals:  # ⓕⓖ
+            return None
+        return subset, alloc
 
     def _allocations(self, products: list[ActiveProduct], target: float, gate: float):
         """각 종류 최소 1개(부분집합 크기가 곧 종류 수)로 target±gate를 설명하는

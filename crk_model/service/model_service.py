@@ -192,6 +192,11 @@ class ModelService:
                     conf_override=self.settings.judgment_conf_override,
                     conf_margin=self.settings.judgment_conf_margin,
                     refit_arb_conf_floor=self.settings.judgment_refit_arb_conf_floor,
+                    count_occam=self.settings.judgment_count_occam,
+                    segment_combo=self.settings.judgment_segment_combo,
+                    segment_combo_min_segments=(
+                        self.settings.judgment_segment_combo_min_segments
+                    ),
                 ),
                 partial_min_confidence=self.settings.judgment_partial_min_confidence,
             ), count_unit_slack=self.settings.judgment_count_unit_slack),

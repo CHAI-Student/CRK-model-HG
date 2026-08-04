@@ -128,7 +128,7 @@ CRK-model-HG는 결제 정확도상 **"무게로 뒷받침된 count 격상" > "�
 | # | 전략 (`name`) | 전제 (precondition) | 결정 | 실패 시 |
 |---|---|---|---|---|
 | 0 | `vision_only` | `ctx.vision_only` | 최상위 후보 count=1, conf×0.7 (I6 미적용 — 설명할 delta가 없음) | allowlist에 매칭되는 후보가 없으면 `NO_DETECTION(no_vision_candidates)` |
-| 1 | `freezer_vision_first` | 냉동 ∧ 후보 있음 ∧ `delta < 0` | ①밴드 내 단일 → ②top 근접 PARTIAL → ③top 포함 조합 → ④유일-적합 구제 | `None` → 9.2가 정체성 보존 |
+| 1 | `freezer_vision_first` | 냉동 ∧ 후보 있음 ∧ `delta < 0` | ①밴드 내 단일(+개수 오컴, +세그먼트 조합 도전) → ②top 근접 PARTIAL → ③top 포함 조합 → ④유일-적합 구제 | `None` → 9.2가 정체성 보존 |
 | 2 | `augment_stage_weight_gate` | **Stage** — 결정자 아님 | 제거 세그먼트 delta의 절댓값 목록을 `stage_hints["segment_targets"]`로 주입 | 제거 구간 없으면 ctx 그대로 |
 | 3 | `segment_weight_matching` | 냉장 ∧ 제거 구간 ≥ 2 ∧ 후보 있음 | 구간별 최적 조합을 병합 (I12: 합산 count ≤ stock) | 한 구간이라도 실패 → `None` |
 | 3.5 | `stage_count_combo` (`require_no_vision=True`) | 냉장 ∧ **후보 없음** ∧ targets ≥ 2 | 전 재고 센티널 후보로 구간별 매칭, `total_count ≥ 2`만 채택 | `None` → 4 |
@@ -157,6 +157,8 @@ CRK-model-HG는 결제 정확도상 **"무게로 뒷받침된 count 격상" > "�
 | `single_share` | 0.5 | ① 자격 (top 득표 대비) | 저득표 후보가 무게 적합만으로 정체성을 가져가는 것 |
 | `conf_override` / `conf_margin` | 0.9 / 0.15 | ① 자격 보완 + 복수 적합 중재 | 진열 오염이 득표를 왜곡한 케이스 — conf 1.0 진짜 상품 19표 vs 오염 63표. margin 비교는 `min(0.99, vt+margin)`로 **포화**(정답 conf 1.0이 0.855+0.15=1.005에 패배하던 구조적 결함), 단 vt conf ≥ `conf_override`면 포화하지 않음(둘 다 천장 압축이면 conf 차이는 노이즈 → 득표 서열) |
 | `count_unit_slack` | 5.0 | `gate_n(n) = count_gate + slack×(n−1)` (①·④·I6) | DB unit_weight 편차와 접촉 오염이 개수에 비례 누적되는데 flat ±15g를 쓰면 n≥4에서 정답의 자기 적합이 깨진다 — 베이글 5개(5×155≈775)가 만두 4개(4×185=740)에 확정을 넘긴 사고. **조합(③)은 의도적으로 flat 유지**(우연 적합 공간이 조합적으로 커지므로) |
+| `count_occam` | True | ① 적합 수집 직후 (`_occam_filter`) | `count_unit_slack`의 반대급부 — n에 비례해 넓어진 게이트 덕에 저중량 상품이 n을 키워 아무 중량대나 덮는 "만능 filler"가 되고, 중재는 득표·conf만 보므로 **잔차 0짜리 n=1 정답이 잔차 15~24짜리 ×N에게 득표만으로 진다**(0730 시나리오 실패 6/7건: 잭슨빌 155×1 → 라라스윗 70×2). n=1 적합이 있으면 그보다 잘 맞지 않는 n≥2 적합을 실격 — 정체성 선택이 아니라 개수 가설의 자격 심사(I-V ⑴). ④에는 미적용(후보를 줄이면 "유일" 성립이 늘어 채택이 증가하는 역방향) |
+| `segment_combo` | False | ① 승자 확정 직전 (`_segment_combo_challenge`) | 단위무게가 비슷한 두 상품을 1개씩 꺼낸 delta는 "A×2"·"B×2"·"A1+B1"을 무게로 구분할 수 없는데 ①이 ③보다 먼저라 항상 ×N 단일이 이긴다(0730 2-4: 메로나 80 + 월드콘 70 = −150 → 월드콘×2, 정답 조합 잔차 0에 도달 못 함). 개수 오컴도 무발동(전부 n=2라 n=1 기준점 없음). 켜면 **removal 세그먼트가 분리 취출을 증언할 때만** ③ 조합이 ①을 뒤집는다 — 동시 취출(1세그먼트)은 조합 잔차가 더 작아도 봉쇄(3-2 방어선). 기본 off, 승격은 아카이브 segments 확인 후 |
 | `near_factor` | 2.0 | ② 근접 실패 밴드 | 접촉 하중 오염(실측 8~18g)을 "정체성이 틀렸다"로 오독하는 것 — 정체성·개수 보존 PARTIAL |
 | `combo_share` | 0.3 | ③ 조합 멤버 자격 | 배경 후보가 오염 잔차의 filler로 끼는 것(메로나 79g×3) |
 | `refit_share` | 0.1 | ④ 구제 자격 | 3표(top의 1.75%)짜리 후보가 "유일 적합"으로 COMPLETE 채택되던 사고 — vision이 사실상 못 본 후보는 구제 대상도 모호성 판단 대상도 아니다 |
@@ -216,6 +218,9 @@ confidence로 최종 선택한다(냉장 기본 경로).
 | `CONF_OVERRIDE` | 0.9 | ① share 미달 보완 자격 + 포화 예외 문턱 (2.0 = 비활성) |
 | `CONF_MARGIN` | 0.15 | ① 복수 적합에서 conf가 득표 서열을 뒤집는 최소 격차 (≥1.0 = 비활성 센티널) |
 | `REFIT_ARB_CONF_FLOOR` | 0.8 | ④ 중재 승자의 절대 conf 하한 (2.0 = 중재 비활성) |
+| `COUNT_OCCAM` | 1 | ① n=1 적합보다 잘 맞지 않는 n≥2 적합 실격 (0 = 구 동작) |
+| `SEGMENT_COMBO` | 0 | ①⁺ removal 세그먼트 ≥ `MIN_SEGMENTS`일 때만 ③ 조합이 ① ×N 확정에 도전 |
+| `SEGMENT_COMBO_MIN_SEGMENTS` | 2 | 위 도전 자격의 removal 세그먼트 최소 수 |
 | `PARTIAL_MIN_CONFIDENCE` | 0.18 | 9.2·9.4 무게 미검증 count=1 청구의 conf 하한 (0 = 비활성) |
 
 **env로 노출되지 않은 코드 상수**: `tolerance_grams`·`count_gate`·

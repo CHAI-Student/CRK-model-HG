@@ -953,3 +953,34 @@ class TestSaveDetectionsTap:
         monkeypatch.setenv("MODEL__VIDEO__SIDE_CROP", "rihgt")  # 오타는 fail-closed
         with pytest.raises(ValueError):
             S.from_env()
+
+    def test_count_occam_env_wiring(self, monkeypatch):
+        # ① 개수 오컴 (0730 시나리오): 기본 ON, MODEL__JUDGMENT__COUNT_OCCAM=0이
+        # 롤백 스위치. 판정 전략 인스턴스까지 배선되는지 확인한다.
+        from crk_model.core.config import Settings as S
+        from crk_model.service.model_service import ModelService
+
+        assert S().judgment_count_occam is True
+        monkeypatch.setenv("MODEL__JUDGMENT__COUNT_OCCAM", "0")
+        assert S.from_env().judgment_count_occam is False
+
+        def _strategy(settings):
+            svc = ModelService(FakeDetector(), settings=settings)
+            entry = next(
+                e for e in svc.pipeline._router.pipeline
+                if getattr(e, "name", None) == "freezer_vision_first"
+            )
+            return entry
+
+        assert _strategy(S.from_env())._count_occam is False
+        monkeypatch.delenv("MODEL__JUDGMENT__COUNT_OCCAM")
+        assert _strategy(S.from_env())._count_occam is True
+
+        # ①⁺ 세그먼트 근거 조합 도전은 반대로 기본 off — 켜는 쪽이 env다.
+        assert S().judgment_segment_combo is False
+        assert _strategy(S.from_env())._segment_combo is False
+        monkeypatch.setenv("MODEL__JUDGMENT__SEGMENT_COMBO", "1")
+        monkeypatch.setenv("MODEL__JUDGMENT__SEGMENT_COMBO_MIN_SEGMENTS", "3")
+        strategy = _strategy(S.from_env())
+        assert strategy._segment_combo is True
+        assert strategy._segment_combo_min_segments == 3

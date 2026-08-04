@@ -739,3 +739,253 @@ class TestIssue16WeightArbitration:
         ))
         assert result is not None
         assert [(pc.product.class_id, pc.count) for pc in result.products] == [(13, 4)]
+
+
+class TestCountOccam0730Scenario:
+    """0730 냉동 시나리오 배치 — ① 개수 오컴 (strategies._occam_filter).
+
+    실측 실패 7건 중 6건이 "서로 다른 2종을 1종 ×N으로 뭉갠다"는 한 서명이었고,
+    그 ×N의 주인공은 항상 70~95g대 저중량 상품이었다. 원인은 ①의 fit()이 개수를
+    무게에서 역산하는데(gate_n(n)=15+5×(n−1)로 창까지 넓어진다) 중재는 득표·conf
+    만 보는 비대칭 — 잔차 0짜리 n=1 정답이 잔차 15~24짜리 저중량 ×N에게 득표만으로
+    졌다. 아래 케이스 ID는 CRK_냉동시나리오테스트 0730_상세실행표의 행이다."""
+
+    # 실측 unit_weight (0730 단품 취출 delta 기준)
+    HOTDOG = ActiveProduct("P44", "잭슨빌 핫도그", class_id=44, unit_weight=155.0,
+                           unit_price=2500, stock_qty=30)
+    LALA = ActiveProduct("P30", "라라스윗", class_id=30, unit_weight=70.0,
+                         unit_price=1800, stock_qty=30)
+    CHEONGYANG = ActiveProduct("P23", "청양만두", class_id=23, unit_weight=225.0,
+                               unit_price=3500, stock_qty=30)
+    YOMAM = ActiveProduct("P35", "요맘때", class_id=35, unit_weight=95.0,
+                          unit_price=1500, stock_qty=30)
+    MELONA = ActiveProduct("P46", "메로나", class_id=46, unit_weight=80.0,
+                           unit_price=1000, stock_qty=30)
+
+    def test_case_2_8_single_beats_low_unit_double_despite_votes(self):
+        # 2-8: 2층 좌측 라라스윗이 우측 잭슨빌 취출 영상에 계속 잡혀 득표 1위가
+        # 됐다. 잭슨빌 155×1은 잔차 0인데, 라라스윗 70×2=140이 잔차 15로
+        # gate_n(2)=20을 통과해 "라라스윗 2개"로 과금됐다.
+        result = JudgmentRouter().judge(ctx(
+            -155.0, [self.HOTDOG, self.LALA],
+            [cand(30, 0.88, 90), cand(44, 0.86, 55)],
+            profile=FREEZER,
+        ))
+        assert result.status is JudgmentStatus.COMPLETE
+        assert result.reason == "freezer_vision_first_single"
+        assert [(pc.product.class_id, pc.count) for pc in result.products] == [(44, 1)]
+
+    def test_case_5_3_occam_scales_to_n3_window(self):
+        # 5-3: 청양만두 225×1은 잔차 8.8. 라라스윗 70×3=210은 잔차 23.8인데
+        # gate_n(3)=25라 통과 — 저중량 ×3의 창 [185,235]가 청양만두를 삼킨다.
+        result = JudgmentRouter().judge(ctx(
+            -233.8, [self.CHEONGYANG, self.LALA],
+            [cand(30, 0.9, 120), cand(23, 0.84, 70)],
+            profile=FREEZER,
+        ))
+        assert result.status is JudgmentStatus.COMPLETE
+        assert [(pc.product.class_id, pc.count) for pc in result.products] == [(23, 1)]
+
+    def test_case_6_1_occam_survives_small_multiple_residual(self):
+        # 6-1: 요맘때 95×2=190은 잔차 5로 gate_n(2)=20 통과. 잭슨빌 1개는 잔차 0
+        # — n≥2가 잔차에서도 지면 실격이라는 규칙의 최소 마진 케이스.
+        result = JudgmentRouter().judge(ctx(
+            -155.0, [self.HOTDOG, self.YOMAM],
+            [cand(35, 0.92, 100), cand(44, 0.80, 60)],
+            profile=FREEZER,
+        ))
+        assert [(pc.product.class_id, pc.count) for pc in result.products] == [(44, 1)]
+
+    def test_genuine_double_pick_survives_when_it_explains_better(self):
+        # 반대 방향 안전성: 메로나를 **진짜 2개** 꺼낸 −160. 메로나 80×2는 잔차 0,
+        # 배경 잭슨빌 155×1은 잔차 5 — n≥2가 더 잘 설명하므로 실격되지 않고,
+        # 최종 선택은 종전대로 vision 증거(득표)가 한다.
+        result = JudgmentRouter().judge(ctx(
+            -160.0, [self.MELONA, self.HOTDOG],
+            [cand(46, 0.9, 120), cand(44, 0.7, 20)],
+            profile=FREEZER,
+        ))
+        assert result.status is JudgmentStatus.COMPLETE
+        assert [(pc.product.class_id, pc.count) for pc in result.products] == [(46, 2)]
+
+    def test_no_single_fit_leaves_multiples_untouched(self):
+        # n=1 적합이 아예 없으면(진짜 다량 취출) 규칙 무발동 — 2-2 청양만두 3개.
+        result = JudgmentRouter().judge(ctx(
+            -680.0, [self.CHEONGYANG, self.LALA],
+            [cand(23, 0.95, 140), cand(30, 0.8, 40)],
+            profile=FREEZER,
+        ))
+        assert result.status is JudgmentStatus.COMPLETE
+        assert [(pc.product.class_id, pc.count) for pc in result.products] == [(23, 3)]
+
+    def test_low_evidence_single_cannot_disqualify_a_multiple(self):
+        # I-V 안전핀: 오컴의 기준점은 **자격(eligible)을 통과해 fits에 든 n=1**
+        # 뿐이다. 5표/conf 0.5짜리 배경 잭슨빌은 single_share(50%)·conf_override
+        # (0.9) 양문 모두 미달이라 fits에 못 들어가고, 따라서 라라스윗 ×2를
+        # 실격시키지 못한다 — "저득표 배경 후보가 n=1이라는 이유만으로 진짜 다량
+        # 취출을 무너뜨린다"는 이슈 #15형 역전이 이 경로로는 재발하지 않는다.
+        result = JudgmentRouter().judge(ctx(
+            -155.0, [self.HOTDOG, self.LALA],
+            [cand(30, 0.88, 90), cand(44, 0.5, 5)],
+            profile=FREEZER,
+        ))
+        assert result.reason == "freezer_vision_first_single"
+        assert [(pc.product.class_id, pc.count) for pc in result.products] == [(30, 2)]
+
+    def test_rollback_knob_restores_legacy_multiple(self):
+        # env 롤백 계약 (MODEL__JUDGMENT__COUNT_OCCAM=0): 2-8이 실측 오답으로 복귀.
+        from crk_model.judgment.strategies import FreezerVisionFirstStrategy
+        legacy = FreezerVisionFirstStrategy(count_occam=False)
+        result = legacy.solve(ctx(
+            -155.0, [self.HOTDOG, self.LALA],
+            [cand(30, 0.88, 90), cand(44, 0.86, 55)],
+            profile=FREEZER,
+        ))
+        assert result is not None
+        assert [(pc.product.class_id, pc.count) for pc in result.products] == [(30, 2)]
+
+
+class TestSegmentBackedCombo0730Case24:
+    """0730 2-4 — ①⁺ 세그먼트 근거 조합 도전 (기본 off, 명시 활성 시에만).
+
+    2-4: 5층 좌측 메로나(80g)와 우측 월드콘(70g)을 **순차적으로** 각 1개씩.
+    delta −150을 무게만으로는 "월드콘×2"(140, 잔차 10) "메로나×2"(160, 잔차 10)
+    "메로나1+월드콘1"(150, 잔차 0) 셋 중 무엇으로도 읽을 수 있고, gate_n(2)=20이
+    앞의 둘을 모두 허용한다. ①이 ③보다 먼저라 정답 조합은 도달조차 못 했다.
+    개수 오컴도 무발동 — 경쟁 적합이 전부 n=2라 n=1 기준점이 없다.
+
+    분리 신호는 로드셀 세그먼트다: 순차 취출은 removal 세그먼트 2개를 남기고
+    (냉동 segment_step=20g이라 70~80g 취출은 확실히 분리), 동시 취출은 1개다."""
+
+    MELONA = ActiveProduct("P46", "메로나", class_id=46, unit_weight=80.0,
+                           unit_price=1000, stock_qty=30)
+    WORLD = ActiveProduct("P40", "월드콘", class_id=40, unit_weight=70.0,
+                          unit_price=1200, stock_qty=30)
+    BAGEL = ActiveProduct("P27", "널담 베이글", class_id=27, unit_weight=152.5,
+                          unit_price=2800, stock_qty=30)
+    HOTDOG = ActiveProduct("P44", "잭슨빌 핫도그", class_id=44, unit_weight=155.0,
+                           unit_price=2500, stock_qty=30)
+
+    @staticmethod
+    def _strategy(**kw):
+        from crk_model.judgment.strategies import FreezerVisionFirstStrategy
+
+        return FreezerVisionFirstStrategy(segment_combo=True, **kw)
+
+    @staticmethod
+    def _segs(*grams):
+        return [WeightSegment(0.0, 1.0, g) for g in grams]
+
+    def _case_2_4(self, **kw):
+        return self._strategy(**kw).solve(ctx(
+            -150.0, [self.WORLD, self.MELONA],
+            [cand(40, 0.9, 100), cand(46, 0.88, 85)],
+            profile=FREEZER, segments=self._segs(-80.0, -70.0),
+        ))
+
+    def test_sequential_two_kinds_beats_single_double(self):
+        result = self._case_2_4()
+        assert result is not None
+        assert result.status is JudgmentStatus.COMPLETE
+        assert result.reason == "freezer_vision_first_segment_combo"
+        assert sorted((pc.product.class_id, pc.count) for pc in result.products) == [
+            (40, 1), (46, 1),
+        ]
+
+    def test_default_off_keeps_legacy_single(self):
+        # 레포 관행: 신규 판정 기제의 기본값은 기존 동작. 실측 1건 + 세그먼트
+        # 구조 미확인이라 승격은 아카이브 확인 후.
+        from crk_model.judgment.strategies import FreezerVisionFirstStrategy
+
+        result = FreezerVisionFirstStrategy().solve(ctx(
+            -150.0, [self.WORLD, self.MELONA],
+            [cand(40, 0.9, 100), cand(46, 0.88, 85)],
+            profile=FREEZER, segments=self._segs(-80.0, -70.0),
+        ))
+        assert result is not None
+        assert result.reason == "freezer_vision_first_single"
+        assert [(pc.product.class_id, pc.count) for pc in result.products] == [(40, 2)]
+
+    def test_guard_c_simultaneous_pick_blocks_challenge(self):
+        # ⓒ 핵심 방어선 — 0730 3-2(널담 2개를 **한 손으로 동시에**, 1세그먼트).
+        # 조합(널담1+잭슨빌1 = 307.5, 잔차 2.5)이 ①(널담×2 = 305, 잔차 5)보다
+        # 잘 설명해도, 세그먼트가 "한 번의 취출"이라고 말하므로 도전 봉쇄.
+        result = self._strategy().solve(ctx(
+            -310.0, [self.BAGEL, self.HOTDOG],
+            [cand(27, 0.92, 110), cand(44, 0.85, 70)],
+            profile=FREEZER, segments=self._segs(-310.0),
+        ))
+        assert result is not None
+        assert result.reason == "freezer_vision_first_single"
+        assert [(pc.product.class_id, pc.count) for pc in result.products] == [(27, 2)]
+
+    def test_guard_e_sequential_same_product_keeps_single(self):
+        # ⓔ 2-1(널담 2개 순차 = 세그먼트 2개)은 도전 자격은 얻지만, ①(널담×2
+        # = 305, 잔차 1.7)이 조합(널담1+잭슨빌1 = 307.5, 잔차 4.2)보다 잘
+        # 설명하므로 뒤집히지 않는다 — 순차 취출이라고 무조건 조합이 아니다.
+        result = self._strategy().solve(ctx(
+            -303.3, [self.BAGEL, self.HOTDOG],
+            [cand(27, 0.92, 110), cand(44, 0.85, 70)],
+            profile=FREEZER, segments=self._segs(-152.5, -150.8),
+        ))
+        assert result is not None
+        assert result.reason == "freezer_vision_first_single"
+        assert [(pc.product.class_id, pc.count) for pc in result.products] == [(27, 2)]
+
+    def test_guard_b_perfect_single_is_never_challenged(self):
+        # ⓑ ① 잔차 0(월드콘 정확히 2개 = 140)은 도전 대상이 아니다.
+        result = self._strategy().solve(ctx(
+            -140.0, [self.WORLD, self.MELONA],
+            [cand(40, 0.9, 100), cand(46, 0.88, 85)],
+            profile=FREEZER, segments=self._segs(-70.0, -70.0),
+        ))
+        assert result is not None
+        assert result.reason == "freezer_vision_first_single"
+        assert [(pc.product.class_id, pc.count) for pc in result.products] == [(40, 2)]
+
+    def test_guard_g_combo_cannot_claim_more_items_than_segments(self):
+        # ⓖ 세그먼트 2개인데 조합이 3개를 주장하면 근거가 없다.
+        # −220: ①은 월드콘 70×3 = 210(잔차 10 ≤ gate_n(3)=25), 조합은
+        # 월드콘2+메로나1 = 220(잔차 0)이지만 총 3개 > 세그먼트 2개 → 봉쇄.
+        result = self._strategy().solve(ctx(
+            -220.0, [self.WORLD, self.MELONA],
+            [cand(40, 0.9, 100), cand(46, 0.88, 85)],
+            profile=FREEZER, segments=self._segs(-150.0, -70.0),
+        ))
+        assert result is not None
+        assert result.reason == "freezer_vision_first_single"
+        assert [(pc.product.class_id, pc.count) for pc in result.products] == [(40, 3)]
+
+    def test_min_segments_knob_tightens_eligibility(self):
+        # ⓒ 문턱을 3으로 올리면 2세그먼트짜리 2-4는 도전 자격을 잃는다.
+        result = self._case_2_4(segment_combo_min_segments=3)
+        assert result is not None
+        assert result.reason == "freezer_vision_first_single"
+
+    def test_combo_share_gate_still_applies_to_challenge(self):
+        # ⓓ 도전 조합도 ③과 **동일한** 자격 규칙을 쓴다 — 메로나가 combo_share
+        # (top 득표의 30%) 미달이면 조합 자체가 성립하지 않는다.
+        result = self._strategy().solve(ctx(
+            -150.0, [self.WORLD, self.MELONA],
+            [cand(40, 0.9, 100), cand(46, 0.95, 20)],
+            profile=FREEZER, segments=self._segs(-80.0, -70.0),
+        ))
+        assert result is not None
+        assert result.reason == "freezer_vision_first_single"
+        assert [(pc.product.class_id, pc.count) for pc in result.products] == [(40, 2)]
+
+    def test_guard_f_combo_cannot_inflate_item_count(self):
+        # ⓕ 오컴 유지 — 세그먼트가 넉넉해도(4개) 조합이 ①보다 **많은 개수**를
+        # 주장하면 봉쇄. A(100g)×2 = 200(잔차 10)를 A1+B3(190, 잔차 0)이 이기지
+        # 못한다: "1종 2개"를 "2종 4개"로 부풀리는 방향은 금지.
+        a = ActiveProduct("PA", "A", class_id=51, unit_weight=100.0,
+                          unit_price=1000, stock_qty=10)
+        b = ActiveProduct("PB", "B", class_id=52, unit_weight=30.0,
+                          unit_price=500, stock_qty=10)
+        result = self._strategy().solve(ctx(
+            -190.0, [a, b], [cand(51, 0.9, 100), cand(52, 0.5, 40)],
+            profile=FREEZER, segments=self._segs(-50.0, -50.0, -50.0, -40.0),
+        ))
+        assert result is not None
+        assert result.reason == "freezer_vision_first_single"
+        assert [(pc.product.class_id, pc.count) for pc in result.products] == [(51, 2)]
