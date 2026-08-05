@@ -37,11 +37,11 @@ python -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
 
-python -m pytest tests -q          # 기대: 406 passed
+python -m pytest tests -q          # 기대: 432 passed
 ruff check .                       # CI와 같은 검사
 ```
 
-- **406 passed**가 기준선입니다. 건수가 적으면 선택 의존성(`numpy` / `ffmpeg`
+- **432 passed**가 기준선입니다. 건수가 적으면 선택 의존성(`numpy` / `ffmpeg`
   바이너리 / `fastapi`) 미설치로 skip된 것입니다 — CI는 셋을 모두 설치합니다.
 - lint의 정본은 CI(`.github/workflows/ci.yml`)입니다. 로컬 실행은 위처럼
   개발 의존성을 설치한 뒤에만 가능합니다.
@@ -136,7 +136,7 @@ curl http://localhost:8002/api/health
 | 기제 | env | 무엇을 관측 중인가 | 승격 게이트 | 폐기 기준 |
 |---|---|---|---|---|
 | **held 트랙 강등** | `MODEL__VISION__HELD_TRACK_DEMOTION` = `off`\|`shadow`\|`active` | 프리롤부터 지속 관측된 carried-in(들고 들어온) 트랙의 표를 몰수했을 때의 정오 | **정답 클래스 오플래그(⚠) 0** 배치 확인 → `active` | 냉장에서도 오플래그가 계속 나오고 "shadow만 정답" 기여가 없으면 폐기 |
-| **세션 고스트 원장** | `MODEL__GHOST__MODE` = `off`\|`shadow`\|`active` | 여러 존(≥2 에피소드)에서 자격 표를 얻고도 세션 내 무게 뒷받침 과금이 0인 클래스 | **정답 클래스 오플래그(⚠) 0** 배치 확인 → `active` | 에피소드 ≥2 수정 후에도 오플래그가 재현되면 강등 로직 축소 검토 |
+| **세션 고스트 원장** | `MODEL__GHOST__MODE` = `off`\|`shadow`\|`active` | 여러 존(≥2 에피소드)에서 자격 표를 얻고도 세션 내 무게 뒷받침 과금이 0인 클래스 | **정답 클래스 오플래그(⚠) 0** 배치 확인 → `active` | 에피소드 ≥2 수정(11차 video_paths + 이슈 #22 같은 순간 창 겹침 병합) 후에도 오플래그가 재현되면 강등 로직 축소 검토 |
 
 두 기제 모두 **강등형**입니다 — 판정을 뒤집는 방향이 "표를 빼는" 쪽이라,
 잘못 켜면 진짜 취출 표를 몰수해 **매출 누락**이 납니다. 그래서 게이트가

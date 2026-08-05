@@ -257,7 +257,11 @@ dataclass 기본값과 `from_env()` 기본값이 일치함을 확인한 값입�
 | `MODEL__JUDGMENT__CONF_OVERRIDE` | `0.9` | `SINGLE_SHARE` 미달이어도 conf가 이 값 이상(+`REFIT_SHARE` 득표)이면 적합 자격 — 진열 오염이 득표 순위를 왜곡해도 max-conf는 독립 신호이기 때문 (실사고: conf 1.0 진짜 상품 19표 vs 오염 63표). `2.0`=비활성 |
 | `MODEL__JUDGMENT__CONF_MARGIN` | `0.15` | 복수 적합 중재에서 conf가 득표 서열을 뒤집는 최소 격차. 발동 시 reason에 `…single_arbitrated`로 남습니다. `2.0`=비활성 |
 | `MODEL__JUDGMENT__PARTIAL_MIN_CONFIDENCE` | `0.18` | 무게 미검증 `count=1` partial 청구의 conf 하한 (원본 `multi_kind_min_confidence` 동형). 실기 ses-3: 5표/conf 0.157 청구가 잔차 65g 오상품을 과금 — 저증거 청구 차단. `0`=비활성 |
+| `MODEL__JUDGMENT__PARTIAL_IMPOSSIBLE_FACTOR` | `3.0` | `relaxed_partial`(냉장 최종 폴백)의 **무게 반증 거부권** — 단위무게가 최대 removal 관측량 + tolerance×이 계수를 넘는 후보는 count=1 청구 부적격, 다음 득표 순위로. 이슈 #22 ses-4: 교차존 오염으로 득표 1위가 된 525g 상품이 Δ-80g에 청구(1개 취출조차 물리적으로 불가능). `0`=비활성(구 동작) |
 | `MODEL__JUDGMENT__REFIT_ARB_CONF_FLOOR` | `0.8` | refit 복수 적합 중재의 **절대** conf 하한. 실기 ses-1: 0.69 유령이 margin 우세만으로 오과금 — 승자는 자체로 선명해야 합니다. `2.0`=중재 비활성(유일-적합만) |
+| `MODEL__JUDGMENT__COUNT_OCCAM` | `1` | ① 개수 오컴 — n=1 적합이 있으면 그보다 잘 맞지 않는 n≥2 적합을 실격. 저중량 상품이 n을 키워 아무 중량대나 덮는 "만능 filler" 차단 (0730 시나리오 실패 6/7건: 잭슨빌 155×1 → 라라스윗 70×2). `0`=구 동작 |
+| `MODEL__JUDGMENT__SEGMENT_COMBO` | `0` | ①⁺ 세그먼트 근거 조합 도전 — removal 세그먼트 ≥ `MIN_SEGMENTS`가 분리 취출을 증언할 때만 ③ 조합이 ①의 ×N 확정을 뒤집습니다 (0730 2-4: 메로나+월드콘 −150 → 월드콘×2). 실측 1건이라 **기본 off** — 아카이브 segments 확인 후 승격 |
+| `MODEL__JUDGMENT__SEGMENT_COMBO_MIN_SEGMENTS` | `2` | 위 도전 자격의 removal 세그먼트 최소 수. 올리면 더 보수적 |
 
 ### 4.8 로드셀
 
@@ -293,7 +297,7 @@ soft 페널티로 보정합니다. **Phase 3 승격 완료(2026-07-21) — 기�
 | 환경변수 | 기본값 | 의미 / 언제 만지나 |
 | --- | --- | --- |
 | `MODEL__CROSS_ZONE__PENALTY_ENABLED` | `1` | 기제 전체 스위치. `0`=롤백 |
-| `MODEL__CROSS_ZONE__REPLAY_S` | `4.0` | 오염 창의 앞쪽 폭. **CRK-CAMERA의 `replay_duration`과 단일 소스로 맞출 것** |
+| `MODEL__CROSS_ZONE__REPLAY_S` | `4.0` | 오염 창의 앞쪽 폭. **CRK-CAMERA의 `replay_duration`과 단일 소스로 맞출 것**. 고스트 원장의 에피소드 병합(같은 순간 판별, 이슈 #22)도 이 창을 쓰므로 `PENALTY_ENABLED=0`이어도 값은 유효합니다 |
 | `MODEL__CROSS_ZONE__TRIGGER_S` | `4.0` | 오염 창의 뒤쪽 폭. CRK-CAMERA trigger duration과 동일 소스 (0.8s 로드셀 캐던스 대응으로 3.0 → 4.0) |
 | `MODEL__CROSS_ZONE__EPSILON_S` | `1.0` | IO-BOARD 감지 지연 마진 ε: 폴링 0.8s(지배 항) + serial/SSE ~0.1s + 여유. 구값 0.3은 0.099s 폴링 시절 산정값 |
 | `MODEL__CROSS_ZONE__ALPHA` | `0.5` | soft 페널티 계수 α — 오염 후보의 표·신뢰도에 곱합니다 (하드 제외 아님) |
@@ -310,7 +314,7 @@ soft 페널티로 보정합니다. **Phase 3 승격 완료(2026-07-21) — 기�
 | 환경변수 | 기본값 | 의미 / 언제 만지나 |
 | --- | --- | --- |
 | `MODEL__GHOST__MODE` | `shadow` | `off` \| `shadow`(notes 기록만, 판정 무변경) \| `active`. 승격 조건은 [§7](#7-승격-대기-shadow-2종) |
-| `MODEL__GHOST__MIN_ZONES` | `2` | 유령 판정 최소 존 수. **1은 금지 방향** — 단일 존 등장은 정상입니다 |
+| `MODEL__GHOST__MIN_ZONES` | `2` | 유령 판정 최소 존 수. **1은 금지 방향** — 단일 존 등장은 정상입니다. 존 breadth와 별개로 **서로 다른 에피소드 ≥ 2**도 요구합니다 — 같은 `video_paths`(11차)와 오염 창이 상호 겹치는 같은 순간의 트리거(이슈 #22, `MODEL__CROSS_ZONE__REPLAY_S`/`TRIGGER_S`/`EPSILON_S` 창 상수 사용)는 한 에피소드로 병합됩니다 |
 | `MODEL__GHOST__VOTE_FLOOR` | `3` | 존 등장으로 인정할 최소 자격 표 수 (저득표 스파이크 차단) |
 | `MODEL__GHOST__ALPHA` | `0.5` | soft 페널티 계수 (cross-zone ALPHA와 같은 의미, 하드 제외 금지) |
 

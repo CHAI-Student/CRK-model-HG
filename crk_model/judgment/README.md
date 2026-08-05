@@ -44,7 +44,7 @@
 | `strict.py` | 무게 우선 백트래킹 조합 탐색 | `StrictWeightMatcher.find_valid_combinations` / `.best` |
 | `__init__.py` | 공개 표면 재수출 | — |
 
-합계 1,350행 (`strategies.py`가 1,015행 — 전략별 docstring에 실기 사고 근거가 붙어
+합계 1,531행 (`strategies.py`가 1,191행 — 전략별 docstring에 실기 사고 근거가 붙어
 있어서다. 코드보다 "왜 이 순서·이 임계인가"가 길다면 의도된 것이다).
 
 ## 3. 파일별 상세
@@ -142,7 +142,7 @@ CRK-model-HG는 결제 정확도상 **"무게로 뒷받침된 count 격상" > "�
 | 9.1 | `relaxed_loadcell_only` | 냉장 ∧ 후보 있음 ∧ **모든 후보가 allowlist 불일치** | 전 재고 nearest-single(오차 < 5g) PARTIAL, count=1 | 5g 이상이면 `None` |
 | 9.2 | `vision_first_identity_partial` | 냉동 ∧ 후보 있음 ∧ `delta < 0` | 무게검증 1회 — 통과 시 `COMPLETE(vision_identity_weight_validated)`, 실패 시 count=1 PARTIAL | 청구 conf < `partial_min_confidence`면 `None` (후보 쇼핑 금지 — 하위 후보로 내려가지 않는다) |
 | 9.3 | `detected_single_item_fallback` | `delta < 0` ∧ 후보 있음 (프로파일 무관) | top 후보만 보고 tolerance×3까지 구제, conf 상한 0.65 | 잔차 초과면 `None` |
-| 9.4 | `relaxed_partial` | 냉장 ∧ 후보 있음 | 정체성 보존 count=1 PARTIAL (무게 무검증), conf×0.5 | conf 하한 미달이면 `None` |
+| 9.4 | `relaxed_partial` | 냉장 ∧ 후보 있음 | **무게 반증 거부권**(unit_weight > 최대 removal 관측량 + tol×`impossible_factor`인 후보 배제 — 이슈 #22) 후 정체성 보존 count=1 PARTIAL (개수 무검증), conf×0.5 | 생존 후보가 없거나 conf 하한 미달이면 `None` |
 | 10 | `forced_final` | 항상 True | `NO_DETECTION(forced_final_no_match)` | — |
 
 3.5와 7.5는 원본에서 동일 헬퍼가 호출되는 **두 지점**이다. 인스턴스를 둘 두고
@@ -164,9 +164,11 @@ CRK-model-HG는 결제 정확도상 **"무게로 뒷받침된 count 격상" > "�
 | `refit_share` | 0.1 | ④ 구제 자격 | 3표(top의 1.75%)짜리 후보가 "유일 적합"으로 COMPLETE 채택되던 사고 — vision이 사실상 못 본 후보는 구제 대상도 모호성 판단 대상도 아니다 |
 | `refit_arb_conf_floor` | 0.8 | ④ 복수 적합 중재의 절대 하한 | margin 우세만으로는 "덜 흐린 유령"이 이긴다 — conf 0.69가 0.35를 꺾고 오과금(정당 케이스는 0.82) |
 | `partial_min_confidence` | 0.18 | 9.2 / 9.4 청구 conf 하한 | 5표/청구 conf 0.157짜리 identity partial이 잔차 65g 오상품을 과금 |
+| `partial_impossible_factor` | 3.0 | 9.4 무게 반증 거부권 (`unit_weight > 최대 removal 관측량 + tol×계수` 후보 배제) | 이슈 #22 ses-4 z3 — 다종 동시 취출의 교차존 오염 표로 득표 1위가 된 이웃 존 상품(단위무게 525g)이 Δ-80g 이벤트에 count=1 청구됐다(1개 취출조차 물리적으로 불가능). 9.3이 tol×3 창으로 이미 반증한 top을 9.4가 무검증으로 되살리지 않도록 같은 ×3 창을 쓴다. conf 하한과 달리 **다음 후보로 넘어간다** — 하한은 증거 강도 문턱이라 폴스루가 후보 쇼핑이 되지만, 이것은 물리적 배제(무게의 거부권)라 남은 후보 중 증거 서열대로 고르는 것이 맞다 |
 
 모든 노브는 "센티널로 비활성"을 지원한다(`slack=0`, `conf_override=2.0`,
-`conf_margin=2.0`, `refit_arb_conf_floor=2.0`, `partial_min_confidence=0`) —
+`conf_margin=2.0`, `refit_arb_conf_floor=2.0`, `partial_min_confidence=0`,
+`partial_impossible_factor=0`) —
 env 한 줄로 구 동작으로 롤백할 수 있고, 그 롤백 경로 자체가 테스트로 고정돼 있다.
 
 ### `strict.py`
@@ -205,7 +207,8 @@ confidence로 최종 선택한다(냉장 기본 경로).
 ## 5. 설정
 
 전부 `MODEL__JUDGMENT__*`이며 `service/model_service.py`가 `FreezerVisionFirstStrategy`
-인스턴스와 `default_pipeline(partial_min_confidence=...)`, `JudgmentRouter(count_unit_slack=...)`
+인스턴스와 `default_pipeline(partial_min_confidence=..., partial_impossible_factor=...)`,
+`JudgmentRouter(count_unit_slack=...)`
 로 주입한다. 카탈로그 정본은 [04. 설정 레퍼런스](../../docs/04-configuration.md).
 
 | 환경변수 | 기본값 | 영향 |
@@ -222,6 +225,7 @@ confidence로 최종 선택한다(냉장 기본 경로).
 | `SEGMENT_COMBO` | 0 | ①⁺ removal 세그먼트 ≥ `MIN_SEGMENTS`일 때만 ③ 조합이 ① ×N 확정에 도전 |
 | `SEGMENT_COMBO_MIN_SEGMENTS` | 2 | 위 도전 자격의 removal 세그먼트 최소 수 |
 | `PARTIAL_MIN_CONFIDENCE` | 0.18 | 9.2·9.4 무게 미검증 count=1 청구의 conf 하한 (0 = 비활성) |
+| `PARTIAL_IMPOSSIBLE_FACTOR` | 3.0 | 9.4 무게 반증 거부권의 tolerance 배수 — 냉장 전용(9.4는 냉동 배제) (0 = 비활성) |
 
 **env로 노출되지 않은 코드 상수**: `tolerance_grams`·`count_gate`·
 `min_weight_change_grams`(전부 `core/profiles.py`의 프로파일 상수),
@@ -231,16 +235,19 @@ confidence로 최종 선택한다(냉장 기본 경로).
 
 ## 6. 테스트
 
-`tests/test_judgment.py` 55건. 픽스처(`cola`/`water`/`bar170`/`bar178`, `cand()`)는
+`tests/test_judgment.py` 75건. 픽스처(`cola`/`water`/`bar170`/`bar178`, `cand()`)는
 `tests/conftest.py`.
 
 | 테스트 클래스 | 건수 | 무엇을 고정하는가 |
 |---|---|---|
+| `TestSegmentBackedCombo0730Case24` | 9 | ①⁺ 세그먼트 근거 조합 도전 — 2-4 재구성(도전 성립), ⓑⓒⓓⓔⓕⓖ 각 가드의 단독 봉쇄(동시 취출·완벽 설명·부풀리기 등), 기본 off no-op |
 | `TestFreezer` | 9 | I3 게이트로 후보 합산 금지(178g 사건), 근접 실패의 정체성·개수 보존 PARTIAL, 3종 조합과 "적은 종류 우선", 유일-적합 구제, refit 중재의 성립/절대 하한/모호 유지, 모호 시 strict·relaxed로의 **체인 누수 없음**(텔레메트리 0 확인) |
 | `TestGuards` | 8 | 저무게 게이트 사유 코드, 동일 무게 충돌의 conf 우선, vision_only count=1·conf×0.7, weight_only 단일 매치·다품목 조합 금지·모호 거부, 텔레메트리 카운트 |
 | `TestIssue16WeightArbitration` | 7 | n-스케일 게이트로 우연 적합 방어, conf_override+margin 중재, 격차 부족 시 폴스루, 천장 포화 발동/비발동(양쪽 천장), margin 비활성 센티널, 노브 롤백으로 구 선착 동작 재현 |
+| `TestCountOccam0730Scenario` | 7 | ① 개수 오컴 — 0730 실패 서명(잭슨빌1→라라스윗2 등) 복원, n=1 적합 부재 시 무발동(진짜 다량 취출 보존), ④ 미적용, `count_occam=False` 롤백 |
 | `TestStrictMatcher` | 6 | 단순 조합 선호, stock 제한 시 종류 조합, I5 품절 제외, I12 count 상한, `target < tolerance` 빈 결과, vision 미검출 제외 |
 | `TestVisionFirstIdentityPartial` | 5 | 냉동 relaxed 미스 후 정체성 보존 PARTIAL, 무게검증 시 COMPLETE 격상, 저conf 청구 차단, 하한 0 롤백, COMPLETE 경로는 하한 무관 |
+| `TestRelaxedPartialWeightRefute` | 4 | 9.4 무게 반증 거부권(이슈 #22 ses-4 z3) — 불가능 top 배제 후 차순위 청구, 전멸 시 미청구(I13), 반품 혼합 트리거의 removal 상한 보호, `factor=0` 롤백 |
 | `TestWeightOnlySameProductCount` | 3 | 동일 상품 n개 유일 매칭 채택, 서로 다른 (품목, n) 2쌍이면 모호 거부, stock 초과 n 제외 |
 | `TestIssue10MelonaFiller` | 3 | share 하한 없이도 판정층이 filler를 거부하고 정답 복원, 3표 filler를 `refit_share`가 차단, share 제거 후 정답 복원 |
 | `TestFullDeltaMatch` | 2 | I6 부분 설명 강등, relaxed 과잉 도달을 라우터가 강등 |
@@ -266,7 +273,10 @@ confidence로 최종 선택한다(냉장 기본 경로).
    추적이 유지되게 한다.
 4. **conf 하한에서 `continue`하지 말 것.** 하한 미달은 `return None`이다.
    하위 후보로 내려가면 "하한을 통과한 후보"가 청구 대상이 되어 증거 순위가
-   무의미해진다(후보 쇼핑 금지).
+   무의미해진다(후보 쇼핑 금지). 유일한 예외는 9.4의 **무게 반증 거부권**
+   (이슈 #22) — 증거 강도가 아니라 물리적 배제(1개 취출조차 불가능한
+   단위무게)라 후보를 좁힌 뒤 남은 서열대로 고르는 것이 맞고, conf 하한은
+   그 생존 후보에 다시 폴스루 없이 적용된다.
 5. `enforce_full_delta_match`는 `COMPLETE`만 건드린다. PARTIAL을 COMPLETE로
    올리는 로직을 여기 추가하면 I6의 방향(강등만)이 뒤집힌다.
 6. `judgment/likelihood.py`(무게 우도 score shadow)는 2026-07-30 삭제됐다.

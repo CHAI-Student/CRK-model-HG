@@ -1892,3 +1892,59 @@ unit_weight는 정책상 고정이고 실측과 10~30g 편차가 있으므로(�
 - **검증**: `pytest -q` → **423 passed** (개수 오컴 배치 414 + 신규 9, 회귀 0),
   `ruff check .` → All checks passed. 기존 #15/#16 회귀 픽스처는 `segments=()`라
   도전이 구조적으로 무발동이고, 신규 테스트가 ⓑⓒⓓⓔⓕⓖ를 각각 단독으로 고정한다.
+
+## 2026-08-04 이슈 #22 — 냉장 20종 실기: 오염 청구·GT 유령 오플래그 (다종 동시 취출)
+
+- **증상 2종** (냉장 20종 테스트, 세션 아카이브 ses-4·ses-6):
+  ① ses-4 z3: Δ-80g 트리거에 단위무게 ~525g 보리차(c35)가 count=1 청구 —
+  동시 취출된 이웃 존(z5) 상품이 교차존 오염 표로 득표 1위가 된 상태에서
+  strict/relaxed가 전부 실패하자 최종 폴백 `relaxed_partial`이 무게를 전혀
+  안 보고 청구했다 (1개 취출조차 물리적으로 불가능한 정체성).
+  ② ses-6: 동시 취출(z4:11, z5:35, 양존 Δ-525)에서 GT class35(10표 득표
+  1위)가 `ghost_classes`로 오플래그 — 존별 트리거가 각자 다른 녹화 파일을
+  가져 video_paths 동일성 에피소드 dedup(11차)이 뚫렸고, "2존 등장 + 무게
+  뒷받침 0"이 성립해 버렸다.
+
+- **원인 3중**:
+  - `relaxed_partial`(9.4)은 무게 무검증 count=1 폴백인데 단위무게 타당성
+    검사가 전혀 없다 — 냉장은 무게가 판별자인데 최종 폴백만 예외였다.
+  - cross_zone ④ 무게 모호성 게이트의 KEEP 전제("무게가 유일 해 → 기존
+    무게 매칭이 이미 방어")는 원 판정이 COMPLETE일 때만 참 — 무게 무검증
+    PARTIAL에도 적용되어 오염 청구가 note조차 없이 침묵 KEEP됐다.
+  - ghost 에피소드 dedup이 파일 동일성만 봐서, 같은 물리적 순간의 존별
+    트리거(파일명은 다름)가 "서로 다른 에피소드 2개"로 계산됐다.
+
+- **수정 3갈래** (`23bcd72`):
+  - `strategies.RelaxedIdentityPartialStrategy` **무게 반증 거부권**:
+    `unit_weight > max(최대 removal 세그먼트, |delta|) + tolerance×3`인
+    후보는 청구 부적격 → 다음 득표 순위로. removal 세그먼트 상한은 반품
+    혼합 트리거(net delta 축소) 보호. conf 하한과 달리 폴스루가 정당하다 —
+    증거 강도 문턱이 아니라 물리적 배제(무게의 거부권)이고, 9.3
+    detected_single이 tolerance×3 창으로 이미 반증한 top을 9.4가 되살리지
+    않도록 같은 창을 쓴다. 노브
+    `MODEL__JUDGMENT__PARTIAL_IMPOSSIBLE_FACTOR=3.0` (0 = 구 동작).
+  - `cross_zone._repass_event`: ④ KEEP을 **COMPLETE 원 판정에 한정** —
+    PARTIAL은 ④를 건너뛰고 재판정하며 ⑥ COMPLETE 게이트가 그대로 방어
+    (R2). 정답 상품 DB 무게가 정확한 경우 오염 청구가 실제 교체된다.
+  - `ghost_ledger._episode_ids`(신설, union-find): 에피소드 판별을
+    ① video_paths 동일 **또는** ② 오염 창 양방향 겹침(`windows_mutually_
+    overlap`으로 추출해 상호 강등 가드와 단일 소스)로 확장. settler가
+    `window_cfg=self.cross_zone`을 항상 전달한다 (카메라 계약 상수라
+    PENALTY_ENABLED와 무관). 미전달 구 호출은 기존 동작.
+
+- **모델로 못 고치는 부분** (데이터 정비 병행): ses-6의 11 이중과금 자체는
+  c35의 DB `product_loadcell_weight` 오차(±5g 게이트 경계, Δ-525에서 탈락
+  → Δ-520 재시도에서는 strict 정상 과금)가 근본 원인 — 잘못된 DB 무게
+  상품의 미판매 제외/실측 갱신이 전제다. 두 존이 같은 장면·같은 delta·같은
+  후보인 경우 비전으로는 구분 불가.
+
+- **관련 파일**: `crk_model/judgment/strategies.py`·`router.py`,
+  `crk_model/core/config.py`, `crk_model/service/model_service.py`,
+  `crk_model/ledger/cross_zone.py`·`ghost_ledger.py`·`settler.py`,
+  env 템플릿 3종, `tests/test_judgment.py`(+4)·`test_cross_zone.py`(+2)·
+  `test_ghost_ledger.py`(+3)·`test_ledger.py`(픽스처 ts 간격 보정).
+
+- **검증**: `pytest -q` → **432 passed** (0731 배치 423 + 신규 9, 회귀 0).
+  기존 `test_combo_ghost_class_excluded`는 ts 1.0/5.0이 새 기준에서 같은
+  에피소드로 병합되므로 픽스처 의도("별개 두 에피소드")를 보존하도록 60s
+  간격으로 조정 — 같은 순간이면 유령 불성립이 옳다.

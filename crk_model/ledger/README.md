@@ -31,13 +31,13 @@ CLOSE 2차 패스(교차존 페널티·고스트 원장)도 마찬가지다 — 
 
 ## 2. 구성 파일
 
-8파일 2,069행 — 이 저장소에서 가장 큰 패키지다.
+8파일 2,136행 — 이 저장소에서 가장 큰 패키지다.
 
 | 파일 | 역할 | 핵심 진입점 |
 |---|---|---|
 | `events.py` | 불변 트리거 이벤트, 세션별 로그, 확정 후 유입 거부(I11) | `TriggerEvent`, `EventLog.append/events_for/mark_finalized/prune` |
 | `barrier.py` | 인과 배리어(I17) — 인과 완결 사실의 수집 | `CausalBarrier.status()`, `BarrierStatus` |
-| `settler.py` | close-time 단일 글로벌 정산기 (677행, 이 패키지의 심장) | `CloseSettler.settle()`, `interim_summary()` |
+| `settler.py` | close-time 단일 글로벌 정산기 (681행, 이 패키지의 심장) | `CloseSettler.settle()`, `interim_summary()` |
 | `cross_zone.py` | 교차존 비전 오염 soft 페널티 (CLOSE 2차 패스, 기본 ON) | `apply_cross_zone_penalty()`, `CrossZonePenaltyConfig` |
 | `ghost_ledger.py` | 세션 고스트 원장 — 옷 프린트 유령 표 강등 (기본 shadow) | `detect_ghosts()`, `apply_ghost_demotion()`, `GhostLedgerConfig` |
 | `journal.py` | append-only JSONL + 일자 로테이션, replay(G2.5 훅) | `EventJournal.append/replay`, `event_to_dict/from_dict` |
@@ -187,7 +187,7 @@ note(`freezer_combo_rejected_confident_snap:...:conf=1.00`)를 남기고 억제 
 | ① 앵커 | `sub_event_anchors()` | `change_timestamps` → `segments.start_ts` → `ts`. 프레임 인덱스 환산 금지(F6) |
 | ② 오염 창 | `contamination_window()` | `[min(anchors) − replay_s − ε, max(anchors) + trigger_s + ε]` — 넓은(보수적) 창이 안전 방향 |
 | ③ 소스 | `_penalty_sources()` | 창이 겹치는 타 존 서브이벤트의 귀속 상품. 무판정·`confidence < θ` 소스는 제외 |
-| ④ 무게 모호성 게이트 | `_weight_ambiguous()` | delta 절댓값을 게이트 내로 설명하는 (상품, 개수) 해가 2종 이상일 때만 발동 |
+| ④ 무게 모호성 게이트 | `_weight_ambiguous()` | delta 절댓값을 게이트 내로 설명하는 (상품, 개수) 해가 2종 이상일 때만 발동. **원 판정이 COMPLETE일 때만 KEEP** — "무게 매칭이 이미 방어했다"는 전제가 무게 무검증 PARTIAL에는 성립하지 않으므로(이슈 #22 ses-4 z3: relaxed_partial의 오염 청구가 침묵 KEEP됨) PARTIAL 원 판정은 ④를 건너뛰고 재판정한다 |
 | ⑤ soft 페널티 | `_penalize_candidates()` | 오염 후보의 `confidence`·`vote_count`·`vote_ratio`를 α배로 강등 (판정 전략의 순위 키가 vote_count·confidence라 세 필드를 함께 내린다) |
 | ⑥ 재판정 게이트 | `_repass_event()` | 재판정이 COMPLETE가 아니거나 품목이 없으면 원 판정 유지. 페널티 후에도 오염 후보가 이기면 그대로 인정 |
 
@@ -226,10 +226,15 @@ note 코드: `zoneN:cross_zone_vision_penalty:demoted=..:adopted=..:source=zoneM
 
 에피소드 ≥ 2 요건은 11차 실측으로 추가됐다: 동시·연쇄 취출의 존 트리거들은 **연장 병합된 같은
 에피소드 영상**을 공유해 후보 집합이 완전히 동일하고, 그러면 모든 클래스가 공짜로 "2존 등장"이 되어
-정답이 오플래그된다. 에피소드 키는 `video_paths`이며 미기록(구 스키마) 이벤트는 각각 별개로 취급한다
-(보수적 유지). `held` 실물(존A에서 꺼내 들고 존B 진입)은 존A에서 뒷받침 과금을 받으므로 유령이
-아니다 — 그쪽은 교차존 페널티 소관이고, 이 원장은 **"어디서도 무게가 설명해 준 적 없는 정체성"**만
-잡는다.
+정답이 오플래그된다. 에피소드 판별(`_episode_ids`, union-find)은 2기준이다 — ① `video_paths` 동일
+(11차), ② **오염 창 양방향 겹침**(이슈 #22 ses-6: 동시 다존 취출의 존별 트리거는 각자 **다른 녹화
+파일**을 가져 파일 동일성 dedup이 뚫렸고, GT class35가 10표 득표 1위인데 유령 오플래그됐다 — 같은
+순간의 장면은 파일명과 무관하게 breadth 증거가 아니다. 판별식은 교차존 상호 강등 가드와
+`windows_mutually_overlap` 단일 소스). ②는 `apply_ghost_demotion(window_cfg=...)`로 오염 창 상수를
+받아야 동작하며 settler가 `cross_zone` 설정을 항상 전달한다(카메라 계약 상수라 페널티 enabled와 무관).
+미전달(구 호출)이면 ①만 — 기존 동작. `held` 실물(존A에서 꺼내 들고 존B 진입)은 존A에서 뒷받침 과금을
+받으므로 유령이 아니다 — 그쪽은 교차존 페널티 소관이고, 이 원장은 **"어디서도 무게가 설명해 준 적
+없는 정체성"**만 잡는다.
 
 **원칙: 배치 사전정보를 쓰지 않는다.** planogram(어느 존에 무엇이 진열되는지의 운영 입력)은 이
 프로젝트의 금지 제약이며 판단 근거는 **이 세션에서 관측된 증거뿐**이다. (폐기된 세션 트레이 메모리도
@@ -251,7 +256,7 @@ note 코드: `zoneN:cross_zone_vision_penalty:demoted=..:adopted=..:source=zoneM
 없음"이 되어 오플래그될 수 있다(9차 ses-8의 c40 — 2존 자격 + 뒷받침 0; 11차 ses-9의 3·27 — 오과금이
 진짜의 뒷받침을 가로챔). ② side 카메라가 한 채널의 여러 존 트레이를 동시에 비추는 광학 구조상 **다른
 에피소드라도 존 breadth가 독립 증거가 아닐 수 있다**(11차 ses-9: z5 반품 영상에 z3 진열 27이 잡힘) —
-에피소드 중복 제거는 공유 영상만 걸러내고 광학 공유는 남는다. **승격 절차**: `analyze-sessions` GT 라벨
+에피소드 중복 제거는 공유 영상·같은 순간(창 겹침)만 걸러내고 광학 공유는 남는다. **승격 절차**: `analyze-sessions` GT 라벨
 대조에서 **정답 클래스 오플래그율**을 확인한 뒤 `MODEL__GHOST__MODE=active`. active에서도 개입은 soft
 페널티(α) + COMPLETE 게이트 + 승자 유지 원칙으로 한정된다(교차존 ⑤·⑥ 준용).
 
@@ -367,8 +372,8 @@ barrier_timeout)도 트리거 이벤트만으로 존별 근사 요약을 재구�
 | 테스트 파일 | 무엇을 고정하는가 |
 |---|---|
 | `tests/test_ledger.py` (28건) | 배리어 3조건(큐 정합·로드셀·seq 워터마크)의 차단/해제. 정산기 불변식 — I11 동일 객체·확정 후 거부, 동존/교차존 반품, net-delta 교정, I14 음수 금지, I13 blocked + 결제 빌더 `ValueError`, 에러 존 제외 정책. freezer close — net~0 clear, 게이트 실패 시 증분 유지, `gate_n` 개수 비례. 콤보 중재 12건 — 스냅 뒤집기 성공/자격 표 하한/게이트 실패 구제/N=1 미탐색/가드 ①②③④⑤ 각각의 억제 note와 과금 결과/kill switch. I10 잠정 타입 `TypeError` |
-| `tests/test_cross_zone.py` (19건) | 앵커 폴백 3단, 오염 창 산식, 문서 시나리오 재판정 + 정산기 통합, 상호 강등 가드(잔차 우세/동률 양쪽 면제/self-fit 자격 박탈), θ 미달 소스의 침묵 진단 note, 무게 유일 해·냉장 tolerance에서 미발동, 재판정 게이트 실패 시 원 판정 유지, 페널티 후 승자 유지, disabled no-op, `change_timestamps` 저널 왕복·구버전 호환 |
-| `tests/test_ghost_ledger.py` (12건) | 검출 정의 — 다존+뒷받침 0은 유령 / COMPLETE 뒷받침은 보호(held 실물) / near_gate는 뒷받침 아님 / 단일 존 아님 / **공유 에피소드는 1회 등장** / 서로 다른 에피소드는 성립 / vote_floor 미달 제외. shadow는 동작 무변경 + note만(유령 미과금 존은 무기록), off는 no-op, active는 재판정 채택·게이트 실패 시 원 판정 유지·비과금 이벤트도 후보 강등(α). 정산기 기본값 shadow에서 과금 무변경 |
+| `tests/test_cross_zone.py` (21건) | 앵커 폴백 3단, 오염 창 산식, 문서 시나리오 재판정 + 정산기 통합, 상호 강등 가드(잔차 우세/동률 양쪽 면제/self-fit 자격 박탈), θ 미달 소스의 침묵 진단 note, 무게 유일 해·냉장 tolerance에서 미발동, **PARTIAL 원 판정의 ④ 우회 재판정 + COMPLETE 원 판정의 ④ KEEP 보존**(이슈 #22), 재판정 게이트 실패 시 원 판정 유지, 페널티 후 승자 유지, disabled no-op, `change_timestamps` 저널 왕복·구버전 호환 |
+| `tests/test_ghost_ledger.py` (15건) | 검출 정의 — 다존+뒷받침 0은 유령 / COMPLETE 뒷받침은 보호(held 실물) / near_gate는 뒷받침 아님 / 단일 존 아님 / **공유 에피소드는 1회 등장** / 서로 다른 에피소드는 성립 / **같은 순간·다른 파일의 창 겹침 병합과 별개 순간의 breadth 성립, window_cfg 미전달 구 동작**(이슈 #22) / vote_floor 미달 제외. shadow는 동작 무변경 + note만(유령 미과금 존은 무기록), off는 no-op, active는 재판정 채택·게이트 실패 시 원 판정 유지·비과금 이벤트도 후보 강등(α). 정산기 기본값 shadow에서 과금 무변경 |
 | `tests/test_session_archive.py` (18건) | finalize 시 YAML 1파일 + 후보·전략·`video_paths`·`trace` 포함, ERROR 세션도 `status=error`로 저장, **재폴링 3회에도 1파일**, 보존기간 디렉토리 삭제, PyYAML 부재 시 `.json` 폴백(라벨 기입까지), `archive_dir=""` 비활성, 저널 신규 필드 왕복·누락 시 기본값, settlement 없는 에러 세션의 존 요약 재구성, `ground_truth` placeholder·기입·대체·미존재 `FileNotFoundError`·`latest()`, `label-session` CLI 파싱과 E2E, `SAVE_DETECTIONS` off/on의 키 유무·conf 컷·`camera_crops` |
 | `tests/test_lifecycle.py` (33건 중 ledger 관련) | 24h+ soak 무한 성장 방지 — 새 OPEN마다 `EventLog`·멱등 캐시 prune, 활성 세션은 절대 삭제 안 됨, **prune 후에도 직전 세션 CLOSE 재폴링이 같은 금액**(I11). 저널 로테이션 파일명·롤오버·날짜순 replay·세션 필터·보존기간 삭제/보존·단일 인자 생성자 호환·**G2.5 replay 등가성**. `cabinet_type=freezer`가 close 정산까지 도달하는지 |
 

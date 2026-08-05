@@ -127,7 +127,7 @@ flowchart TD
         S92 -- "개수 확정 실패 → 정체성만 보존" --> PART
         S92 -- 해당없음 --> S93{"9.3 detected_single_item_fallback<br/>최상위 후보 & tolerance×3 내 설명"}
         S93 -- 성공 --> HIT
-        S93 -- 실패 --> S94{"9.4 relaxed_partial<br/>냉장 — 최다 득표 count=1"}
+        S93 -- 실패 --> S94{"9.4 relaxed_partial<br/>냉장 — 무게 반증 배제 후 최다 득표 count=1"}
         S94 -- 성공 --> PART
         S94 -- 실패 --> S10["10 forced_final<br/>NO_DETECTION (사유 명시, I8)"]
     end
@@ -187,7 +187,7 @@ flowchart TD
 | 9.1 | `relaxed_loadcell_only` | 냉장 & 후보 있음 & **모든 후보가 allowlist 불일치** | 전 재고 nearest-single, 5g 내만, count=1 PARTIAL | 5g 초과 → 9.2 |
 | 9.2 | `vision_first_identity_partial` | 냉동 & 후보 있음 & delta<0 | 무게 검증 통과 시 COMPLETE(`vision_identity_weight_validated`), 실패 시 정체성만 count=1 PARTIAL | 청구 conf < 하한이면 **폴스루 없이 None** |
 | 9.3 | `detected_single_item_fallback` | 후보 있음 & delta<0 (프로파일 무관) | vision 최상위 후보 1종만 확인, tolerance×3 내면 구제. conf 상한 0.65 | → 9.4 |
-| 9.4 | `relaxed_partial` | 냉장 & 후보 있음 | 최다 득표 count=1 PARTIAL, conf×0.5 | 청구 conf < 하한이면 **폴스루 없이 None** |
+| 9.4 | `relaxed_partial` | 냉장 & 후보 있음 | **무게 반증 거부권**(단위무게 > 최대 removal 관측량 + tolerance×3인 후보 배제 — 이슈 #22) 후 최다 득표 count=1 PARTIAL, conf×0.5 | 생존 후보 없음 또는 청구 conf < 하한이면 **폴스루 없이 None** |
 | 10 | `forced_final` | 항상 True | `forced_final_no_match` NO_DETECTION | — |
 
 두 가지 설계 판단을 명시해 둡니다.
@@ -199,6 +199,9 @@ flowchart TD
   `crk_model/judgment/router.py` docstring에 기록돼 있습니다.
 - **conf 하한 미달 시 하위 후보로 폴스루하지 않습니다.** 폴스루하면 "청구되는
   후보"를 증거 순위가 아니라 하한 통과 여부가 고르게 되는 **후보 쇼핑**이 됩니다.
+  유일한 예외는 9.4의 무게 반증 거부권(이슈 #22) — 증거 강도가 아니라 물리적
+  배제(단위무게상 1개 취출조차 불가능)라 배제 후 남은 서열대로 고르는 것이 맞고,
+  conf 하한은 생존 후보에 다시 폴스루 없이 적용됩니다.
 
 ## 4. 판정 노브
 
@@ -216,9 +219,12 @@ flowchart TD
 | `CONF_OVERRIDE` | 0.9 | ① share 미달이어도 이 conf 이상(+`REFIT_SHARE` 득표)이면 적합 시도 자격. ④ 중재 포화 해제 문턱도 겸함 | 진열 오염이 득표 순위를 왜곡한 경우 — conf 1.0의 진짜 상품 19표 vs 오염 63표 | 2.0 |
 | `CONF_MARGIN` | 0.15 | ①·④ 복수 적합 중재에서 conf가 득표 서열을 뒤집는 최소 격차 | 최다 득표 적합이 오염이고 최고 conf 적합이 정답인 경우 | 2.0 |
 | `PARTIAL_MIN_CONFIDENCE` | 0.18 | 무게 미검증 count=1 partial 청구의 conf 하한 (9.2·9.4) | 5표/청구 conf 0.157짜리 identity partial이 잔차 65g 오상품을 과금 (ses-3-1784788285) | 0 |
+| `PARTIAL_IMPOSSIBLE_FACTOR` | 3.0 | 9.4 무게 반증 거부권 — 단위무게가 최대 removal 관측량 + tolerance×이 계수를 넘는 후보는 청구 부적격(냉장 전용) | 다종 동시 취출의 교차존 오염 표로 득표 1위가 된 이웃 존 상품(525g)이 Δ-80g 이벤트에 count=1 청구 — 1개 취출조차 물리적으로 불가능 (이슈 #22 ses-4 z3) | 0 |
 | `REFIT_ARB_CONF_FLOOR` | 0.8 | ④ 복수 적합 중재 승자의 **절대** conf 하한 | margin 우세만으로는 "덜 흐린 유령"이 이긴다 — 13(conf 0.69)이 24(0.35)를 꺾고 오과금(ses-1-1784791905 ch1). 정당 케이스(ses-3-1784790444 ch0)는 0.82 | 2.0 |
+| `COUNT_OCCAM` | 1 | ① 개수 오컴 — n=1 적합이 있으면 그보다 잘 맞지 않는 n≥2 적합을 실격 | 저중량 상품이 n을 키워 아무 중량대나 덮는 "만능 filler" — 잭슨빌 155×1(잔차 0)이 라라스윗 70×2(잔차 15)에 득표로 패배 (0730 시나리오 실패 6/7건) | 0 |
+| `SEGMENT_COMBO` / `SEGMENT_COMBO_MIN_SEGMENTS` | 0 / 2 | ①⁺ 세그먼트 근거 조합 도전 — removal 세그먼트가 분리 취출을 증언할 때만 ③ 조합이 ①의 ×N 확정을 뒤집음 | 단위무게가 비슷한 2종을 1개씩 꺼낸 delta가 항상 ×N 단일로 확정 — 메로나 80+월드콘 70 = −150 → 월드콘×2 (0730 2-4). 실측 1건이라 **기본 off** | 0 |
 
-출처: 위 실측 수치는 `docs/devdoc/fix_logs.md`의 이슈 #10·#15·#16 항목과
+출처: 위 실측 수치는 `docs/devdoc/fix_logs.md`의 이슈 #10·#15·#16·#22 및 0731 항목과
 `crk_model/judgment/strategies.py`의 각 노브 주석에 근거가 남아 있습니다.
 
 ### conf 중재의 상한 포화
@@ -452,7 +458,7 @@ replay 4.0 / trigger 4.0 / ε 1.0으로 카메라 계약과 단일 소스입니�
 | 장치 | 내용 | 기본값 |
 |---|---|---|
 | 소스 신뢰도 게이트 (θ) | 무판정이거나 `confidence < θ`인 소스는 페널티 소스로 인정하지 않음 — 오판 전파 차단. 창은 겹쳤는데 θ에서 탈락하면 `cross_zone_source_low_conf` note로 침묵 진단 | `SOURCE_CONF_MIN=0.35` |
-| 무게 모호성 게이트 | `abs(delta)`를 게이트 내로 설명하는 (상품, 개수) 해가 **2종 이상**일 때만 페널티 발동. 무게가 유일 해를 지지하면 개입하지 않음 (무게 단서 > 비전 페널티) | — |
+| 무게 모호성 게이트 | `abs(delta)`를 게이트 내로 설명하는 (상품, 개수) 해가 **2종 이상**일 때만 페널티 발동. 무게가 유일 해를 지지하면 개입하지 않음 (무게 단서 > 비전 페널티). 이 KEEP은 **원 판정이 COMPLETE일 때만** — "무게 매칭이 이미 방어했다"는 전제가 무게 무검증 PARTIAL에는 거짓이므로(이슈 #22 ses-4 z3: relaxed_partial의 오염 청구가 침묵 KEEP됨) PARTIAL 원 판정은 게이트를 건너뛰고 재판정으로 갑니다 | — |
 | soft 페널티 (α) | 오염 후보의 `confidence` · `vote_count` · `vote_ratio`를 α배로 강등. **하드 제외 금지** — 인접 존이 실제로 같은 상품을 팔 수 있으므로, 페널티 후에도 오염 후보가 이기면 그대로 인정 | `ALPHA=0.5` |
 
 후속 보강 2종:
@@ -484,14 +490,18 @@ c23 5표). **트리거 안에서는 진짜 취출과 구분이 불가능**하고
 **정의** (배치 사전정보가 아니라 이 세션에서 관측된 증거만):
 
 > `ghost(c)` ⇔ c가 서로 다른 존 ≥ `min_zones`의 removal 이벤트에서 자격 표
-> (`vote_count ≥ vote_floor`)를 얻고, **서로 다른 에피소드(`video_paths`) ≥ 2**에서
+> (`vote_count ≥ vote_floor`)를 얻고, **서로 다른 에피소드 ≥ 2**에서
 > 등장했으며, 세션 내 어떤 **무게 뒷받침 판정**에도 c가 없다.
 >
 > 무게 뒷받침 = `COMPLETE`이고 reason에 `refit`/`near_gate`가 없는 판정의 과금.
 
 에피소드 중복 제거는 11차 실측 정정입니다 — 동시·연쇄 취출의 존 트리거들은 연장
 병합된 **같은 영상**을 공유해 후보 집합이 동일하므로, 모든 클래스가 공짜로 "2존
-등장"이 되어 정답까지 오플래그됐습니다. PARTIAL·`near_gate`·`refit`을 뒷받침으로
+등장"이 되어 정답까지 오플래그됐습니다. 에피소드 판별은 2기준입니다: ①
+`video_paths` 동일(11차), ② **오염 창 양방향 겹침**(이슈 #22 ses-6 — 동시 다존
+취출의 존별 트리거는 각자 다른 녹화 파일을 가져 파일 동일성만으로는 못 걸렀고,
+GT class35가 득표 1위인데 유령 오플래그됐습니다. 같은 순간의 장면은 파일명과
+무관하게 breadth 증거가 아닙니다). PARTIAL·`near_gate`·`refit`을 뒷받침으로
 치지 않는 이유도 실측입니다(ses-4-1784807732: 유령 c24가 identity partial로 과금됐지만
 무게 잔차 93g).
 
