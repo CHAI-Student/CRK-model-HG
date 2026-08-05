@@ -220,16 +220,31 @@ top(프리롤에 이미 손)에서는 무력하고 side(hand 미추론)에서는
 
 ### `early_termination.py`
 
-무게가 이미 전량 설명됐으면 남은 프레임을 추론하지 않는다(D7).
+무게가 이미 전량 설명됐으면 남은 프레임을 추론하지 않는다(D7). **기본 off**
+(이슈 #22 0805 냉장 20종 실기 강등 — env `MODEL__VISION__EARLY_TERMINATION=1`로
+opt-in).
 
+- **강등 근거 (이슈 #22 0805)**: "현재 후보 창 안의 설명"은 "남은 프레임이
+  판정을 못 바꾼다"의 근거가 되지 못한다 — 정답이 아직 화면에 등장하지 않았을
+  수 있고(2-9: zone3이 top 9컷 처리 후 종료 → 정답 표 0, 프리롤 진열 5표가
+  86×3=258로 Δ-260을 설명해 오과금), 리드 표가 진열·반사광 오검출일 수
+  있다(3-3). 무게 겹침이 흔한 20종 구성에서 이 전제 붕괴가 오판정의 지배
+  원인이었다. 프레임 처리량은 T2 배치 경로(`BATCH_SIZE`/`TENSOR_INPUT`)가
+  대체한다.
+- **전 재고 유일해 게이트** (재활성화 시에도 강제): |delta|를 단일 종 n개로
+  설명하는 (상품, n) 해가 판매중 전 재고에서 정확히 하나이고 그 상품이 현재
+  득표 리드일 때만 종료 — 후보 창 안 유일성은 정보가 아니고, 다품종 조합
+  설명은 종료 근거 자격이 없다(ses-46: 3종 조합 738이 Δ-735를 설명해 종료 →
+  정답 10×2 표 0).
 - **적용 한정 (I15)**: 취출(`delta < 0`) & 비freezer(`profile.early_termination_allowed`)
   에서만. 반품과 냉동은 후반 프레임 증거가 중요하다.
 - **추론만 중단**한다. 디코드·손 경로·트레이스는 완주해야 하며 그것은 호출측
   (`service/pipeline.py`) 책임이다 — 이 판정기는 "추론 중단 가능" 불리언만 준다.
   트레이스 의미가 게이트 조합에 따라 흔들리지 않게 하기 위한 경계다.
-- **이중 기준 금지**: 전량 설명 판정은 `judge()`와 동일한 `StrictWeightMatcher` +
-  `SensorProfile.tolerance_grams` **단일 소스**를 공유한다. 이 한 줄 때문에
-  perception이 judgment를 import하는 유일한 지점이 된다.
+- **이중 기준 금지**: delta 설명 판정은 `judge()`와 동일한
+  `SensorProfile.tolerance_grams` **단일 소스**를 공유하고, 탐색 상한은
+  `StrictWeightMatcher.max_items`를 공유한다. 이 한 줄 때문에 perception이
+  judgment를 import하는 유일한 지점이 된다.
 - 수렴 조건: 1위 득표 ≥ `min_lead_votes`(5), 2위와의 격차 ≥ `lead_margin`(3),
   손 퇴장 후 `hand_exit_frames`(5)프레임 경과, 그리고 무게 전량 설명.
 - **T1 최적화**: `candidates`를 시퀀스 대신 **지연 콜러블**(`voting.combine`)로
@@ -276,7 +291,7 @@ top(프리롤에 이미 손)에서는 무력하고 side(hand 미추론)에서는
 | `MOTION_EVIDENCE_FLOOR_PX` | 미설정 = 프로파일(냉장 10 / 냉동 12) | 변위 임계 하한 |
 | `MOTION_UNMEASURABLE` / `MOTION_MEASURABLE_MIN_OBS` | `forfeit` / 3 | 측정 불가 클래스 면제 정책 |
 | `HELD_TRACK_DEMOTION` / `HELD_TRACK_MIN_HEAD` | `shadow` / 5 | carried-in 트랙 강등 모드 |
-| `EARLY_TERMINATION` | true | 조기 종료 on/off |
+| `EARLY_TERMINATION` | **false** (이슈 #22 0805 강등) | 조기 종료 opt-in — 켜도 전 재고 유일해 게이트 강제 |
 
 `EarlyTerminationConfig`(5/3/5)와 `MotionEvidence`의 트랙 파라미터(`size_scale`,
 `max_jump_px`, `reassoc_*`, `held_min_stream`, `tube_minority_ratio`)는 **env로

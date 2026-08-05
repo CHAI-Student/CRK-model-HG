@@ -10,13 +10,13 @@
 
 기능 구현과 자동 검증은 완료 상태입니다. 냉동 실기에서는 문 열림부터 결제
 페이로드 전달까지 E2E가 통과했고, 냉장 실기는 지각 계층 fitting이 진행 중입니다.
-자동 검증은 **432건 전부 통과**(2026-08-05)이며 불변식 I1~I17을 전건 커버합니다.
+자동 검증은 **436건 전부 통과**(2026-08-05)이며 불변식 I1~I17을 전건 커버합니다.
 남은 위험은 기능 결함이 아니라 **기기 실측이 필요한 항목**에 몰려 있습니다 —
 냉동 지연(13.7s) > CLOSE 상한 타임아웃(10s) 충돌, T2 레버 실측 미확인, 24h+ soak 미수행.
 
 | 영역 | 상태 | 근거 |
 |---|---|---|
-| 도메인 코어 (판정·정산·배리어) | ✅ 구현 완료 | `crk_model/` 9패키지 약 10,700행, 테스트 432건 통과 |
+| 도메인 코어 (판정·정산·배리어) | ✅ 구현 완료 | `crk_model/` 9패키지 약 10,700행, 테스트 436건 통과 |
 | 외부 계약 (HTTP 3종) | ✅ 확정 | 레거시 wire 형식과 동형, `tests/test_wire_contract.py`·`test_adapters.py` |
 | 불변식 I1~I17 | ✅ 전건 커버 (I9 제외) | 본 문서 §4 — I9는 G1 인수 항목 |
 | 냉동 실기 E2E | ✅ 통과 (2026-07-09 개통) | 이슈 #5·#6·#7·#8 전 과정, `devdoc/fix_logs.md` |
@@ -42,13 +42,13 @@
 | [`core/`](../crk_model/core/) | 타입 분리(I10), SensorProfile(D3), 에러 정책(D9), env 설정 카탈로그 | 733행 | (전역) |
 | [`ingest/`](../crk_model/ingest/) | 트리거 멱등성(I7), 로드셀 구간화, BOCPD 분석기(primary) + plateau(롤백) | 523행 | `test_ingest` 18 |
 | [`frames/`](../crk_model/frames/) | 프레임 번들, 모션 게이트(L1) + 손 래치(D6/I16), 디코드 프리페치 | 240행 | `test_frames` 7 |
-| [`perception/`](../crk_model/perception/) | Detector 프로토콜, 필터 체인 4단, 모션 변위 증거(트랙 단위), 투표 앙상블, 조기 종료(L2) | 1,156행 | `test_perception` 57 |
+| [`perception/`](../crk_model/perception/) | Detector 프로토콜, 필터 체인 4단, 모션 변위 증거(트랙 단위), 투표 앙상블, 조기 종료(L2 — 기본 off, 이슈 #22) | 1,199행 | `test_perception` 60 |
 | [`judgment/`](../crk_model/judgment/) | Stage/Strategy 분리, 선언적 우선순위 라우터(L5) 17단, 냉동 vision-first 전략, strict 매처 | 1,531행 | `test_judgment` 75 |
 | [`ledger/`](../crk_model/ledger/) | 이벤트 소싱, close-time 단일 정산기(L6) 4층, CLOSE 2차 패스 2종, 인과 배리어(I17), 저널, 세션 아카이브 | 2,136행 | `test_ledger` 28 외 |
 | [`gateway/`](../crk_model/gateway/) | OPEN/CLOSE 상태기계, 결제 페이로드 빌더(I10 타입 강제) | 391행 | `test_gateway` 15 |
-| [`service/`](../crk_model/service/) | 파이프라인 7단계 오케스트레이션, 단일 소비자 워커, 재고 스냅샷(I2), 파사드 | 1,480행 | `test_service` 43 |
+| [`service/`](../crk_model/service/) | 파이프라인 7단계 오케스트레이션, 단일 소비자 워커, 재고 스냅샷(I2), 파사드 | 1,481행 | `test_service` 44 |
 | [`adapters/`](../crk_model/adapters/) | FastAPI 바인딩, TensorRT Detector, AVI 스트리밍 디코드, 진단 CLI 3종, 진입점 | 2,472행 | `test_adapters` 4 외 |
-| 합계 | — | **약 10,700행** | 테스트 약 7,700행 |
+| 합계 | — | **약 10,700행** | 테스트 약 7,800행 |
 
 코어는 런타임 의존성이 0입니다 — YOLO/TensorRT/cv2/FastAPI는 전부 `adapters/`에서
 lazy import되며, 테스트는 Detector를 주입해 장치 없이 돕니다.
@@ -182,13 +182,13 @@ flowchart TD
 
 ### 3.1 실행 결과
 
-`.venv/bin/python -m pytest tests -q` → **432 passed** (2026-08-05, 실패·에러 0건).
+`.venv/bin/python -m pytest tests -q` → **436 passed** (2026-08-05, 실패·에러 0건).
 
 | 테스트 파일 | 건수 | 주 검증 대상 |
 |---|---|---|
 | `test_judgment.py` | 75 | 라우터 순위 보존, I6 전건 적용, 냉동 vision-first 단계별 중재, strict 탐색 공간(I5·I12), 개수 오컴·세그먼트 조합 도전(0731), relaxed_partial 무게 반증 거부권(이슈 #22) |
-| `test_perception.py` | 57 | 투표 결합 산식, 진입 컷, 필터 체인 4단, 모션 변위 몰수, 조기 종료 한정(I15) |
-| `test_service.py` | 43 | 파이프라인 7단계, 멀티트레이 2-pass 재판정, 스냅샷 fail-closed(I2), 래치(I16) 배선 |
+| `test_perception.py` | 60 | 투표 결합 산식, 진입 컷, 필터 체인 4단, 모션 변위 몰수, 조기 종료 한정(I15)·전 재고 유일해 게이트(이슈 #22) |
+| `test_service.py` | 44 | 파이프라인 7단계, 멀티트레이 2-pass 재판정, 스냅샷 fail-closed(I2), 래치(I16) 배선, 조기 종료 기본 off |
 | `test_lifecycle.py` | 33 | OPEN→trigger→CLOSE→결제 페이로드 E2E, cabinet_type 프로파일 E2E, 무한 성장 방지 |
 | `test_ledger.py` | 28 | 정산 4층, 냉동 재solve 게이트(I3), 콤보 자격 가드, 멱등(I11), 음수 차단(I14) |
 | `test_analyze_cli.py` | 22 | 리포트 집계 정오, `--since` 프리필터, 단건 조회, 구 스키마 호환 |
@@ -205,7 +205,7 @@ flowchart TD
 | `test_wire_contract.py` | 6 | HTTP 요청·응답 필드 계약 |
 | `test_adapters.py` | 4 | FastAPI 바인딩, 워커 스레드 배선(I7·I17) |
 | `test_ops_logging.py` | 4 | `[OPS][CLOSE]` 구조화 로그, 중복 로그 억제 |
-| **합계** | **432** | |
+| **합계** | **436** | |
 
 ### 3.2 무엇을 커버하는가
 
@@ -447,7 +447,7 @@ C(`_batch4` + `BATCH_SIZE=4`) → D(+`PREFETCH=4`). 각 단계에서 재야 하�
 
 | 게이트 | 상태 | 내용 | 남은 조건 |
 |---|---|---|---|
-| **G0** 정적/단위 | ✅ **432 passed** (2026-08-05) | 불변식 I1~I17 + E2E + 필터·게이트·정산 + CI(ruff + pytest) | 없음 — 유지 관리 대상 |
+| **G0** 정적/단위 | ✅ **436 passed** (2026-08-05) | 불변식 I1~I17 + E2E + 필터·게이트·정산 + CI(ruff + pytest) | 없음 — 유지 관리 대상 |
 | **G1** 판정 등가성 | ❌ 미인수 | 원본 924 시나리오 계약 인수 (I9) | 현장 AVI 코퍼스(P1) + 세션 아카이브 replay(P2) |
 | **G2** 게이팅 검증 | ⏳ 인프라 준비 완료 | 현장 AVI 코퍼스 전체 파이프라인 재실행 diff | `SAVE_DETECTIONS` + 아카이브 + AVI 보존 + `render-session`으로 실행 가능해짐. 재생 시 `MODEL__VIDEO__DECODER=ffmpeg` 고정 필수(opencv 경로는 게이트 결정이 조용히 달라짐) |
 | **G2.5** 정산 등가성 | ⏳ 훅 완성 | `EventJournal.replay`로 저널 재구성 → 동일 정산 | 실기 아카이브 replay 실행(P2) |
@@ -457,7 +457,7 @@ C(`_batch4` + `BATCH_SIZE=4`) → D(+`PREFETCH=4`). 각 단계에서 재야 하�
 G0 대비 갱신 사항: 2026-07-30에 미채택 shadow 기제 5종을 코드째 삭제하면서
 406건이 되었고(삭제 내역은 [07번 문서](07-rejected-and-retired.md)), 이후
 0731 판정 배치(개수 오컴·세그먼트 조합 도전)와 이슈 #22 수정이 더해져 현재
-**432건**입니다.
+**436건**입니다.
 
 ---
 
@@ -527,7 +527,7 @@ G0 대비 갱신 사항: 2026-07-30에 미채택 shadow 기제 5종을 코드째
 |---|---|
 | side ROI 400의 재측정 | 입력 기하가 left-crop → center-crop으로 전환되어 가로축 크롭 원점이 이동했는데, `SIDE_ROI_MAX_CENTER_X` 값은 재계산하지 않았습니다. 실물 카메라에서 존 경계가 새 좌표계 어디에 오는지 실측이 필요합니다 |
 | 냉동 수직 ROI 분할선 300 | 240 → 300 상향의 효과(정답 과잉 제거 / 진열 오투표 잔존)는 미실측입니다 |
-| 냉장 조기 종료 | removal & 비냉동 한정 코드 경로라 냉동 실기에서는 한 번도 실동작하지 않았습니다. 냉장에서 A/B가 필요합니다 |
+| 냉장 조기 종료 | 0805 냉장 20종 실기에서 오과금 주도 원인으로 실측되어 **기본 off로 강등**했습니다(이슈 #22 — 정답 등장 전에 프리롤 진열·반사광 표가 delta를 설명해 종료). 재활성화하려면 T2 배치 실측과 별개로, 전 재고 유일해 게이트 하에서의 A/B 재검이 필요합니다 |
 | 상품 DB `unit_weight` | 공칭 무게와 실측 총중량이 13~27g 차이 나 정답이 구조적으로 매칭 불가였던 실사고가 있습니다(이슈 #6 ③). 냉장은 ±5g라 냉동(±15g)보다 훨씬 민감합니다 — DB 재등록은 운영 이관 항목입니다 |
 | 카메라 내부 AE | v4l2 컨트롤에 노출되지 않는 ISP 내부 AE 작동 여부가 미확정입니다(issue #19). `camera_luma_probe.py`로 판별 대기 |
 

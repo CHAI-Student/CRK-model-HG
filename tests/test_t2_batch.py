@@ -79,11 +79,15 @@ class TestBatchJudgmentParity:
     def test_fridge_early_termination_mid_batch_parity(self, cola):
         """조기 종료(냉장)가 배치 중간에 발동해도 판정·투표가 비배치와 같다
         — 잔여 배치 결과 폐기 규칙의 회귀 고정."""
+        # ET는 기본 off (이슈 #22 0805) — 배치 중간 발동 규칙 자체를 고정하는
+        # 테스트라 명시적으로 켠다 (단일 재고라 유일해 게이트 통과).
         base = _pipe(
-            cola, FakeBatchDetector(), profile=REFRIGERATOR, zone=1
+            cola, FakeBatchDetector(), profile=REFRIGERATOR, zone=1,
+            early_termination_enabled=True,
         ).process("s1", _request(zone=1))
         batched = _pipe(
-            cola, FakeBatchDetector(), profile=REFRIGERATOR, zone=1, batch_size=4
+            cola, FakeBatchDetector(), profile=REFRIGERATOR, zone=1, batch_size=4,
+            early_termination_enabled=True,
         ).process("s1", _request(zone=1))
 
         assert base.trace.early_terminated  # 전제: ET가 실제로 발동하는 시나리오
@@ -155,7 +159,8 @@ class TestPrefetchFrames:
             1.0,
         )
         outcome = _pipe(
-            cola, FakeDetector(), profile=REFRIGERATOR, zone=1, prefetch_depth=2
+            cola, FakeDetector(), profile=REFRIGERATOR, zone=1, prefetch_depth=2,
+            early_termination_enabled=True,  # 기본 off (이슈 #22) — finally 계약 검증용 opt-in
         ).process("s1", req)
         assert outcome.trace.early_terminated
         assert closed["side"] is True

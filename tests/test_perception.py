@@ -3,6 +3,7 @@ import pytest
 from conftest import cand
 
 from crk_model.core.profiles import FREEZER, REFRIGERATOR
+from crk_model.core.types import ActiveProduct
 from crk_model.perception import (
     Detection,
     DetectionFilterChain,
@@ -247,6 +248,59 @@ class TestEarlyTermination:
             delta_weight=-100.0,
             candidates=[cand(1, votes=6), cand(2, votes=5)],  # 마진 1 < 3
             active_products=[cola, water],
+            frames_since_hand_exit=6,
+        )
+
+    def test_ambiguous_weight_blocks(self, cola):
+        # 이슈 #22 0805 ses-38 z3 재구성: Δ-260을 진열 맛밤(86×3=258)과
+        # 정답 박카스(261×1)가 모두 설명 — 전 재고에 해가 2개면 아직 안
+        # 보인 정답이 있을 수 있으므로 완주한다 (구 동작: 후보 창 안의
+        # 86×3 설명만 보고 종료 → 정답 표 0).
+        chestnut = ActiveProduct(
+            "P58", "단밤", class_id=58, unit_weight=86.0, unit_price=3500, stock_qty=5
+        )
+        bacchus = ActiveProduct(
+            "P13", "박카스", class_id=13, unit_weight=261.0, unit_price=500, stock_qty=5
+        )
+        assert not self._terminator().should_stop(
+            delta_weight=-260.0,
+            candidates=[cand(58, votes=10)],
+            active_products=[chestnut, bacchus],
+            frames_since_hand_exit=6,
+        )
+
+    def test_combo_explanation_no_longer_stops(self):
+        # 이슈 #22 0805 ses-46 재구성: 60×1+54×3+32×2=738이 Δ-735를 조합
+        # 설명해도 종료 금지 — 단일 종 해가 없으면(정답 10×2는 아직 무투표)
+        # 완주한다 (구 동작: 매처 조합 성립만으로 종료 → 정답 표 0).
+        pool = [
+            ActiveProduct("P60", "콜라", class_id=60, unit_weight=535.0,
+                          unit_price=2300, stock_qty=5),
+            ActiveProduct("P54", "단백질바", class_id=54, unit_weight=55.0,
+                          unit_price=2500, stock_qty=5),
+            ActiveProduct("P32", "컨디션스틱", class_id=32, unit_weight=19.0,
+                          unit_price=3000, stock_qty=5),
+        ]
+        assert not self._terminator().should_stop(
+            delta_weight=-735.0,
+            candidates=[cand(54, votes=10), cand(32, votes=5)],
+            active_products=pool,
+            frames_since_hand_exit=6,
+        )
+
+    def test_lead_mismatch_blocks(self):
+        # 유일해 상품(트레비 523g)이 득표 리드(빼빼로)가 아니면 종료 금지 —
+        # 지금 보이는 증거와 무게 해가 어긋난다 (진열·오염 리드 신호)
+        pepero = ActiveProduct(
+            "P18", "빼빼로", class_id=18, unit_weight=66.0, unit_price=2500, stock_qty=5
+        )
+        trevi = ActiveProduct(
+            "P11", "트레비", class_id=11, unit_weight=523.0, unit_price=1600, stock_qty=5
+        )
+        assert not self._terminator().should_stop(
+            delta_weight=-523.0,
+            candidates=[cand(18, votes=10), cand(11, votes=5)],
+            active_products=[pepero, trevi],
             frames_since_hand_exit=6,
         )
 

@@ -37,11 +37,11 @@ python -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
 
-python -m pytest tests -q          # 기대: 432 passed
+python -m pytest tests -q          # 기대: 436 passed
 ruff check .                       # CI와 같은 검사
 ```
 
-- **432 passed**가 기준선입니다. 건수가 적으면 선택 의존성(`numpy` / `ffmpeg`
+- **436 passed**가 기준선입니다. 건수가 적으면 선택 의존성(`numpy` / `ffmpeg`
   바이너리 / `fastapi`) 미설치로 skip된 것입니다 — CI는 셋을 모두 설치합니다.
 - lint의 정본은 CI(`.github/workflows/ci.yml`)입니다. 로컬 실행은 위처럼
   개발 의존성을 설치한 뒤에만 가능합니다.

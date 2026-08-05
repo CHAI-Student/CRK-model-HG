@@ -74,7 +74,7 @@ def samples(start, end, n=10, dt=0.1):
     return out
 
 
-def make_service(detector=None, clock=None, journal=None):
+def make_service(detector=None, clock=None, journal=None, settings=None):
     # close_grace_s=0: 유예 창은 test_gateway의 전용 테스트에서 검증 —
     # 여기서는 FakeClock(t=0) 기반 E2E 흐름을 즉시 확정으로 단순화한다.
     return ModelService(
@@ -82,7 +82,7 @@ def make_service(detector=None, clock=None, journal=None):
         profiles={1: REFRIGERATOR},
         clock=clock or FakeClock(),
         journal=journal,
-        settings=Settings(close_grace_s=0.0),
+        settings=settings or Settings(close_grace_s=0.0),
     )
 
 
@@ -344,14 +344,28 @@ class TestEndToEnd:
         assert close2["productCount"] == 1
 
     def test_early_termination_saves_yolo_calls(self, cola):
+        # 기본 off (이슈 #22 0805) — 기제 자체는 env opt-in으로 유지되므로
+        # 명시적으로 켜서 검증한다. 단일 재고(cola)라 유일해 게이트 통과.
         detector = FakeDetector()
-        svc = make_service(detector)
+        svc = make_service(
+            detector,
+            settings=Settings(close_grace_s=0.0, early_termination_enabled=True),
+        )
         svc.handle_multi_zone(open_payload(cola))
         svc.handle_trigger(trigger_payload(n_frames=10))
         svc.process_pending()
         trace = svc.worker.outcomes[0].trace
         assert trace.early_terminated  # L2: 증거 수렴 후 추론 중단
         assert detector.calls < 20  # 전 프레임(10×2) 미만
+
+    def test_early_termination_default_off(self, cola):
+        # 이슈 #22 0805 강등: 기본 Settings에서는 전 프레임 완주
+        detector = FakeDetector()
+        svc = make_service(detector)
+        svc.handle_multi_zone(open_payload(cola))
+        svc.handle_trigger(trigger_payload(n_frames=10))
+        svc.process_pending()
+        assert not svc.worker.outcomes[0].trace.early_terminated
 
     def test_close_after_delivery_reports_no_active_session(self, cola):
         # 확정 결과는 1회 전달, 이후 CLOSE 재폴링은 원본 wire 계약

@@ -114,7 +114,7 @@ flowchart TD
 | `MIN_VOTE_RATIO` / `COUNT` | `0.02` / `2` | `0.02` / `2` |
 | conf 결합 가중 (top/side/top_only/side_only) | `0.60/0.40/0.60/0.40` | `0.70/0.30/0.80/0.40` |
 | `FREEZER_ROI_*` | 미사용 (dual 레이아웃) | `upper` / `350.0` |
-| `EARLY_TERMINATION` | `1` — 냉장에서 실제로 동작 | `1` — freezer 프로파일에서는 I15로 항상 비활성 |
+| `EARLY_TERMINATION` | `0` — 이슈 #22 0805 강등 (켜면 냉장에서 동작) | `0` — freezer 프로파일에서는 켜도 I15로 항상 비활성 |
 
 ---
 
@@ -233,7 +233,7 @@ dataclass 기본값과 `from_env()` 기본값이 일치함을 확인한 값입�
 
 | 환경변수 | 기본값 | 의미 / 언제 만지나 |
 | --- | --- | --- |
-| `MODEL__VISION__EARLY_TERMINATION` | `1` | 조기 종료 (D7). **removal & 비freezer에서만 유효** — freezer 프로파일은 I15로 항상 비활성. 다품목 동시 취출에서 2번째 상품 증거 수집 전 중단 위험이 있어 냉장 초기 배치는 0/1 A/B 비교 권장 |
+| `MODEL__VISION__EARLY_TERMINATION` | `0` | 조기 종료 (D7) — **기본 off** (이슈 #22 0805 냉장 20종 실기: 정답 등장 전에 프리롤 진열·반사광 표가 delta를 설명해 종료되는 오과금이 지배적 — 2-9는 top 9컷 처리 후 종료로 정답 표 0). 처리량은 T2 배치(`BATCH_SIZE`/`TENSOR_INPUT`)로 확보. 켜면 **전 재고 유일해 게이트**(단일 종 (상품,n) 해 유일 + 득표 리드 일치)가 강제되고, removal & 비freezer에서만 유효(freezer는 I15로 항상 비활성) |
 | `MODEL__VISION__MOTION_GATE_THRESHOLD` | (프로파일) | 모션 게이트 변화 픽셀 비율 임계 **오버라이드**. 비우면 프로파일 기본(냉장 0.02 / 냉동 0.005). 올리면 스킵 증가(처리 절약), 내리면 거의 전 프레임 추론 |
 | `MODEL__VISION__MOTION_GATE_KEEPALIVE` | (프로파일) | 연속 스킵 상한 **오버라이드**. 비우면 냉장 8 / 냉동 4. 스킵이 길어져도 이 간격마다 강제 추론합니다 |
 | `MODEL__VISION__MOTION_EVIDENCE` | `1` | 모션 변위 증거 몰수. 클래스 트랙의 누적 변위가 `max(floor, bbox×0.10)`을 못 넘으면 그 카메라의 표를 결합에서 몰수 — "집어간 상품은 움직이고 진열 상품은 안 움직인다"의 직접 검사. `0`=롤백 |

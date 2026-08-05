@@ -124,7 +124,8 @@ class TriggerPipeline:
         *,
         router: JudgmentRouter | None = None,
         filters: DetectionFilterChain | None = None,
-        early_termination_enabled: bool = True,
+        early_termination_enabled: bool = False,
+        # 기본 off (이슈 #22 0805) — Settings 기본값과 단일 방향 유지.
         analyzer_factory=None,  # SensorProfile -> LoadcellAnalyzer (테스트/튜닝 주입점)
         default_profile: SensorProfile = REFRIGERATOR,
         # zone이 profiles dict에 없을 때 쓰는 폴백 프로파일. 기본은 기존

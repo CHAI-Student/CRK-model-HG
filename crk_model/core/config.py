@@ -255,7 +255,13 @@ class Settings:
     judgment_segment_combo: bool = False
     judgment_segment_combo_min_segments: int = 2
     # ---- 조기 종료 (D7) — removal & 비freezer에서만 유효 ----
-    early_termination_enabled: bool = True
+    # 기본 off (이슈 #22 0805 냉장 20종 실기): 후보 창 안의 무게 설명은
+    # "남은 프레임이 판정을 못 바꾼다"의 근거가 못 된다 — 정답 등장 전에
+    # 프리롤 진열·반사광 표가 delta를 설명해 종료된 오과금이 지배적
+    # (2-9·3-3, ses-38 z3: 진열 5표 86×3=258이 Δ-260 설명 → 정답 표 0).
+    # 처리량은 T2 배치 경로가 대체. 재활성화 시에도 전 재고 유일해 게이트
+    # (early_termination.py 모듈 docstring)가 강제된다.
+    early_termination_enabled: bool = False
     # ---- 모션 게이트 오버라이드 (None = SensorProfile 기본값 유지) ----
     # 프로파일 상수(냉장 0.02/8, 냉동 0.005/4)를 기기 전 존에 대해 덮어쓴다.
     motion_gate_threshold: float | None = None
@@ -427,7 +433,7 @@ class Settings:
                 "MODEL__JUDGMENT__SEGMENT_COMBO_MIN_SEGMENTS", 2
             ),
             early_termination_enabled=_env_bool(
-                "MODEL__VISION__EARLY_TERMINATION", True
+                "MODEL__VISION__EARLY_TERMINATION", False
             ),
             motion_gate_threshold=_env_opt_float("MODEL__VISION__MOTION_GATE_THRESHOLD"),
             motion_evidence_enabled=_env_bool("MODEL__VISION__MOTION_EVIDENCE", True),
