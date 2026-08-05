@@ -109,10 +109,14 @@ flowchart TD
 | `CABINET_TYPE` | `refrigerated` | `freezer` |
 | `CAMERA_LAYOUT` | (미기재 → 기본 `dual`) | 주석 처리 — `dual_top_proxy`로 켜는 안내 |
 | `VIDEO__SIDE_CROP` | `left` (존이 side 화면 왼쪽) | (미기재 → 기본 `center`) |
-| `SIDE_ROI_MAX_CENTER_X` | `300` (left-crop 좌표계) | `480` (사실상 비활성 — dual-top에서 x-ROI 생략) |
-| `TOP_CONFIDENCE_THRESHOLD` | `0.50` | `0.4` (김서림·성에 보정) |
+| `SIDE_ROI_MAX_CENTER_X` | `240` (left-crop 좌표계, 0805 축소) | `480` (사실상 비활성 — dual-top에서 x-ROI 생략) |
+| `TOP_CONFIDENCE_THRESHOLD` / `SIDE_...` | `0.40` / `0.30` (0805 완화 — 정답 후보 유실 대응) | `0.4` / `0.4` (김서림·성에 보정) |
 | `MIN_VOTE_RATIO` / `COUNT` | `0.02` / `2` | `0.02` / `2` |
-| conf 결합 가중 (top/side/top_only/side_only) | `0.60/0.40/0.60/0.40` | `0.70/0.30/0.80/0.40` |
+| `VOTE_RATIO_DENOMINATOR` | `hand_window` (0805 전환) | (미기재 → 기본 `gate`) |
+| conf 결합 가중 (top/side/top_only/side_only) | `0.70/0.30/0.70/0.40` (0805 top 상향) | `0.70/0.30/0.80/0.40` |
+| `TOP_ROI_ENABLED` / `Y_SPLIT` | `1` / `240.0` (0805 — 진열 오투표 1차 방어선) | `0` (dual-top은 수직 ROI가 별도: `FREEZER_ROI_*`) |
+| `HAND_CONFIDENCE_THRESHOLD` | `0.5` (0805 상향) | `0.30` |
+| `SIDE_HAND_ENABLED` / 전용 conf | `1` / `0.5` (0805 — side 손 근접 게이팅) | (미기재 → 기본 off) |
 | `FREEZER_ROI_*` | 미사용 (dual 레이아웃) | `upper` / `350.0` |
 | `EARLY_TERMINATION` | `0` — 이슈 #22 0805 강등 (켜면 냉장에서 동작) | `0` — freezer 프로파일에서는 켜도 I15로 항상 비활성 |
 
@@ -191,7 +195,7 @@ dataclass 기본값과 `from_env()` 기본값이 일치함을 확인한 값입�
 | 환경변수 | 기본값 | 의미 / 언제 만지나 |
 | --- | --- | --- |
 | `MODEL__VISION__TOP_CONFIDENCE_THRESHOLD` | `0.70` | top 카메라 **투표 진입** conf 컷. 미만 검출은 투표에 들어가지 않아 평균 conf를 희석하지 않습니다. 후보가 안 잡히면 0.50 → 0.35 순으로 낮춤 (냉동 실기 확정값 0.4) |
-| `MODEL__VISION__SIDE_CONFIDENCE_THRESHOLD` | `0.70` | side 카메라 진입 컷. 실기 템플릿은 양쪽 0.50에서 출발 |
+| `MODEL__VISION__SIDE_CONFIDENCE_THRESHOLD` | `0.70` | side 카메라 진입 컷. 냉장 템플릿은 0.50/0.50에서 출발했다가 0805 실기 보정으로 `0.40`(top)/`0.30`(side) — 정답 클래스가 후보에 아예 없던 트리거 9건(이슈 #22 0805) 대응. side가 더 낮은 것은 측면 뷰 conf가 구조적으로 낮아서 |
 | `MODEL__VISION__MIN_VOTE_RATIO` | `0.05` | 후보 채택 최소 투표율. COUNT와 **둘 중 하나만** 넘으면 유지. 실기 템플릿 0.02 |
 | `MODEL__VISION__MIN_VOTE_COUNT` | `3` | 후보 채택 최소 절대 투표 수. 실기 템플릿 1~2. 노이즈 후보가 자주 살아남으면 올림 |
 | `MODEL__VISION__VOTE_RATIO_DENOMINATOR` | `gate` | ratio 분모 정의. `gate`=전 카메라 게이트 통과 프레임 합 \| `hand_window`=손 활성(손 검출 ∨ 래치 열림) 프레임 합. `gate`는 프리롤·포스트롤까지 세어 정답 클래스 ratio가 0.03~0.07로 희석됩니다(실기 ses-6). **`hand_window`로 바꾸면 ratio 절대값이 2~4배 오르므로 `MIN_VOTE_RATIO`를 0.10~0.15로 함께 올려야** 문턱이 유지됩니다 |
@@ -220,13 +224,13 @@ dataclass 기본값과 `from_env()` 기본값이 일치함을 확인한 값입�
 | 환경변수 | 기본값 | 의미 / 언제 만지나 |
 | --- | --- | --- |
 | `MODEL__VIDEO__SIDE_CROP` | `center` | side 카메라 크롭 원점. `center`\|`left`. **냉장 실기는 `left`** (존이 side 화면 왼쪽, 640×480에서 x=0..480). top은 항상 center. **이 값은 판정 좌표계 그 자체이므로 `SIDE_ROI_MAX_CENTER_X`와 반드시 함께 움직입니다** |
-| `MODEL__VISION__SIDE_ROI_MAX_CENTER_X` | `400.0` | side 검출 제거 경계 (center_x ≥ 값이면 존 바깥). 좌표계가 crop 원점에 종속 — 냉장(left-crop) 확정값 `300`, 냉동(dual-top) `480`(사실상 비활성). **크롭을 바꾸면 재측정 필수** |
+| `MODEL__VISION__SIDE_ROI_MAX_CENTER_X` | `400.0` | side 검출 제거 경계 (center_x ≥ 값이면 존 바깥). 좌표계가 crop 원점에 종속 — 냉장(left-crop) `300`(2026-07-28) → `240`(0805 축소: 타 존 진열 오투표 차단), 냉동(dual-top) `480`(사실상 비활성). **크롭을 바꾸면 재측정 필수** |
 | `MODEL__VISION__FREEZER_ROI_VERTICAL_REGION` | `upper` | 냉동 dual-top 수직 ROI가 유지할 절반. `upper`\|`lower`. **`CABINET_TYPE=freezer` ∧ `CAMERA_LAYOUT=dual_top_proxy`일 때만 적용**되고, 그 밖에는 코드가 `off`로 강제합니다 |
 | `MODEL__VISION__FREEZER_ROI_Y_SPLIT` | `300.0` | 위 ROI의 분할선 (center-crop 480×480 세로축 — 크롭 원점 이동 영향 없음). 원본 운영값 240 → 300 상향(2026-07-24), 냉동 템플릿은 `350.0` |
-| `MODEL__VISION__TOP_ROI_ENABLED` | `0` | 냉장(dual) 레이아웃 **top 카메라 전용** 하단 ROI — 트리거 delta ≠ 0일 때 `center_y ≥ Y_SPLIT`만 유지. 냉장에서 top 공용 카메라가 여러 존 진열을 넓게 보므로 진열 오투표의 1차 방어선입니다. 코드 기본은 보수적 off |
+| `MODEL__VISION__TOP_ROI_ENABLED` | `0` | 냉장(dual) 레이아웃 **top 카메라 전용** 하단 ROI — 트리거 delta ≠ 0일 때 `center_y ≥ Y_SPLIT`만 유지. 냉장에서 top 공용 카메라가 여러 존 진열을 넓게 보므로 진열 오투표의 1차 방어선입니다. 코드 기본은 보수적 off — 냉장 템플릿은 0805부터 on(`Y_SPLIT=240`) |
 | `MODEL__VISION__TOP_ROI_Y_SPLIT` | `240.0` | 위 ROI 분할선. 원본 운영값 — 실기 재측정 대상 |
-| `MODEL__VISION__HAND_CONFIDENCE_THRESHOLD` | `0.30` | 손 검출 conf 하한. 미만 hand는 모션 게이트 래치(I16)·hand_path 궤적에 쓰지 않습니다 — 유령 손의 래치·궤적 오염 차단. `0`=비활성 |
-| `MODEL__VISION__SIDE_HAND_ENABLED` | `0` | side 카메라 hand 추론 (이슈 #18). 켜면 side allowlist에 hand(0)이 포함되고 side에서도 래치·hand_path 필터가 작동해 정지 진열 오투표를 거릅니다. **원본에 없는 신설 동작이라 기본 off. `dual_top_proxy`(냉동)에서는 의미가 다르니 냉장 전용으로 켜십시오** |
+| `MODEL__VISION__HAND_CONFIDENCE_THRESHOLD` | `0.30` | 손 검출 conf 하한. 미만 hand는 모션 게이트 래치(I16)·hand_path 궤적에 쓰지 않습니다 — 유령 손의 래치·궤적 오염 차단. `0`=비활성. 냉장 템플릿은 0805부터 `0.5` 상향 |
+| `MODEL__VISION__SIDE_HAND_ENABLED` | `0` | side 카메라 hand 추론 (이슈 #18). 켜면 side allowlist에 hand(0)이 포함되고 side에서도 래치·hand_path 필터가 작동해 정지 진열 오투표를 거릅니다. **원본에 없는 신설 동작이라 코드 기본 off. `dual_top_proxy`(냉동)에서는 의미가 다르니 냉장 전용으로 켜십시오** — 냉장 템플릿은 0805부터 on(전용 conf `0.5`) |
 | `MODEL__VISION__SIDE_HAND_CONFIDENCE_THRESHOLD` | `-1.0` | side 전용 손 conf 하한. side는 손 1건이 hand_path를 무장시키는 방아쇠라 top보다 조일 수 있게 분리. **음수 = `HAND_CONFIDENCE_THRESHOLD` 상속** |
 
 ### 4.6 모션 게이트 · 변위 증거 · 조기 종료
