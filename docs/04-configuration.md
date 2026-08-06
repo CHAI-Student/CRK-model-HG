@@ -107,7 +107,7 @@ flowchart TD
 | 항목 | `refrg.env.example` | `freezer.env.example` |
 | --- | --- | --- |
 | `CABINET_TYPE` | `refrigerated` | `freezer` |
-| `CAMERA_LAYOUT` | (미기재 → 기본 `dual`) | 주석 처리 — `dual_top_proxy`로 켜는 안내 |
+| `CAMERA_LAYOUT` | (미기재 → 기본 `dual`) | `dual_top_proxy` (0806부터 상시 — 냉동 실기는 side 스트림도 top 뷰) |
 | `VIDEO__SIDE_CROP` | `left` (존이 side 화면 왼쪽) | (미기재 → 기본 `center`) |
 | `SIDE_ROI_MAX_CENTER_X` | `240` (left-crop 좌표계, 0805 축소) | `480` (사실상 비활성 — dual-top에서 x-ROI 생략) |
 | `TOP_CONFIDENCE_THRESHOLD` / `SIDE_...` | `0.40` / `0.30` (0805 완화 — 정답 후보 유실 대응) | `0.4` / `0.4` (김서림·성에 보정) |
