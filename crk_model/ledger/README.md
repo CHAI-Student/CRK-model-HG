@@ -206,7 +206,11 @@ note(`freezer_combo_rejected_confident_snap:...:conf=1.00`)를 남기고 억제 
 
 note 코드: `zoneN:cross_zone_vision_penalty:demoted=..:adopted=..:source=zoneM@t` /
 `..._penalty_gate_failed:keep_original` / `..._mutual_exempt:classN` / `..._source_low_conf:zoneM@0.20`
-(침묵 진단 — 창은 겹쳤으나 θ 탈락으로 미발동한 사유를 아카이브에 남긴다).
+(침묵 진단 — 창은 겹쳤으나 θ 탈락으로 미발동한 사유를 아카이브에 남긴다) /
+`..._no_overlap:zoneM@dt=7.2s` (침묵 진단 2종째, 이슈 #23 0806 ses-28 — 소스
+자격 이벤트가 있는데 오염 창(앵커 ±5s)이 안 겹쳐 페널티가 검토조차 안 된 경우.
+순차 취출 간격이 창보다 크면 상호 강등·소스가 전부 불성립하는데 흔적이 없어
+"켜져 있는데 안 돈다"로 보였다. 근접 30s 이내만 보고, 동작 무변경).
 
 ### `ghost_ledger.py`
 
@@ -372,7 +376,7 @@ barrier_timeout)도 트리거 이벤트만으로 존별 근사 요약을 재구�
 | 테스트 파일 | 무엇을 고정하는가 |
 |---|---|
 | `tests/test_ledger.py` (28건) | 배리어 3조건(큐 정합·로드셀·seq 워터마크)의 차단/해제. 정산기 불변식 — I11 동일 객체·확정 후 거부, 동존/교차존 반품, net-delta 교정, I14 음수 금지, I13 blocked + 결제 빌더 `ValueError`, 에러 존 제외 정책. freezer close — net~0 clear, 게이트 실패 시 증분 유지, `gate_n` 개수 비례. 콤보 중재 12건 — 스냅 뒤집기 성공/자격 표 하한/게이트 실패 구제/N=1 미탐색/가드 ①②③④⑤ 각각의 억제 note와 과금 결과/kill switch. I10 잠정 타입 `TypeError` |
-| `tests/test_cross_zone.py` (21건) | 앵커 폴백 3단, 오염 창 산식, 문서 시나리오 재판정 + 정산기 통합, 상호 강등 가드(잔차 우세/동률 양쪽 면제/self-fit 자격 박탈), θ 미달 소스의 침묵 진단 note, 무게 유일 해·냉장 tolerance에서 미발동, **PARTIAL 원 판정의 ④ 우회 재판정 + COMPLETE 원 판정의 ④ KEEP 보존**(이슈 #22), 재판정 게이트 실패 시 원 판정 유지, 페널티 후 승자 유지, disabled no-op, `change_timestamps` 저널 왕복·구버전 호환 |
+| `tests/test_cross_zone.py` (24건) | 앵커 폴백 3단, 오염 창 산식, 문서 시나리오 재판정 + 정산기 통합, 상호 강등 가드(잔차 우세/동률 양쪽 면제/self-fit 자격 박탈), θ 미달 소스의 침묵 진단 note, **무겹침 침묵 진단**(이슈 #23 — 근접 노트/30s 상한/겹침 시 무기록), 무게 유일 해·냉장 tolerance에서 미발동, **PARTIAL 원 판정의 ④ 우회 재판정 + COMPLETE 원 판정의 ④ KEEP 보존**(이슈 #22), 재판정 게이트 실패 시 원 판정 유지, 페널티 후 승자 유지, disabled no-op, `change_timestamps` 저널 왕복·구버전 호환 |
 | `tests/test_ghost_ledger.py` (15건) | 검출 정의 — 다존+뒷받침 0은 유령 / COMPLETE 뒷받침은 보호(held 실물) / near_gate는 뒷받침 아님 / 단일 존 아님 / **공유 에피소드는 1회 등장** / 서로 다른 에피소드는 성립 / **같은 순간·다른 파일의 창 겹침 병합과 별개 순간의 breadth 성립, window_cfg 미전달 구 동작**(이슈 #22) / vote_floor 미달 제외. shadow는 동작 무변경 + note만(유령 미과금 존은 무기록), off는 no-op, active는 재판정 채택·게이트 실패 시 원 판정 유지·비과금 이벤트도 후보 강등(α). 정산기 기본값 shadow에서 과금 무변경 |
 | `tests/test_session_archive.py` (18건) | finalize 시 YAML 1파일 + 후보·전략·`video_paths`·`trace` 포함, ERROR 세션도 `status=error`로 저장, **재폴링 3회에도 1파일**, 보존기간 디렉토리 삭제, PyYAML 부재 시 `.json` 폴백(라벨 기입까지), `archive_dir=""` 비활성, 저널 신규 필드 왕복·누락 시 기본값, settlement 없는 에러 세션의 존 요약 재구성, `ground_truth` placeholder·기입·대체·미존재 `FileNotFoundError`·`latest()`, `label-session` CLI 파싱과 E2E, `SAVE_DETECTIONS` off/on의 키 유무·conf 컷·`camera_crops` |
 | `tests/test_lifecycle.py` (33건 중 ledger 관련) | 24h+ soak 무한 성장 방지 — 새 OPEN마다 `EventLog`·멱등 캐시 prune, 활성 세션은 절대 삭제 안 됨, **prune 후에도 직전 세션 CLOSE 재폴링이 같은 금액**(I11). 저널 로테이션 파일명·롤오버·날짜순 replay·세션 필터·보존기간 삭제/보존·단일 인자 생성자 호환·**G2.5 replay 등가성**. `cabinet_type=freezer`가 close 정산까지 도달하는지 |

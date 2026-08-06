@@ -443,3 +443,46 @@ class TestIssue22PartialOriginalBypassesWeightGate:
         )
         assert out[1] is z3_complete
         assert not any(n.startswith("zone3:cross_zone_vision_penalty") for n in notes)
+
+
+class TestNoOverlapDiagnosis:
+    """이슈 #23 0806 ses-28: 순차 취출 간격이 오염 창(앵커 ±5s)을 넘으면
+    소스 겹침·상호 강등이 전부 불성립하는데 아카이브에 흔적이 없어
+    "cross_zone이 안 돈다"로 보였다 — 근접(30s 이내) 무겹침을 노트로 남긴다.
+    동작(판정)은 무변경."""
+
+    def _pair(self, bar170, bar178, gap):
+        z1 = event(
+            "s", 1, 100.0, judged(bar178), -178.0,
+            candidates=[cand(4, votes=20)], change_ts=(100.0,),
+        )
+        z2 = event(
+            "s", 2, 100.0 + gap, judged(bar170), -170.0,
+            candidates=[cand(3, votes=20), cand(4, votes=6)],
+            change_ts=(100.0 + gap,),
+        )
+        return z1, z2
+
+    def test_near_miss_gets_note_judgment_unchanged(self, bar170, bar178):
+        z1, z2 = self._pair(bar170, bar178, gap=7.0)
+        notes: list[str] = []
+        out = apply_cross_zone_penalty(
+            [z1, z2], PROFILES, (bar170, bar178), CFG, notes
+        )
+        assert out[0] is z1 and out[1] is z2  # 판정 무변경
+        assert any(n == "zone1:cross_zone_no_overlap:zone2@dt=7.0s" for n in notes)
+        assert any(n == "zone2:cross_zone_no_overlap:zone1@dt=7.0s" for n in notes)
+
+    def test_beyond_horizon_stays_silent(self, bar170, bar178):
+        # 30s를 넘는 간격은 명백한 별개 에피소드 — 침묵이 정상
+        z1, z2 = self._pair(bar170, bar178, gap=45.0)
+        notes: list[str] = []
+        apply_cross_zone_penalty([z1, z2], PROFILES, (bar170, bar178), CFG, notes)
+        assert not notes
+
+    def test_overlapping_source_takes_precedence(self, bar170, bar178):
+        # 겹치는 소스가 있으면 기존 페널티 기제가 담당 — 무겹침 노트 없음
+        z1, z2 = self._pair(bar170, bar178, gap=2.0)
+        notes: list[str] = []
+        apply_cross_zone_penalty([z1, z2], PROFILES, (bar170, bar178), CFG, notes)
+        assert not any("cross_zone_no_overlap" in n for n in notes)

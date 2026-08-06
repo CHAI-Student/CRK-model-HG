@@ -165,10 +165,11 @@ CRK-model-HG는 결제 정확도상 **"무게로 뒷받침된 count 격상" > "�
 | `refit_arb_conf_floor` | 0.8 | ④ 복수 적합 중재의 절대 하한 | margin 우세만으로는 "덜 흐린 유령"이 이긴다 — conf 0.69가 0.35를 꺾고 오과금(정당 케이스는 0.82) |
 | `partial_min_confidence` | 0.18 | 9.2 / 9.4 청구 conf 하한 | 5표/청구 conf 0.157짜리 identity partial이 잔차 65g 오상품을 과금 |
 | `partial_impossible_factor` | 3.0 | 9.4 무게 반증 거부권 (`unit_weight > 최대 removal 관측량 + tol×계수` 후보 배제) | 이슈 #22 ses-4 z3 — 다종 동시 취출의 교차존 오염 표로 득표 1위가 된 이웃 존 상품(단위무게 525g)이 Δ-80g 이벤트에 count=1 청구됐다(1개 취출조차 물리적으로 불가능). 9.3이 tol×3 창으로 이미 반증한 top을 9.4가 무검증으로 되살리지 않도록 같은 ×3 창을 쓴다. conf 하한과 달리 **다음 후보로 넘어간다** — 하한은 증거 강도 문턱이라 폴스루가 후보 쇼핑이 되지만, 이것은 물리적 배제(무게의 거부권)라 남은 후보 중 증거 서열대로 고르는 것이 맞다 |
+| `strict_count_occam` | True | `StrictWeightMatcher._occam_filter` (매처 소비 전략 전부) | 이슈 #23 0806 3-1 — 잔차 동률(0)에서 단백질바 55×5가 오로나민×1을 conf 차이만으로 꺾어 54x6 오과금. 무게가 역산한 단일 종 ×N 가설은 n=1 적합을 엄격히 더 잘 설명할 때만 자격 (freezer `count_occam`의 냉장 strict판) |
 
 모든 노브는 "센티널로 비활성"을 지원한다(`slack=0`, `conf_override=2.0`,
 `conf_margin=2.0`, `refit_arb_conf_floor=2.0`, `partial_min_confidence=0`,
-`partial_impossible_factor=0`) —
+`partial_impossible_factor=0`, `strict_count_occam=0`) —
 env 한 줄로 구 동작으로 롤백할 수 있고, 그 롤백 경로 자체가 테스트로 고정돼 있다.
 
 ### `strict.py`
@@ -185,6 +186,15 @@ confidence로 최종 선택한다(냉장 기본 경로).
 - 정렬 키: `-match_score → 종류 수 → 무게 오차`. `match_score =
   weight_score×0.6 + vision_score×0.3 + simplicity×0.1`이며 simplicity가
   "같은 오차·conf면 종류가 적은 조합"을 선호하게 만든다(모호한 다품종 회피).
+- **단일 종 ×N 개수 오컴** (`count_occam`, 이슈 #23 0806 3-1): n=1 적합의
+  최소 잔차보다 엄격히 더 잘 맞지 않는 단일 종 n≥2 조합을 정렬 전에 실격 —
+  Δ-275에서 오로나민×1(잔차 0)과 단백질바 55×5(잔차 0)가 동률이 되자
+  match_score의 vision 항(conf 1.0 vs 0.93)만으로 ×5가 이겨 54x6이 과금됐다.
+  freezer ① `_occam_filter`와 동일 규칙의 냉장판. 다품종 조합에는 미적용
+  (freezer ③과 같은 이유 — 정당한 동시 다종 취출이 n=1 우연에 밀린다).
+  `default_pipeline`이 매처 단일 인스턴스를 소비 전략 전부(strict·segment·
+  stage_count·relaxed·no_candidate)에 공유해 multi_tray 채널 판정까지
+  일관 적용된다. `MODEL__JUDGMENT__STRICT_COUNT_OCCAM=0` = 구 동작.
 - **tolerance는 인자로 받는다** — `SensorProfile.tolerance_grams` 단일 소스이고,
   조기 종료(`perception/early_termination.py`)도 같은 함수에 같은 값을 넘긴다.
   이중 기준이 생기면 "조기 종료는 설명됐다고 판단했는데 judge는 아니라고 하는"
@@ -226,6 +236,7 @@ confidence로 최종 선택한다(냉장 기본 경로).
 | `SEGMENT_COMBO_MIN_SEGMENTS` | 2 | 위 도전 자격의 removal 세그먼트 최소 수 |
 | `PARTIAL_MIN_CONFIDENCE` | 0.18 | 9.2·9.4 무게 미검증 count=1 청구의 conf 하한 (0 = 비활성) |
 | `PARTIAL_IMPOSSIBLE_FACTOR` | 3.0 | 9.4 무게 반증 거부권의 tolerance 배수 — 냉장 전용(9.4는 냉동 배제) (0 = 비활성) |
+| `STRICT_COUNT_OCCAM` | 1 | 매처 단일 종 ×N 개수 오컴 — 냉장 전용(매처 소비 전략은 전부 냉동 배제) (0 = 구 동작) |
 
 **env로 노출되지 않은 코드 상수**: `tolerance_grams`·`count_gate`·
 `min_weight_change_grams`(전부 `core/profiles.py`의 프로파일 상수),
@@ -235,7 +246,7 @@ confidence로 최종 선택한다(냉장 기본 경로).
 
 ## 6. 테스트
 
-`tests/test_judgment.py` 75건. 픽스처(`cola`/`water`/`bar170`/`bar178`, `cand()`)는
+`tests/test_judgment.py` 79건. 픽스처(`cola`/`water`/`bar170`/`bar178`, `cand()`)는
 `tests/conftest.py`.
 
 | 테스트 클래스 | 건수 | 무엇을 고정하는가 |
@@ -248,6 +259,7 @@ confidence로 최종 선택한다(냉장 기본 경로).
 | `TestStrictMatcher` | 6 | 단순 조합 선호, stock 제한 시 종류 조합, I5 품절 제외, I12 count 상한, `target < tolerance` 빈 결과, vision 미검출 제외 |
 | `TestVisionFirstIdentityPartial` | 5 | 냉동 relaxed 미스 후 정체성 보존 PARTIAL, 무게검증 시 COMPLETE 격상, 저conf 청구 차단, 하한 0 롤백, COMPLETE 경로는 하한 무관 |
 | `TestRelaxedPartialWeightRefute` | 4 | 9.4 무게 반증 거부권(이슈 #22 ses-4 z3) — 불가능 top 배제 후 차순위 청구, 전멸 시 미청구(I13), 반품 혼합 트리거의 removal 상한 보호, `factor=0` 롤백 |
+| `TestStrictCountOccam` | 4 | 매처 개수 오컴(이슈 #23 0806 3-1) — 잔차 동률 ×5 실격 후 n=1 채택, 롤백 시 구 동작, 엄격 우세 ×2 생존, n=1 부재 시 다량 취출 보존 |
 | `TestWeightOnlySameProductCount` | 3 | 동일 상품 n개 유일 매칭 채택, 서로 다른 (품목, n) 2쌍이면 모호 거부, stock 초과 n 제외 |
 | `TestIssue10MelonaFiller` | 3 | share 하한 없이도 판정층이 filler를 거부하고 정답 복원, 3표 filler를 `refit_share`가 차단, share 제거 후 정답 복원 |
 | `TestFullDeltaMatch` | 2 | I6 부분 설명 강등, relaxed 과잉 도달을 라우터가 강등 |

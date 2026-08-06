@@ -30,6 +30,7 @@ from crk_model.judgment.strategies import (
     VisionOnlyStrategy,
     enforce_full_delta_match,
 )
+from crk_model.judgment.strict import StrictWeightMatcher
 
 PipelineEntry = Stage | Strategy
 
@@ -44,6 +45,12 @@ def default_pipeline(
     # relaxed_partial 무게 반증 거부권 (이슈 #22 ses-4 z3,
     # MODEL__JUDGMENT__PARTIAL_IMPOSSIBLE_FACTOR): unit_weight가 최대 removal
     # 관측량 + tolerance×계수를 넘는 후보는 count=1 청구 부적격. 0 = 비활성.
+    strict_count_occam: bool = True,
+    # StrictWeightMatcher 단일 종 ×N 개수 오컴 (이슈 #23 0806 3-1,
+    # MODEL__JUDGMENT__STRICT_COUNT_OCCAM): n=1 적합보다 잘 맞지 않는 단일 종
+    # n≥2 조합 실격 — 55×5=275가 오로나민×1(잔차 동률 0)을 conf만으로 꺾은
+    # 54x6 오과금 차단. 매처를 쓰는 전 전략(strict·segment·stage·relaxed)에
+    # 공유 인스턴스로 배선된다. False = 구 동작.
 ) -> list[PipelineEntry]:
     """다이어그램 5 순서 보존 — "누적 + 특이도 우선" (QA Q2).
 
@@ -89,19 +96,22 @@ def default_pipeline(
     (relaxed_loadcell_only는 allowlist 완전 불일치 전용, vision_first_identity_
     partial/relaxed_partial은 프로파일로 상호 배타) 실질적 우선순위 충돌은 없다.
     """
+    # 매처 단일 인스턴스 공유 — strict_count_occam이 매처 소비 전략 전부에
+    # 동일하게 적용된다 (multi_tray 채널 판정도 같은 라우터를 재사용).
+    matcher = StrictWeightMatcher(count_occam=strict_count_occam)
     return [
         VisionOnlyStrategy(),                                  # 0
         freezer_strategy or FreezerVisionFirstStrategy(),      # 1 — 센서 물리 (필연적 순서)
         AugmentStageWeightGateStage(),                         # 2 — Stage (입력 변환기)
-        SegmentWeightMatchingStrategy(),                       # 3 — 시계열 정보 보존 (필연적 순서)
-        StageCountCombinationStrategy(require_no_vision=True), # 3.5 — 후보없음 체인 SC1
-        NoCandidateFallbackStrategy(),                         # 4
+        SegmentWeightMatchingStrategy(matcher),                # 3 — 시계열 정보 보존 (필연적 순서)
+        StageCountCombinationStrategy(matcher, require_no_vision=True),  # 3.5 — 후보없음 체인 SC1
+        NoCandidateFallbackStrategy(matcher),                  # 4
         MinWeightGateStrategy(),                               # 5
         SameWeightCollisionGuardStrategy(),                    # 6
-        StrictStrategy(),                                      # 7 — 기본 경로
-        StageCountCombinationStrategy(),                       # 7.5 — strict 실패 후 구제
+        StrictStrategy(matcher),                               # 7 — 기본 경로
+        StageCountCombinationStrategy(matcher),                # 7.5 — strict 실패 후 구제
         SameProductCountStrategy(),                            # 8
-        RelaxedStrategy(),                                     # 9 — combination(tolerance×2)
+        RelaxedStrategy(matcher),                              # 9 — combination(tolerance×2)
         RelaxedLoadcellOnlyStrategy(),                         # 9.1 — allowlist 불일치 전용
         VisionFirstIdentityPartialStrategy(
             min_confidence=partial_min_confidence),            # 9.2 — freezer 전용

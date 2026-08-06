@@ -238,6 +238,12 @@ class Settings:
     # unit_weight > 최대 removal 관측량 + tolerance×이 계수 → 청구 부적격,
     # 다음 후보로 (무게의 거부권, 후보 쇼핑 아님). 0 = 비활성 (구 동작).
     judgment_partial_impossible_factor: float = 3.0
+    # StrictWeightMatcher 단일 종 ×N 개수 오컴 (이슈 #23 0806 3-1): n=1 적합의
+    # 최소 잔차보다 엄격히 더 잘 맞지 않는 단일 종 n≥2 조합 실격 — Δ-275에서
+    # 오로나민×1(잔차 0)과 단백질바 55×5(잔차 0)가 동률이 되자 conf 차이만으로
+    # ×5가 이겨 54x6 오과금. freezer ① COUNT_OCCAM의 냉장 strict판.
+    # False = 구 동작 (롤백).
+    judgment_strict_count_occam: bool = True
     # ④ refit 복수 적합 중재의 절대 conf 하한 (실기 ses-1 ch1: 0.69 유령이
     # margin 우세만으로 오과금 — 승자는 자체로 선명해야 한다). 2.0 = 중재
     # 비활성(유일-적합만).
@@ -421,6 +427,9 @@ class Settings:
             ),
             judgment_partial_impossible_factor=_env_float(
                 "MODEL__JUDGMENT__PARTIAL_IMPOSSIBLE_FACTOR", 3.0
+            ),
+            judgment_strict_count_occam=_env_bool(
+                "MODEL__JUDGMENT__STRICT_COUNT_OCCAM", True
             ),
             judgment_refit_arb_conf_floor=_env_float(
                 "MODEL__JUDGMENT__REFIT_ARB_CONF_FLOOR", 0.8

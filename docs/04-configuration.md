@@ -264,6 +264,7 @@ dataclass 기본값과 `from_env()` 기본값이 일치함을 확인한 값입�
 | `MODEL__JUDGMENT__PARTIAL_IMPOSSIBLE_FACTOR` | `3.0` | `relaxed_partial`(냉장 최종 폴백)의 **무게 반증 거부권** — 단위무게가 최대 removal 관측량 + tolerance×이 계수를 넘는 후보는 count=1 청구 부적격, 다음 득표 순위로. 이슈 #22 ses-4: 교차존 오염으로 득표 1위가 된 525g 상품이 Δ-80g에 청구(1개 취출조차 물리적으로 불가능). `0`=비활성(구 동작) |
 | `MODEL__JUDGMENT__REFIT_ARB_CONF_FLOOR` | `0.8` | refit 복수 적합 중재의 **절대** conf 하한. 실기 ses-1: 0.69 유령이 margin 우세만으로 오과금 — 승자는 자체로 선명해야 합니다. `2.0`=중재 비활성(유일-적합만) |
 | `MODEL__JUDGMENT__COUNT_OCCAM` | `1` | ① 개수 오컴 — n=1 적합이 있으면 그보다 잘 맞지 않는 n≥2 적합을 실격. 저중량 상품이 n을 키워 아무 중량대나 덮는 "만능 filler" 차단 (0730 시나리오 실패 6/7건: 잭슨빌 155×1 → 라라스윗 70×2). `0`=구 동작 |
+| `MODEL__JUDGMENT__STRICT_COUNT_OCCAM` | `1` | 위 규칙의 **냉장 strict판** (이슈 #23 0806 3-1): `StrictWeightMatcher`가 단일 종 n≥2 조합을 n=1 적합의 최소 잔차보다 엄격히 잘 맞을 때만 유지 — Δ-275에서 잔차 동률(0)인 단백질바 55×5가 오로나민×1을 conf 차이만으로 꺾어 54x6 오과금. 매처 소비 전략 전부(strict·segment·stage·relaxed, multi_tray 채널 포함)에 공유 배선. 다품종 조합 미적용. `0`=구 동작 |
 | `MODEL__JUDGMENT__SEGMENT_COMBO` | `0` | ①⁺ 세그먼트 근거 조합 도전 — removal 세그먼트 ≥ `MIN_SEGMENTS`가 분리 취출을 증언할 때만 ③ 조합이 ①의 ×N 확정을 뒤집습니다 (0730 2-4: 메로나+월드콘 −150 → 월드콘×2). 실측 1건이라 **기본 off** — 아카이브 segments 확인 후 승격 |
 | `MODEL__JUDGMENT__SEGMENT_COMBO_MIN_SEGMENTS` | `2` | 위 도전 자격의 removal 세그먼트 최소 수. 올리면 더 보수적 |
 

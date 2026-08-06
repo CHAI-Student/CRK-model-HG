@@ -202,6 +202,7 @@ class ModelService:
                 partial_impossible_factor=(
                     self.settings.judgment_partial_impossible_factor
                 ),
+                strict_count_occam=self.settings.judgment_strict_count_occam,
             ), count_unit_slack=self.settings.judgment_count_unit_slack),
             early_termination_enabled=self.settings.early_termination_enabled,
             motion_evidence_enabled=self.settings.motion_evidence_enabled,

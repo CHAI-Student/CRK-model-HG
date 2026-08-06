@@ -5,6 +5,17 @@
 
 불변식: I5(stock=0 제외) · I12(count ≤ stock)는 탐색 공간에서 강제.
 tolerance는 SensorProfile 단일 소스 — 조기 종료(D7)도 같은 함수를 쓴다.
+
+개수 오컴 (count_occam, 이슈 #23 0806 3-1): 단일 종 n=1 적합이 있으면 그
+최소 잔차보다 **엄격히 더 잘 맞지 않는** 단일 종 n≥2 적합을 후보에서
+제외한다 — freezer ①의 `_occam_filter`(0730 시나리오)와 같은 규칙의 냉장
+strict판. 실사고: Δ-275(단백질바55 + 오로나민275 동시 취출의 ch1)에서
+오로나민×1(잔차 0)과 단백질바×5(55×5=275, 잔차 0)가 **동률**이 되자
+match_score의 vision 항(conf 1.0 vs 0.93)만으로 ×5가 이겨 54x6 오과금.
+무게가 역산한 ×N 가설은 n=1 관측 가설을 더 잘 설명할 때만 자격이 있다.
+다품종 조합에는 미적용 — freezer ③과 같은 이유로 flat 유지 (조합의
+우연 적합은 simplicity·vision 항이 이미 감점하고, 여기까지 좁히면
+정당한 동시 다종 취출이 n=1 우연에 밀린다).
 """
 from __future__ import annotations
 
@@ -22,9 +33,12 @@ class Combination:
 
 
 class StrictWeightMatcher:
-    def __init__(self, max_items: int = 6, max_kinds: int = 3):
+    def __init__(self, max_items: int = 6, max_kinds: int = 3, count_occam: bool = True):
         self.max_items = max_items
         self.max_kinds = max_kinds
+        # 단일 종 ×N 개수 오컴 (모듈 docstring, MODEL__JUDGMENT__STRICT_COUNT_OCCAM).
+        # False = 구 동작 (롤백 센티널).
+        self.count_occam = count_occam
 
     def find_valid_combinations(
         self,
@@ -77,9 +91,34 @@ class StrictWeightMatcher:
                     match_score=self._score(items, err, tolerance, conf),
                 )
             )
+        if self.count_occam:
+            combos = self._occam_filter(combos)
         # combination_sort_key: -match_score → 종류 수 → 오차
         combos.sort(key=lambda c: (-c.match_score, len(c.products), c.weight_error))
         return combos
+
+    @staticmethod
+    def _occam_filter(combos: list[Combination]) -> list[Combination]:
+        """단일 종 ×N 개수 오컴 (모듈 docstring): n=1 적합의 최소 잔차보다
+        엄격히 더 잘 맞지 않는 단일 종 n≥2 적합을 실격. n=1 적합이 없으면
+        (진짜 다량 취출) 무발동 — freezer `_occam_filter`와 동일 규칙."""
+        best_single = min(
+            (
+                c.weight_error
+                for c in combos
+                if len(c.products) == 1 and c.products[0].count == 1
+            ),
+            default=None,
+        )
+        if best_single is None:
+            return combos
+        return [
+            c
+            for c in combos
+            if len(c.products) > 1
+            or c.products[0].count == 1
+            or c.weight_error < best_single
+        ]
 
     def best(self, *args, **kwargs) -> Combination | None:
         combos = self.find_valid_combinations(*args, **kwargs)

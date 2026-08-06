@@ -2022,3 +2022,49 @@ unit_weight는 정책상 고정이고 실측과 10~30g 편차가 있으므로(�
 - **관련 파일**: `refrg.env.example`(값 + 낡은 주석 정합),
   `docs/04-configuration.md`(템플릿 차이 표·해당 행). 코드 기본값은 전부
   구 동작 유지 — 이 보정은 냉장 템플릿 스코프다.
+
+## 2026-08-06 이슈 #23 — 0806 배치: strict 개수 오컴 + cross_zone 무겹침 침묵 진단
+
+- **배경** (0806 시나리오 배치, 새 엔진 + ratio 0.05/count 3, ET off 첫
+  실기): 45케이스 중 실패 5건으로 0805(라벨 14세션 0건 정답) 대비 대폭
+  개선. 사용자 질문 "cross_zone이 켜져 있는데 왜 안 도나" 분석 결과 —
+  기제는 정상 동작 중이었고(ses-15에 source_low_conf note 실재), 실패
+  대부분이 단일 존 무게 선택 문제라 소관 밖이었으며, 유일한 교차존
+  케이스(ses-28 순차 3존)는 ① 취출 간격 > 오염 창(앵커 ±5s)로 소스
+  겹침·상호 강등 전부 불성립, ② 오염 실체가 "같은 장면"이 아니라 "들고
+  이동(held)", ③ c26 DB 무게 오류(101g vs 실측 ~105.8g)가 ④ 무게 모호성
+  게이트의 판단까지 왜곡 — 인데 아카이브에 아무 흔적이 없어 "안 도는
+  것"으로 보였다.
+
+- **수정 ① strict 단일 종 ×N 개수 오컴** (0806 3-1 실사고: 단백질바55 +
+  오로나민275 동시 취출 ch1 Δ-275에서 오로나민×1 잔차 0과 단백질바×5
+  잔차 0이 **동률** → match_score vision 항(conf 1.0 vs 0.93)만으로 ×5
+  승리 → 54x6 오과금):
+  `StrictWeightMatcher._occam_filter` — n=1 적합의 최소 잔차보다 엄격히
+  더 잘 맞지 않는 단일 종 n≥2 조합 실격. freezer ① `_occam_filter`(0731)
+  와 동일 규칙의 냉장판. 다품종 조합 미적용(정당한 동시 다종 취출 보호).
+  `default_pipeline`이 매처 단일 인스턴스를 소비 전략 전부(strict·
+  segment·stage_count×2·relaxed·no_candidate)에 공유 — multi_tray 채널
+  판정(같은 라우터 재사용)까지 일관 적용. 노브
+  `MODEL__JUDGMENT__STRICT_COUNT_OCCAM=1` (0 = 구 동작).
+
+- **수정 ② cross_zone 무겹침 침묵 진단** (관측성, 동작 무변경):
+  소스 자격 이벤트(타 존·정상·판정 있음)가 있는데 오염 창이 안 겹쳐
+  페널티가 검토조차 안 된 경우
+  `zoneN:cross_zone_no_overlap:zoneM@dt=7.2s` note (가장 가까운 앵커
+  간격, 근접 30s 이내만 — 그 밖은 명백한 별개 에피소드라 침묵이 정상).
+  9차 ses-8의 source_low_conf 침묵 진단과 같은 계열 2종째.
+
+- **이번에 안 고친 것** (별도 축): c26 등 DB `product_loadcell_weight`
+  오류(사용자 확인: DB 101g vs 실측 ~105.8g — z2 잔차 5.83>5로 정답
+  탈락의 직접 원인), held(들고 이동) 오염의 시간 창 모델 밖 문제(held
+  강등 shadow 승격 게이트 소관), MIN_VOTE_COUNT=3의 빠른 취출 유실
+  (ses-15 z3 c54 2표 기각 — conformal p5=3 경계 트레이드오프).
+
+- **관련 파일**: `crk_model/judgment/strict.py`·`router.py`,
+  `crk_model/ledger/cross_zone.py`, `crk_model/core/config.py`,
+  `crk_model/service/model_service.py`, env 템플릿(refrg·.env — freezer는
+  strict 미적용이라 생략), `tests/test_judgment.py`(+4)·
+  `test_cross_zone.py`(+3), docs 03·04·06, 패키지 README 2종.
+
+- **검증**: `pytest -q` → **443 passed** (0806 이전 436 + 신규 7, 회귀 0).

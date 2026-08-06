@@ -1038,3 +1038,54 @@ class TestRelaxedPartialWeightRefute:
         result = router.judge(ctx(-80.0, [self.BARLEY, self.TEA], self.CANDS))
         assert result.strategy == "relaxed_partial"
         assert [(pc.product.class_id, pc.count) for pc in result.products] == [(35, 1)]
+
+
+class TestStrictCountOccam:
+    """이슈 #23 0806 3-1 재구성: 단백질바55+오로나민275 동시 취출의 ch1 Δ-275
+    에서 오로나민×1(잔차 0)과 단백질바×5(55×5=275, 잔차 0)가 동률 — match_score
+    의 vision 항(conf 1.0 vs 0.93)만으로 ×5가 이겨 54x6 오과금. 무게가 역산한
+    단일 종 ×N 가설은 n=1 적합을 엄격히 더 잘 설명할 때만 자격이 있다
+    (freezer ① `_occam_filter`의 냉장 strict판)."""
+
+    ORONAMIN = ActiveProduct(
+        "P23", "오로나민", class_id=23, unit_weight=275.0, unit_price=1500, stock_qty=10
+    )
+    BAR = ActiveProduct(
+        "P54", "단백질바", class_id=54, unit_weight=55.0, unit_price=2500, stock_qty=10
+    )
+    CANDS = [cand(54, conf=1.0, votes=53), cand(23, conf=0.93, votes=38)]
+
+    def test_equal_residual_xn_loses_to_single(self):
+        result = JudgmentRouter().judge(ctx(-275.0, [self.ORONAMIN, self.BAR], self.CANDS))
+        assert result.strategy == "strict"
+        assert [(pc.product.class_id, pc.count) for pc in result.products] == [(23, 1)]
+
+    def test_rollback_restores_old_behavior(self):
+        # MODEL__JUDGMENT__STRICT_COUNT_OCCAM=0 → conf 우세 ×5가 종전대로 승리
+        router = JudgmentRouter(default_pipeline(strict_count_occam=False))
+        result = router.judge(ctx(-275.0, [self.ORONAMIN, self.BAR], self.CANDS))
+        assert [(pc.product.class_id, pc.count) for pc in result.products] == [(54, 5)]
+
+    def test_strictly_better_xn_survives(self):
+        # 0806 1-2 재구성: 구운란×2(72.5×2=145, 잔차 0)는 n=1 우연(짜파게티
+        # 150, 잔차 5)보다 엄격히 잘 맞으므로 실격되지 않는다
+        eggs = ActiveProduct(
+            "P28", "구운란", class_id=28, unit_weight=72.5, unit_price=2000, stock_qty=10
+        )
+        jjapa = ActiveProduct(
+            "P55", "짜파게티", class_id=55, unit_weight=150.0, unit_price=1000, stock_qty=10
+        )
+        result = JudgmentRouter().judge(
+            ctx(-145.0, [eggs, jjapa], [cand(28, conf=0.8), cand(55, conf=0.8)])
+        )
+        assert [(pc.product.class_id, pc.count) for pc in result.products] == [(28, 2)]
+
+    def test_no_single_fit_keeps_multi_count(self):
+        # n=1 적합이 없으면 무발동 — 진짜 다량 취출(하늘보리×3) 보존
+        barley = ActiveProduct(
+            "P16", "하늘보리", class_id=16, unit_weight=519.0, unit_price=1600, stock_qty=10
+        )
+        result = JudgmentRouter().judge(
+            ctx(-1557.0, [barley, self.BAR], [cand(16, conf=0.9), cand(54, conf=0.5)])
+        )
+        assert [(pc.product.class_id, pc.count) for pc in result.products] == [(16, 3)]

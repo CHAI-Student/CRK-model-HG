@@ -140,6 +140,34 @@ def _judgment_residual(e: TriggerEvent) -> float | None:
 # 비교에서 이보다 명확히 우세할 때만 "자기 무게가 대안을 선호한다"고 본다.
 _SELF_FIT_MARGIN_G = 5.0
 
+# 무겹침 침묵 진단(_near_miss_sources)의 보고 상한 — 이보다 먼 타 존
+# 이벤트는 명백한 별개 에피소드라 침묵이 정상이고, 노트는 노이즈다.
+_NO_OVERLAP_NOTE_HORIZON_S = 30.0
+
+
+def _near_miss_sources(
+    e: TriggerEvent, events: Sequence[TriggerEvent]
+) -> list[str]:
+    """침묵 진단 2종째 (이슈 #23 0806 ses-28): 소스 자격 이벤트(타 존·정상·
+    판정 있음)가 세션에 있는데 **오염 창이 안 겹쳐** 페널티가 전혀 검토되지
+    않은 경우의 관측 노트 재료. 창 폭이 앵커 ±(replay+ε)≈±5s라 순차 취출
+    간격이 그보다 크면 상호 강등 가드·소스 겹침이 전부 불성립하는데,
+    아카이브에는 아무 흔적이 없어 "cross_zone이 안 돈다"로 보였다.
+
+    반환: ["zone3@dt=7.2s", ...] — 가장 가까운 앵커 간격, 근접순. 간격 >
+    _NO_OVERLAP_NOTE_HORIZON_S는 제외 (명백한 별개 에피소드)."""
+    anchors_e = sub_event_anchors(e)
+    misses: list[tuple[float, int]] = []
+    for other in events:
+        if other.zone == e.zone or other.status != "ok":
+            continue
+        if not other.judgment.products:
+            continue  # 무판정은 창이 겹쳐도 소스 자격이 없다 — 진단 무의미
+        dt = min(abs(a - b) for a in anchors_e for b in sub_event_anchors(other))
+        if dt <= _NO_OVERLAP_NOTE_HORIZON_S:
+            misses.append((dt, other.zone))
+    return [f"zone{z}@dt={dt:.1f}s" for dt, z in sorted(misses)]
+
 
 def _self_fit_prefers_alternative(
     e: TriggerEvent,
@@ -332,6 +360,15 @@ def _repass_event(
         notes.append(
             f"zone{e.zone}:cross_zone_source_low_conf:" + ",".join(low_conf)
         )
+    elif not sources:
+        # 침묵 진단 2종째 (이슈 #23 0806 ses-28): 소스 자격 이벤트는 있는데
+        # 오염 창(±5s)이 안 겹침 — "켜져 있는데 왜 안 도나"를 아카이브만으로
+        # 판별하게 한다 (동작 무변경, 근접 30s 이내만 보고).
+        near = _near_miss_sources(e, events)
+        if near:
+            notes.append(
+                f"zone{e.zone}:cross_zone_no_overlap:" + ",".join(near)
+            )
     penalized = {c.class_id for c in e.vision_candidates if c.class_id in sources}
     guarded = {cid for cid in penalized if (e.zone, cid) in exempt}
     if guarded:
