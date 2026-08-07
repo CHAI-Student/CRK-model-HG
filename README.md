@@ -204,3 +204,11 @@ YAML로 남습니다 — **모든 청구는 사후 재구성이 가능해야 한
 | CRK-IO-BOARD | 로드셀 하드웨어 인터페이스 | 5g 양자화·폴링 주기의 물리 계약 |
 | Edge_Environment | 엣지 실행 환경·녹화 디렉토리 | 녹화 경로 소유자 (엣지 워터마크 근거) |
 | CRK-model (레거시) | 참조 원본 서비스 | 외부 계약 호환 대상 |
+
+
+
+-----------------------------------------------------------------------------------------------
+chai@chai-desktop:~$ systemctl stop crk-model.service
+chai@chai-desktop:~$ cd Desktop/Codes/CRK-model
+chai@chai-desktop:~/Desktop/Codes/CRK-model$ source .venv/bin/activate
+(.venv) chai@chai-desktop:~/Desktop/Codes/CRK-model$ model-service
