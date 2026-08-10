@@ -69,16 +69,18 @@ class _Basket:
         weight_delta: float = 0.0,
         trigger_count: int = 0,
         notes: tuple[str, ...] = (),
+        confidence: float = 0.0,
     ) -> ZoneBasket:
         return ZoneBasket(
-            zone,
-            tuple(
+            zone=zone,
+            products=tuple(
                 ProductCount(p, c)
                 for p, c in sorted(self.items(), key=lambda t: t[0].product_id)
             ),
-            weight_delta,
-            trigger_count,
-            notes,
+            weight_delta=weight_delta,
+            trigger_count=trigger_count,
+            notes=notes,
+            confidence=confidence,
         )
 
 
@@ -281,11 +283,29 @@ class CloseSettler:
             weight_delta = sum(e.delta_weight for e in zone_events)
             trigger_count = len(zone_events)
             zone_notes = _notes_for_zone(notes, zone)
+            # 결제 confidence는 최종 정산 입력(ok)에 남은 실제 상품 판정만
+            # 대상으로 zone별 산술평균을 낸다. NO_DETECTION/반품 이벤트의 0.0이
+            # 결제 상품 신뢰도를 희석하지 않게 COMPLETE/PARTIAL + products로 제한.
+            concluded_confidences = [
+                e.judgment.confidence
+                for e in ok
+                if e.zone == zone
+                and e.judgment.products
+                and e.judgment.status
+                in (JudgmentStatus.COMPLETE, JudgmentStatus.PARTIAL)
+            ]
+            zone_confidence = round(
+                sum(concluded_confidences) / len(concluded_confidences), 4
+            ) if concluded_confidences else 0.0
             basket = baskets.get(zone)
             zb = (
-                basket.to_zone(zone, weight_delta, trigger_count, zone_notes)
+                basket.to_zone(
+                    zone, weight_delta, trigger_count, zone_notes, zone_confidence
+                )
                 if basket is not None
-                else _Basket().to_zone(zone, weight_delta, trigger_count, zone_notes)
+                else _Basket().to_zone(
+                    zone, weight_delta, trigger_count, zone_notes, zone_confidence
+                )
             )
             for pc in zb.products:
                 assert pc.count >= 0  # I14 (구조상 보장, 방어적 확인)

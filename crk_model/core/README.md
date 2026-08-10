@@ -70,7 +70,7 @@ core는 **이 시스템의 어휘**를 정의한다. 무엇을 몇 개 팔았는
 | `WeightSegment` | ingest가 정규화한 무게 변화 구간 | `delta_grams` **부호 유지**(취출 −, 반품 +) |
 | `ProductCount` | 상품 × 개수 | `total_price` / `total_weight` 파생 |
 | `JudgmentResult` | 트리거 1건의 판정 | `reason`(I8 사유 코드), `strategy`(텔레메트리), `explained_weight` |
-| `ZoneBasket` | 존 단위 정산 결과 | `weight_delta` / `trigger_count` / `notes`는 OPS 로그용 |
+| `ZoneBasket` | 존 단위 정산 결과 | `confidence`는 결제용 zone 판정 평균, `weight_delta` / `trigger_count` / `notes`는 OPS 로그용 |
 | `InterimSummary` | 잠정 집계 (I10) | 결제 불가 |
 | `FinalizedSettlement` | 확정 정산 (I10) | `blocked` / `block_reason`(I13), `notes`(I8) |
 

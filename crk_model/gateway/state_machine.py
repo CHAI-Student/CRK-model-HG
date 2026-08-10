@@ -324,7 +324,7 @@ def build_payment_payload(settlement: FinalizedSettlement) -> dict:
     Node가 결제 항목을 찾지 못했다. 상품 항목의 productIdx는 Node IF11 문자열
     ID(우리 ActiveProduct.product_id), productId는 YOLO class id(하위 호환,
     unmapped면 -1)다. confidence는 정산 결과(ZoneBasket)에 per-product 값이
-    없어 0.0 고정 — 결제에는 쓰이지 않는 표시용 필드.
+    없어 zone별 실제 상품 판정(COMPLETE/PARTIAL)의 confidence 평균을 쓴다.
     """
     if not isinstance(settlement, FinalizedSettlement):
         raise TypeError(
@@ -343,7 +343,7 @@ def build_payment_payload(settlement: FinalizedSettlement) -> dict:
                 "name": pc.product.name,
                 "count": pc.count,
                 "price": pc.product.unit_price,
-                "confidence": 0.0,
+                "confidence": z.confidence,
             }
             for pc in z.products
         ]
@@ -356,6 +356,7 @@ def build_payment_payload(settlement: FinalizedSettlement) -> dict:
                 "totalPrice": z.total_price,
                 "productCount": sum(p["count"] for p in products),
                 "weightDelta": round(z.weight_delta, 1),
+                "confidence": z.confidence,
             }
         )
         all_products.extend(products)

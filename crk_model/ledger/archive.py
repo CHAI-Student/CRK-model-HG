@@ -146,6 +146,7 @@ def _zone_to_dict(zb: ZoneBasket) -> dict:
         "zone": zb.zone,
         "weight_delta": zb.weight_delta,
         "trigger_count": zb.trigger_count,
+        "confidence": zb.confidence,
         "notes": list(zb.notes),
         "products": [
             {

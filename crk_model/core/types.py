@@ -95,6 +95,7 @@ class ZoneBasket:
     weight_delta: float = 0.0  # OPS 로그: 해당 zone 이벤트 delta_weight 합
     trigger_count: int = 0  # OPS 로그: 해당 zone에 도달한 트리거(이벤트) 수
     notes: tuple[str, ...] = ()  # OPS 로그: 해당 zone에 귀속되는 정산 사유(I8)
+    confidence: float = 0.0  # 해당 zone에서 상품 결론이 난 판정 confidence 평균
 
     @property
     def total_price(self) -> int:

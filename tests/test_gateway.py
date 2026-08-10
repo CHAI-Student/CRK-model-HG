@@ -15,8 +15,13 @@ class FakeClock:
         return self.t
 
 
-def removal(sid, zone, ts, product, count=1):
-    j = JudgmentResult(JudgmentStatus.COMPLETE, (ProductCount(product, count),), 0.9, "strict")
+def removal(sid, zone, ts, product, count=1, confidence=0.9):
+    j = JudgmentResult(
+        JudgmentStatus.COMPLETE,
+        (ProductCount(product, count),),
+        confidence,
+        "strict",
+    )
     return TriggerEvent(sid, zone, ts, -product.unit_weight * count, (), j)
 
 
@@ -42,6 +47,21 @@ class TestBarrierDrivenClose:
         payload = build_payment_payload(resp.payload)
         assert payload["totalPrice"] == 1500
         assert payload["productCount"] == 1
+
+    def test_payment_confidence_is_zone_judgment_average(self, cola):
+        gw, _ = make_gateway()
+        gw.handle_open("s1")
+        for seq, confidence in ((1, 0.8), (2, 0.6)):
+            gw.notify_enqueued(seq)
+            gw.record_trigger(
+                removal("s1", 1, float(seq), cola, confidence=confidence)
+            )
+            gw.notify_processed(seq)
+
+        payload = build_payment_payload(gw.handle_close().payload)
+
+        assert payload["zones"][0]["confidence"] == 0.7
+        assert payload["products"][0]["confidence"] == 0.7
 
     def test_pending_queue_blocks_finalize(self, cola):
         # I17: 큐 미정합 동안 시간이 아무리 지나도(타임아웃 전) 확정 금지

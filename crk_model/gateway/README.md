@@ -140,7 +140,7 @@ wire 형식은 레거시 `multi_zone.py`의 finalize 응답과 동형이다 — 
 |---|---|
 | `productIdx` | Node IF11 문자열 ID (우리 `ActiveProduct.product_id`) |
 | `productId` | YOLO class id (하위 호환 — unmapped면 -1) |
-| `confidence` | 0.0 고정 — 정산 결과(`ZoneBasket`)에 per-product 값이 없다. 표시용이며 결제에는 쓰이지 않는다 |
+| `confidence` | 해당 zone에서 실제 상품 결론이 난 `COMPLETE`/`PARTIAL` 판정 confidence의 산술평균. 같은 zone 상품에는 같은 값이 들어간다 |
 | `status` | 상품이 있으면 `success`, 0상품 정상 확정이면 `complete_no_products` |
 
 ---
