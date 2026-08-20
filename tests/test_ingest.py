@@ -144,8 +144,8 @@ class TestPerChannelAnalysis:
         assert a.reason == "insufficient_stable_regions"
 
 
-class TestBocpdShadow:
-    """BOCPD shadow 분석기 (research §2) — plateau 휴리스틱의 사각 커버 검증."""
+class TestBocpdAnalyzer:
+    """현재 primary인 BOCPD 분석기와 plateau 롤백 경로의 계약 검증."""
 
     @staticmethod
     def _series(levels, per=3, dt=0.8, ch=1):

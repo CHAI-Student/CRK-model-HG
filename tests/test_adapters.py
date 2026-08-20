@@ -13,7 +13,7 @@ from crk_model.service import ActiveProductStore, ModelService, TriggerPipeline,
 
 
 def _node_product(p):
-    """ActiveProduct → Node/Edge wire 상품 포맷 (REFERENCE.md 계약)."""
+    """ActiveProduct → Node/Edge 상품 포맷 (docs/01 서비스 계약)."""
     return {
         "product_idx": p.product_id,
         "product_name": p.name,

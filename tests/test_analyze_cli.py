@@ -1,8 +1,8 @@
-"""analyze-sessions — 아카이브 오프라인 리포트 (research §6, 로드맵 단기 ②).
+"""analyze-sessions — 세션 아카이브 오프라인 분석과 CLI 계약.
 
-계약: 읽기 전용 — shadow 정오 집계(Phase 2 승격 게이트), conformal 분위수,
-σ_db 잔차 실측, tray prior 개입(무-prior 순위 복원), 트랙릿 T1(head_obs
-분포·단절). 구 아카이브(class_id/unit_weight/track_detail 미기록)는 조용히 제외.
+청구 정오, 보정 분위수, 개당 무게 잔차, held/ghost shadow, 트랙 단절과 세션
+상세 출력을 검증한다. 폐기된 shadow 필드나 class_id 등 일부 필드가 없는 구
+아카이브도 예외 없이 읽는 관용 파싱은 운영 데이터 호환성 계약으로 유지한다.
 """
 import json
 

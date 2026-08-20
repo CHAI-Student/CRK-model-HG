@@ -1,7 +1,7 @@
-"""wire 계약 검증 (REFERENCE.md) — G0 정적 게이트 트랙.
+"""Node/카메라 wire 계약 검증 — G0 정적 게이트 트랙.
 
-REFERENCE.md 75-112행(트리거 성공 응답), 187-196행(VIDEO_FILE_NOT_FOUND),
-7-21행(/api/health)에 정의된 wire 필드가 어댑터 응답에 실제로 존재하는지 검증한다.
+docs/01-service-overview.md에 정리된 /trigger 성공·중복 응답,
+VIDEO_FILE_NOT_FOUND와 /api/health 필드가 어댑터 응답에 실제로 존재하는지 검증한다.
 
 fastapi가 없는 환경에서는 test_adapters.py와 동일하게 skip한다.
 """
@@ -42,7 +42,7 @@ def client_and_service():
 
 
 class TestTriggerWireContract:
-    """REFERENCE.md 75-112행: /trigger 성공 응답 필드."""
+    """POST /trigger 성공·중복 응답 필드."""
 
     def test_success_response_has_reference_fields(self, client_and_service):
         client, _svc = client_and_service
@@ -56,7 +56,7 @@ class TestTriggerWireContract:
         )
         assert r.status_code == 200
         body = r.json()
-        # 원본 계약 필드 (REFERENCE.md)
+        # Node/카메라 외부 계약 필드
         assert body["success"] is True
         assert body["session_id"] == body["trigger_id"]  # 원본 Camera는 로깅에만 사용
         assert body["door_session_id"] is None  # 아직 문 세션 없음
@@ -99,7 +99,7 @@ class TestTriggerWireContract:
 
 
 class TestVideoFileNotFound:
-    """REFERENCE.md 187-196행: VIDEO_FILE_NOT_FOUND 사전 검증."""
+    """VIDEO_FILE_NOT_FOUND 사전 검증 계약."""
 
     def test_missing_video_path_returns_400_when_validation_on(self):
         pytest.importorskip("fastapi")
@@ -144,7 +144,7 @@ class TestVideoFileNotFound:
 
 
 class TestHealthWireContract:
-    """REFERENCE.md 7-21행: /api/health 필드."""
+    """GET /api/health 응답 필드."""
 
     def test_health_has_reference_fields(self, client_and_service):
         client, _svc = client_and_service

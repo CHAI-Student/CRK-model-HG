@@ -101,7 +101,7 @@ flowchart TD
 | `service/` | 파이프라인 오케스트레이션, 직렬 워커, 파사드 | 조립 | [service/README](../crk_model/service/README.md) |
 | `adapters/` | 장치 결합 전부 (lazy import) + 진단 CLI | I/O 경계 | [adapters/README](../crk_model/adapters/README.md) |
 
-규모: 코드 약 10,800행 / 테스트 약 7,900행 (테스트 443건).
+규모: 코드 약 10,800행 / 테스트 약 7,900행 (테스트 444건).
 
 ## 4. 데이터 평면 — 트리거 1건의 처리
 

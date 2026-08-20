@@ -6,7 +6,7 @@
 
 | 항목 | 상태 |
 |---|---|
-| 자동 검증 | **406건 통과** (2026-07-30) · CI: ruff + pytest |
+| 자동 검증 | **444건 통과** (2026-08-20) · CI: ruff + pytest |
 | 냉동 실기 | E2E 검증 완료 (OPEN → 추론 → CLOSE 정산 → 결제 연동) |
 | 냉장 실기 | fitting 진행 중 (issue #18) |
 | 런타임 의존성 | 코어 **0** (표준 라이브러리) — 장치 결합은 전부 어댑터 |
@@ -123,7 +123,7 @@ crk_model/          도메인 코어 + 어댑터 (약 10,400행 / 9패키지)
 ├── gateway/        OPEN/CLOSE 상태기계 · 결제 페이로드
 ├── service/        파사드 · 트리거 파이프라인 · 직렬 워커
 └── adapters/       FastAPI · TensorRT · AVI 디코드 · 진단 CLI 3종
-tests/              자동 검증 406건 (약 7,200행)
+tests/              자동 검증 444건 (약 7,900행) · [테스트 가이드](tests/README.md)
 scripts/            Jetson 셋업 · 엔진 변환 · 진단 도구 (crk_model 비의존)
 docs/               문서집 01~08 + devdoc(히스토리)
 *.env.example       설정 템플릿 3종

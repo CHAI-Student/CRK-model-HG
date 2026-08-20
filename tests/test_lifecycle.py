@@ -24,9 +24,8 @@ from crk_model.ledger.settler import CloseSettler
 from crk_model.perception.detector import Detection
 from crk_model.service import ModelService
 
-# tests/ 는 패키지가 아니라(test_service.py 참고, __init__.py 없음) 공용 픽스처를
-# import할 수 없다 — test_service.py와 동일한 최소 FakeClock/FakeDetector/헬퍼를
-# 여기서도 독립적으로 정의한다 (test_service.py는 다른 에이전트 작업 중이라 수정 금지).
+# tests/는 패키지가 아니므로 test_service의 구현 세부에 결합하지 않도록
+# 최소 FakeClock/FakeDetector/헬퍼를 이 파일 안에 독립적으로 둔다.
 
 
 class FakeClock:
