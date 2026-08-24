@@ -312,6 +312,142 @@ class TestCrossZonePenalty:
         assert out[1] is z2
         assert any("cross_zone_penalty_gate_failed:keep_original" in n for n in notes)
 
+    def test_rejudge_gate_failure_suppresses_contaminated_partial(self, bar178):
+        """이슈 #27 ses-43/44: 이웃 존의 확정 상품이 PARTIAL 과금 상품을
+        오염시켰고 재판정도 COMPLETE가 아니면, 이미 무게 미검증인 원 과금을
+        보호하지 않고 오염 상품만 제거한다."""
+        class StubRouter:
+            def judge(self, ctx):
+                return JudgmentResult(JudgmentStatus.NO_DETECTION, reason="stub")
+
+        source = event(
+            "s", 4, 100.0, judged(bar178), -178.0,
+            candidates=[cand(4, conf=0.95, votes=20)], change_ts=(100.0,),
+        )
+        contaminated = event(
+            "s", 3, 101.0,
+            JudgmentResult(
+                JudgmentStatus.PARTIAL, (ProductCount(bar178, 1),), 0.55,
+                "freezer_vision_first_near_gate",
+            ),
+            -140.0, candidates=[cand(4, conf=0.91, votes=7)],
+            change_ts=(101.0,),
+        )
+        notes: list[str] = []
+        out = apply_cross_zone_penalty(
+            [source, contaminated], {3: FREEZER, 4: FREEZER}, (bar178,), CFG, notes,
+            router=StubRouter(),
+        )
+        assert out[0] is source
+        assert out[1].judgment.status is JudgmentStatus.NO_DETECTION
+        assert not out[1].judgment.products
+        assert out[1].judgment.reason == "cross_zone_contaminated_partial_suppressed"
+        assert any(
+            "cross_zone_penalty_gate_failed:suppress_contaminated_partial=P178"
+            in n for n in notes
+        )
+
+    def test_penalized_partial_winner_still_wins(self, bar178):
+        """PARTIAL 성공 경로 보존: soft 페널티 후에도 같은 상품이 다시
+        선택되면 인접 존의 실제 동일상품 취출일 수 있으므로 원 과금을 유지한다."""
+        source = event(
+            "s", 4, 100.0, judged(bar178), -178.0,
+            candidates=[cand(4, conf=0.95, votes=20)], change_ts=(100.0,),
+        )
+        target = event(
+            "s", 3, 101.0,
+            JudgmentResult(
+                JudgmentStatus.PARTIAL, (ProductCount(bar178, 1),), 0.55,
+                "freezer_vision_first_near_gate",
+            ),
+            -140.0, candidates=[cand(4, conf=0.91, votes=7)],
+            change_ts=(101.0,),
+        )
+        notes: list[str] = []
+        out = apply_cross_zone_penalty(
+            [source, target], {3: FREEZER, 4: FREEZER}, (bar178,), CFG, notes
+        )
+        assert out[1] is target
+        assert [(pc.product.product_id, pc.count) for pc in out[1].judgment.products] == [
+            ("P178", 1)
+        ]
+        assert any("cross_zone_penalty_gate_failed:keep_original" in n for n in notes)
+
+    def test_issue27_partial_contamination_is_not_billed_at_settlement(self):
+        """ses-43/44 형태 통합 회귀: c75 소스가 있는 상태에서 zone3의 c75
+        PARTIAL이 페널티 후 다른 PARTIAL로 바뀌면 원 c75 과금은 정산에서 빠진다."""
+        p75 = ActiveProduct("P75", "월드콘", 75, 70.0, 1400, 20)
+        p65 = ActiveProduct("P65", "오염대안", 65, 200.0, 1000, 20)
+        p69 = ActiveProduct("P69", "제로바", 69, 70.0, 2500, 20)
+        source = event(
+            "s", 4, 100.0, judged(p75), -70.0,
+            candidates=[cand(75, conf=0.95, votes=20)], change_ts=(100.0,),
+        )
+        contaminated = event(
+            "s", 3, 101.0,
+            JudgmentResult(
+                JudgmentStatus.PARTIAL, (ProductCount(p75, 2),), 0.55,
+                "freezer_vision_first_near_gate",
+            ),
+            -110.0,
+            candidates=[
+                cand(75, conf=0.914, votes=7),
+                cand(65, conf=0.797, votes=6),
+                cand(69, conf=0.147, votes=5),
+            ],
+            change_ts=(101.0,),
+        )
+        settler = CloseSettler(
+            default_profile=FREEZER,
+            cross_zone=CFG,
+            active_products_provider=lambda: (p75, p65, p69),
+        )
+        result = settler.settle(
+            "s", [source, contaminated], {3: FREEZER, 4: FREEZER}
+        )
+        by_zone = {z.zone: z for z in result.zones}
+        assert not by_zone[3].products
+        assert [(pc.product.product_id, pc.count) for pc in by_zone[4].products] == [
+            ("P75", 1)
+        ]
+        assert any(
+            "zone3:cross_zone_penalty_gate_failed:"
+            "suppress_contaminated_partial=P75" in n
+            for n in result.notes
+        )
+
+    def test_rejudge_gate_failure_keeps_uncontaminated_partial(self, bar170, bar178):
+        """PARTIAL 전역 차단 방지: 페널티 클래스가 후보에만 있고 실제 과금
+        상품과 다르면 기존 PARTIAL은 유지한다."""
+        class StubRouter:
+            def judge(self, ctx):
+                return JudgmentResult(JudgmentStatus.NO_DETECTION, reason="stub")
+
+        source = event(
+            "s", 1, 100.0, judged(bar178), -178.0,
+            candidates=[cand(4, conf=0.95, votes=20)], change_ts=(100.0,),
+        )
+        target = event(
+            "s", 2, 101.0,
+            JudgmentResult(
+                JudgmentStatus.PARTIAL, (ProductCount(bar170, 1),), 0.5,
+                "freezer_vision_first_near_gate",
+            ),
+            -170.0,
+            candidates=[cand(4, conf=0.9, votes=10), cand(3, conf=0.8, votes=8)],
+            change_ts=(101.0,),
+        )
+        notes: list[str] = []
+        out = apply_cross_zone_penalty(
+            [source, target], PROFILES, (bar170, bar178), CFG, notes,
+            router=StubRouter(),
+        )
+        assert out[1] is target
+        assert [(pc.product.product_id, pc.count) for pc in out[1].judgment.products] == [
+            ("P170", 1)
+        ]
+        assert any("cross_zone_penalty_gate_failed:keep_original" in n for n in notes)
+
     def test_penalized_winner_still_wins(self, bar170, bar178):
         # ⑤ soft 페널티: 페널티 후에도 오염 후보가 이기면 그대로 인정
         # (인접 존이 실제로 같은 상품을 파는 배치 — P(E) 상품이 진짜 정답).

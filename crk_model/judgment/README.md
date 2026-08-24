@@ -163,7 +163,7 @@ CRK-model-HG는 결제 정확도상 **"무게로 뒷받침된 count 격상" > "�
 | `combo_share` | 0.3 | ③ 조합 멤버 자격 | 배경 후보가 오염 잔차의 filler로 끼는 것(메로나 79g×3) |
 | `refit_share` | 0.1 | ④ 구제 자격 | 3표(top의 1.75%)짜리 후보가 "유일 적합"으로 COMPLETE 채택되던 사고 — vision이 사실상 못 본 후보는 구제 대상도 모호성 판단 대상도 아니다 |
 | `refit_arb_conf_floor` | 0.8 | ④ 복수 적합 중재의 절대 하한 | margin 우세만으로는 "덜 흐린 유령"이 이긴다 — conf 0.69가 0.35를 꺾고 오과금(정당 케이스는 0.82) |
-| `partial_min_confidence` | 0.18 | 9.2 / 9.4 청구 conf 하한 | 5표/청구 conf 0.157짜리 identity partial이 잔차 65g 오상품을 과금 |
+| `partial_min_confidence` | 0.18 | ② near-gate / 9.2 / 9.4 청구 conf 하한 | 5표/청구 conf 0.157짜리 identity partial과 이슈 #26 ses-25의 2표 동률/conf 0.0927 near-gate 오과금. near-gate 미달은 후보 쇼핑 없이 NO_DETECTION |
 | `partial_impossible_factor` | 3.0 | 9.4 무게 반증 거부권 (`unit_weight > 최대 removal 관측량 + tol×계수` 후보 배제) | 이슈 #22 ses-4 z3 — 다종 동시 취출의 교차존 오염 표로 득표 1위가 된 이웃 존 상품(단위무게 525g)이 Δ-80g 이벤트에 count=1 청구됐다(1개 취출조차 물리적으로 불가능). 9.3이 tol×3 창으로 이미 반증한 top을 9.4가 무검증으로 되살리지 않도록 같은 ×3 창을 쓴다. conf 하한과 달리 **다음 후보로 넘어간다** — 하한은 증거 강도 문턱이라 폴스루가 후보 쇼핑이 되지만, 이것은 물리적 배제(무게의 거부권)라 남은 후보 중 증거 서열대로 고르는 것이 맞다 |
 | `strict_count_occam` | True | `StrictWeightMatcher._occam_filter` (매처 소비 전략 전부) | 이슈 #23 0806 3-1 — 잔차 동률(0)에서 단백질바 55×5가 오로나민×1을 conf 차이만으로 꺾어 54x6 오과금. 무게가 역산한 단일 종 ×N 가설은 n=1 적합을 엄격히 더 잘 설명할 때만 자격 (freezer `count_occam`의 냉장 strict판) |
 
@@ -246,13 +246,13 @@ confidence로 최종 선택한다(냉장 기본 경로).
 
 ## 6. 테스트
 
-`tests/test_judgment.py` 79건. 픽스처(`cola`/`water`/`bar170`/`bar178`, `cand()`)는
+`tests/test_judgment.py` 81건. 픽스처(`cola`/`water`/`bar170`/`bar178`, `cand()`)는
 `tests/conftest.py`.
 
 | 테스트 클래스 | 건수 | 무엇을 고정하는가 |
 |---|---|---|
 | `TestSegmentBackedCombo0730Case24` | 9 | ①⁺ 세그먼트 근거 조합 도전 — 2-4 재구성(도전 성립), ⓑⓒⓓⓔⓕⓖ 각 가드의 단독 봉쇄(동시 취출·완벽 설명·부풀리기 등), 기본 off no-op |
-| `TestFreezer` | 9 | I3 게이트로 후보 합산 금지(178g 사건), 근접 실패의 정체성·개수 보존 PARTIAL, 3종 조합과 "적은 종류 우선", 유일-적합 구제, refit 중재의 성립/절대 하한/모호 유지, 모호 시 strict·relaxed로의 **체인 누수 없음**(텔레메트리 0 확인) |
+| `TestFreezer` | 11 | I3 게이트로 후보 합산 금지(178g 사건), 근접 실패의 정체성·개수 보존 PARTIAL, 저신뢰 near-gate의 NO_DETECTION 종결과 하한 롤백, 3종 조합과 "적은 종류 우선", 유일-적합 구제, refit 중재의 성립/절대 하한/모호 유지, 모호 시 strict·relaxed로의 **체인 누수 없음**(텔레메트리 0 확인) |
 | `TestGuards` | 8 | 저무게 게이트 사유 코드, 동일 무게 충돌의 conf 우선, vision_only count=1·conf×0.7, weight_only 단일 매치·다품목 조합 금지·모호 거부, 텔레메트리 카운트 |
 | `TestIssue16WeightArbitration` | 7 | n-스케일 게이트로 우연 적합 방어, conf_override+margin 중재, 격차 부족 시 폴스루, 천장 포화 발동/비발동(양쪽 천장), margin 비활성 센티널, 노브 롤백으로 구 선착 동작 재현 |
 | `TestCountOccam0730Scenario` | 7 | ① 개수 오컴 — 0730 실패 서명(잭슨빌1→라라스윗2 등) 복원, n=1 적합 부재 시 무발동(진짜 다량 취출 보존), ④ 미적용, `count_occam=False` 롤백 |

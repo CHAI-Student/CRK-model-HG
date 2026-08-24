@@ -260,7 +260,7 @@ dataclass 기본값과 `from_env()` 기본값이 일치함을 확인한 값입�
 | `MODEL__JUDGMENT__COUNT_UNIT_SLACK` | `5.0` | 개수당 게이트 가산(g) — `gate_n(n) = gate + slack×(n−1)`. DB unit_weight 편차·접촉 오염이 개수에 비례 누적되는 것을 흡수 (실사고: 베이글 5개 잔차 32g > flat 15g). `0`=flat(구 동작). **`analyze-sessions`의 개당 잔차 제안값이 이 노브의 보정 입력** |
 | `MODEL__JUDGMENT__CONF_OVERRIDE` | `0.9` | `SINGLE_SHARE` 미달이어도 conf가 이 값 이상(+`REFIT_SHARE` 득표)이면 적합 자격 — 진열 오염이 득표 순위를 왜곡해도 max-conf는 독립 신호이기 때문 (실사고: conf 1.0 진짜 상품 19표 vs 오염 63표). `2.0`=비활성 |
 | `MODEL__JUDGMENT__CONF_MARGIN` | `0.15` | 복수 적합 중재에서 conf가 득표 서열을 뒤집는 최소 격차. 발동 시 reason에 `…single_arbitrated`로 남습니다. `2.0`=비활성 |
-| `MODEL__JUDGMENT__PARTIAL_MIN_CONFIDENCE` | `0.18` | 무게 미검증 `count=1` partial 청구의 conf 하한 (원본 `multi_kind_min_confidence` 동형). 실기 ses-3: 5표/conf 0.157 청구가 잔차 65g 오상품을 과금 — 저증거 청구 차단. `0`=비활성 |
+| `MODEL__JUDGMENT__PARTIAL_MIN_CONFIDENCE` | `0.18` | 무게 미검증 partial 청구의 conf 하한. freezer near-gate는 `top_conf×0.6`에 적용하며 미달 시 후단 우회 없이 NO_DETECTION(이슈 #26 ses-25: 2표 동률/conf 0.0927 오과금). 9.2·9.4에도 적용. `0`=비활성 |
 | `MODEL__JUDGMENT__PARTIAL_IMPOSSIBLE_FACTOR` | `3.0` | `relaxed_partial`(냉장 최종 폴백)의 **무게 반증 거부권** — 단위무게가 최대 removal 관측량 + tolerance×이 계수를 넘는 후보는 count=1 청구 부적격, 다음 득표 순위로. 이슈 #22 ses-4: 교차존 오염으로 득표 1위가 된 525g 상품이 Δ-80g에 청구(1개 취출조차 물리적으로 불가능). `0`=비활성(구 동작) |
 | `MODEL__JUDGMENT__REFIT_ARB_CONF_FLOOR` | `0.8` | refit 복수 적합 중재의 **절대** conf 하한. 실기 ses-1: 0.69 유령이 margin 우세만으로 오과금 — 승자는 자체로 선명해야 합니다. `2.0`=중재 비활성(유일-적합만) |
 | `MODEL__JUDGMENT__COUNT_OCCAM` | `1` | ① 개수 오컴 — n=1 적합이 있으면 그보다 잘 맞지 않는 n≥2 적합을 실격. 저중량 상품이 n을 키워 아무 중량대나 덮는 "만능 filler" 차단 (0730 시나리오 실패 6/7건: 잭슨빌 155×1 → 라라스윗 70×2). `0`=구 동작 |

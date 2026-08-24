@@ -101,7 +101,9 @@ def default_pipeline(
     matcher = StrictWeightMatcher(count_occam=strict_count_occam)
     return [
         VisionOnlyStrategy(),                                  # 0
-        freezer_strategy or FreezerVisionFirstStrategy(),      # 1 — 센서 물리 (필연적 순서)
+        freezer_strategy or FreezerVisionFirstStrategy(
+            partial_min_confidence=partial_min_confidence
+        ),                                                     # 1 — 센서 물리 (필연적 순서)
         AugmentStageWeightGateStage(),                         # 2 — Stage (입력 변환기)
         SegmentWeightMatchingStrategy(matcher),                # 3 — 시계열 정보 보존 (필연적 순서)
         StageCountCombinationStrategy(matcher, require_no_vision=True),  # 3.5 — 후보없음 체인 SC1

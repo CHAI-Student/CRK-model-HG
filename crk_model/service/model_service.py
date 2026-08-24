@@ -197,6 +197,9 @@ class ModelService:
                     segment_combo_min_segments=(
                         self.settings.judgment_segment_combo_min_segments
                     ),
+                    partial_min_confidence=(
+                        self.settings.judgment_partial_min_confidence
+                    ),
                 ),
                 partial_min_confidence=self.settings.judgment_partial_min_confidence,
                 partial_impossible_factor=(

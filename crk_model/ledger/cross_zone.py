@@ -27,7 +27,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 
 from crk_model.core.profiles import REFRIGERATOR, SensorProfile
-from crk_model.core.types import ActiveProduct, JudgmentStatus
+from crk_model.core.types import ActiveProduct, JudgmentResult, JudgmentStatus
 from crk_model.judgment.interfaces import JudgmentContext
 from crk_model.judgment.router import JudgmentRouter
 from crk_model.ledger.events import TriggerEvent
@@ -409,8 +409,50 @@ def _repass_event(
     )
     # ⑥ 게이트: 재판정이 COMPLETE(라우터가 I6로 tolerance/count gate 통과를
     # 보장)가 아니면 원 판정 유지 — 페널티로 후보 전멸 → NO_DETECTION 전락
-    # 방지 (R2).
+    # 방지 (R2). 단, 원 판정이 PARTIAL이고 실제 과금 상품이 오염 클래스로
+    # 확인된 경우에는 이 전제가 성립하지 않는다. 무게 미검증 오염 과금을
+    # 보호하는 대신 오염 상품만 제거한다 (COMPLETE 보호 정책은 무변경).
     if rejudged.status is not JudgmentStatus.COMPLETE or not rejudged.products:
+        contaminated = tuple(
+            pc for pc in e.judgment.products if pc.product.class_id in penalized
+        )
+        # 페널티 후에도 같은 상품 PARTIAL이 다시 이기면 인접 존에서 실제로
+        # 같은 상품을 취출했을 가능성이 남는다 — soft 페널티의 "이기면 인정"
+        # 원칙에 따라 보존. 후보가 사라지거나 다른 PARTIAL로 바뀐 경우만 원
+        # 오염 과금을 제거한다.
+        same_partial_survived = bool(rejudged.products) and _same_products(
+            rejudged, e.judgment
+        )
+        if (
+            e.judgment.status is JudgmentStatus.PARTIAL
+            and contaminated
+            and not same_partial_survived
+        ):
+            remaining = tuple(
+                pc
+                for pc in e.judgment.products
+                if pc.product.class_id not in penalized
+            )
+            suppressed = ",".join(
+                pc.product.product_id for pc in contaminated
+            )
+            notes.append(
+                f"zone{e.zone}:cross_zone_penalty_gate_failed:"
+                f"suppress_contaminated_partial={suppressed}:source={src_part}"
+            )
+            if remaining:
+                judgment = replace(
+                    e.judgment,
+                    products=remaining,
+                    reason=e.judgment.reason + "+cross_zone_contamination_pruned",
+                )
+            else:
+                judgment = JudgmentResult(
+                    JudgmentStatus.NO_DETECTION,
+                    confidence=0.0,
+                    reason="cross_zone_contaminated_partial_suppressed",
+                )
+            return replace(e, judgment=judgment)
         notes.append(
             f"zone{e.zone}:cross_zone_penalty_gate_failed:keep_original:source={src_part}"
         )

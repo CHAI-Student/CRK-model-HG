@@ -10,13 +10,13 @@
 
 기능 구현과 자동 검증은 완료 상태입니다. 냉동 실기에서는 문 열림부터 결제
 페이로드 전달까지 E2E가 통과했고, 냉장 실기는 지각 계층 fitting이 진행 중입니다.
-자동 검증은 **444건 전부 통과**(2026-08-20)이며 불변식 I1~I17을 전건 커버합니다.
+자동 검증은 **450건 전부 통과**(2026-08-24)이며 불변식 I1~I17을 전건 커버합니다.
 남은 위험은 기능 결함이 아니라 **기기 실측이 필요한 항목**에 몰려 있습니다 —
 냉동 지연(13.7s) > CLOSE 상한 타임아웃(10s) 충돌, T2 레버 실측 미확인, 24h+ soak 미수행.
 
 | 영역 | 상태 | 근거 |
 |---|---|---|
-| 도메인 코어 (판정·정산·배리어) | ✅ 구현 완료 | `crk_model/` 9패키지 약 10,800행, 테스트 444건 통과 |
+| 도메인 코어 (판정·정산·배리어) | ✅ 구현 완료 | `crk_model/` 9패키지 약 10,800행, 테스트 450건 통과 |
 | 외부 계약 (HTTP 3종) | ✅ 확정 | 레거시 wire 형식과 동형, `tests/test_wire_contract.py`·`test_adapters.py` |
 | 불변식 I1~I17 | ✅ 전건 커버 (I9 제외) | 본 문서 §4 — I9는 G1 인수 항목 |
 | 냉동 실기 E2E | ✅ 통과 (2026-07-09 개통) | 이슈 #5·#6·#7·#8 전 과정, `devdoc/fix_logs.md` |
@@ -182,17 +182,17 @@ flowchart TD
 
 ### 3.1 실행 결과
 
-`.venv/bin/python -m pytest tests -q` → **444 passed** (2026-08-20, 실패·에러 0건).
+`.venv/bin/python -m pytest tests -q` → **450 passed** (2026-08-24, 실패·에러 0건).
 
 | 테스트 파일 | 건수 | 주 검증 대상 |
 |---|---|---|
-| `test_judgment.py` | 79 | 라우터 순위 보존, I6 전건 적용, 냉동 vision-first 단계별 중재, strict 탐색 공간(I5·I12), 개수 오컴·세그먼트 조합 도전(0731), relaxed_partial 무게 반증 거부권(이슈 #22), strict 개수 오컴(이슈 #23) |
+| `test_judgment.py` | 81 | 라우터 순위 보존, I6 전건 적용, 냉동 vision-first 단계별 중재와 저신뢰 near-gate 차단, strict 탐색 공간(I5·I12), 개수 오컴·세그먼트 조합 도전(0731), relaxed_partial 무게 반증 거부권(이슈 #22), strict 개수 오컴(이슈 #23) |
 | `test_perception.py` | 60 | 투표 결합 산식, 진입 컷, 필터 체인 4단, 모션 변위 몰수, 조기 종료 한정(I15)·전 재고 유일해 게이트(이슈 #22) |
 | `test_service.py` | 44 | 파이프라인 7단계, 멀티트레이 2-pass 재판정, 스냅샷 fail-closed(I2), 래치(I16) 배선, 조기 종료 기본 off |
 | `test_lifecycle.py` | 33 | OPEN→trigger→CLOSE→결제 페이로드 E2E, cabinet_type 프로파일 E2E, 무한 성장 방지 |
 | `test_ledger.py` | 28 | 정산 4층, 냉동 재solve 게이트(I3), 콤보 자격 가드, 멱등(I11), 음수 차단(I14) |
 | `test_analyze_cli.py` | 22 | 리포트 집계 정오, `--since` 프리필터, 단건 조회, 구 스키마 호환 |
-| `test_cross_zone.py` | 24 | 교차존 페널티 창·self-fit 자격·상호 소멸 방지, PARTIAL 원 판정의 ④ 우회(이슈 #22), 무겹침 침묵 진단(이슈 #23) |
+| `test_cross_zone.py` | 28 | 교차존 페널티 창·self-fit 자격·상호 소멸 방지, PARTIAL 원 판정의 ④ 우회(이슈 #22), 무겹침 침묵 진단(이슈 #23), 오염 PARTIAL 선택 제거와 정상 PARTIAL 보존(이슈 #27) |
 | `test_t2_batch.py` | 19 | 배치 vs 비배치 판정 동등성, 배치 중간 조기 종료, 프리페치 시맨틱 |
 | `test_session_archive.py` | 18 | 아카이브 직렬화·정답 라벨 기입·보존기간 |
 | `test_ingest.py` | 18 | 로드셀 구간화, BOCPD 계약 동형, 멱등 TTL(I7) |
@@ -205,7 +205,7 @@ flowchart TD
 | `test_wire_contract.py` | 6 | HTTP 요청·응답 필드 계약 |
 | `test_adapters.py` | 4 | FastAPI 바인딩, 워커 스레드 배선(I7·I17) |
 | `test_ops_logging.py` | 4 | `[OPS][CLOSE]` 구조화 로그, 중복 로그 억제 |
-| **합계** | **444** | |
+| **합계** | **450** | |
 
 ### 3.2 무엇을 커버하는가
 
@@ -447,7 +447,7 @@ C(`_batch4` + `BATCH_SIZE=4`) → D(+`PREFETCH=4`). 각 단계에서 재야 하�
 
 | 게이트 | 상태 | 내용 | 남은 조건 |
 |---|---|---|---|
-| **G0** 정적/단위 | ✅ **444 passed** (2026-08-20) | 불변식 I1~I17 + E2E + 필터·게이트·정산 + CI(ruff + pytest) | 없음 — 유지 관리 대상 |
+| **G0** 정적/단위 | ✅ **450 passed** (2026-08-24) | 불변식 I1~I17 + E2E + 필터·게이트·정산 + CI(ruff + pytest) | 없음 — 유지 관리 대상 |
 | **G1** 판정 등가성 | ❌ 미인수 | 원본 924 시나리오 계약 인수 (I9) | 현장 AVI 코퍼스(P1) + 세션 아카이브 replay(P2) |
 | **G2** 게이팅 검증 | ⏳ 인프라 준비 완료 | 현장 AVI 코퍼스 전체 파이프라인 재실행 diff | `SAVE_DETECTIONS` + 아카이브 + AVI 보존 + `render-session`으로 실행 가능해짐. 재생 시 `MODEL__VIDEO__DECODER=ffmpeg` 고정 필수(opencv 경로는 게이트 결정이 조용히 달라짐) |
 | **G2.5** 정산 등가성 | ⏳ 훅 완성 | `EventJournal.replay`로 저널 재구성 → 동일 정산 | 실기 아카이브 replay 실행(P2) |
@@ -457,7 +457,7 @@ C(`_batch4` + `BATCH_SIZE=4`) → D(+`PREFETCH=4`). 각 단계에서 재야 하�
 G0 대비 갱신 사항: 2026-07-30에 미채택 shadow 기제 5종을 코드째 삭제하면서
 406건이 되었고(삭제 내역은 [07번 문서](07-rejected-and-retired.md)), 이후
 0731 판정 배치(개수 오컴·세그먼트 조합 도전)와 이슈 #22 수정이 더해져 현재
-**444건**입니다.
+**450건**입니다.
 
 ---
 
