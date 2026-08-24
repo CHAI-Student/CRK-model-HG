@@ -115,6 +115,46 @@ class TestFreezer:
         assert result.status is JudgmentStatus.PARTIAL
         assert [(pc.product.class_id, pc.count) for pc in result.products] == [(1, 2)]
 
+    def test_low_conf_near_gate_stops_without_fallback_billing(self):
+        """이슈 #26 ses-25: 2표 동률의 저신뢰 top이 완화 게이트 끝자락에
+        걸렸다는 이유만으로 과금되면 안 된다. 하한 실패 뒤 9.2/9.3으로
+        폴스루하면 같은 top이 다시 과금되므로 명시적 NO_DETECTION으로 끝낸다."""
+        p70 = ActiveProduct(
+            "P70", "브라보콘", class_id=70, unit_weight=75.0,
+            unit_price=2000, stock_qty=20,
+        )
+        p69 = ActiveProduct(
+            "P69", "제로바", class_id=69, unit_weight=70.0,
+            unit_price=2500, stock_qty=20,
+        )
+        result = JudgmentRouter().judge(ctx(
+            -105.0, [p70, p69],
+            [cand(70, conf=0.154, votes=2), cand(69, conf=0.109, votes=2)],
+            profile=FREEZER,
+        ))
+        assert result.strategy == "freezer_vision_first"
+        assert result.status is JudgmentStatus.NO_DETECTION
+        assert result.reason == "freezer_vision_first_near_gate_low_conf"
+        assert not result.products
+
+    def test_low_conf_near_gate_floor_can_be_rolled_back(self):
+        p70 = ActiveProduct(
+            "P70", "브라보콘", class_id=70, unit_weight=75.0,
+            unit_price=2000, stock_qty=20,
+        )
+        p69 = ActiveProduct(
+            "P69", "제로바", class_id=69, unit_weight=70.0,
+            unit_price=2500, stock_qty=20,
+        )
+        result = JudgmentRouter(default_pipeline(partial_min_confidence=0.0)).judge(ctx(
+            -105.0, [p70, p69],
+            [cand(70, conf=0.154, votes=2), cand(69, conf=0.109, votes=2)],
+            profile=FREEZER,
+        ))
+        assert result.status is JudgmentStatus.PARTIAL
+        assert result.reason == "freezer_vision_first_near_gate"
+        assert [(pc.product.class_id, pc.count) for pc in result.products] == [(70, 1)]
+
     # 다품종 조합 테스트용 커스텀 무게 — freezer 게이트(±15g)에서 1·2종
     # 조합으로는 우연 설명이 불가능하도록 서로 소인 큰 무게를 쓴다.
     @staticmethod

@@ -1,7 +1,7 @@
 # 테스트 가이드
 
 이 디렉터리는 CRK-model-HG의 판정·정산 불변식, 장치 연동 계약, 운영 진단 도구를
-검증한다. 2026-08-20 기준 `master@be4e372`에서 **444건**이 통과한다.
+검증한다. 2026-08-24 기준 P1 작업 트리에서 **450건**이 통과한다.
 
 ## 삭제 가능성 점검 결과
 
@@ -56,13 +56,13 @@ CI는 FastAPI, NumPy, ffmpeg까지 설치해 환경 의존 테스트가 빠지�
 |---|---:|---|---|
 | `test_adapters.py` | 4 | 도메인 서비스와 FastAPI/프레임 어댑터의 결합 경계를 검증 | 게이트용 축소 뷰와 검출용 원본 프레임 분리, OPEN→trigger→CLOSE HTTP 흐름, health 배리어, 중복 트리거 응답. FastAPI 연동 회귀를 막으므로 유지한다. |
 | `test_analyze_cli.py` | 22 | 운영 아카이브를 배포 후 분석하는 `analyze-sessions`의 정본 동작을 고정 | 청구 정오, 분위수, 개당 잔차, 트랙·held·ghost 계측, 단건/기간 조회, 손상 파일 오류와 구 스키마 관용 파싱. 과거 운영 데이터 호환 때문에 유지한다. |
-| `test_cross_zone.py` | 24 | 다른 존 영상이 섞여 발생한 오과금을 CLOSE 2차 패스에서 교정 | 시간 앵커, 오염 창, 상호 강등·self-fit·무게 가드, PARTIAL 재판정, 저널 왕복과 무겹침 진단. 승격된 기본 ON 기제이므로 핵심 회귀 테스트다. |
+| `test_cross_zone.py` | 28 | 다른 존 영상이 섞여 발생한 오과금을 CLOSE 2차 패스에서 교정 | 시간 앵커, 오염 창, 상호 강등·self-fit·무게 가드, PARTIAL 재판정, 오염 PARTIAL 선택 제거와 정상 동일상품 PARTIAL 보존, 저널 왕복과 무겹침 진단. 승격된 기본 ON 기제이므로 핵심 회귀 테스트다. |
 | `test_frames.py` | 7 | 추론량을 줄이는 모션 게이트가 손 존재 시 증거를 버리지 않도록 검증 | 첫 프레임, 정지/움직임, 손 래치, exit 확인, keepalive, 직전 통과 프레임 기준 비교. 프레임 누락이 판정 누락으로 직결돼 유지한다. |
 | `test_frames_streaming.py` | 18 | 긴 AVI의 메모리 폭증 방지와 ffmpeg 스트리밍 최적화를 검증 | hwaccel 프로브와 CPU 폴백, lazy iterator와 자원 해제, NumPy/순수 Python 차분 등가성, generator 1회 소비, 게이트 뷰 순서. `ffmpeg`/`numpy` 환경 의존이다. |
 | `test_gateway.py` | 16 | OPEN/CLOSE 상태기계와 결제 확정 시점을 보호 | 인과 배리어, 큐·로드셀·seq 조건, close grace/timeout, expected trigger 워터마크, 확정 1회 전달, 새 세션 리셋, 결제 타입·confidence. 외부 결제 경계라 중복처럼 보여도 삭제하지 않는다. |
 | `test_ghost_ledger.py` | 15 | 여러 존에 나타난 무게 미지지 클래스의 ghost shadow를 검증 | ghost 성립 조건, 영상/시각 기반 에피소드 병합, 표 하한, off/shadow/active 동작과 정산기 결합. 승격 대기 중인 현행 계측이므로 유지한다. |
 | `test_ingest.py` | 18 | 카메라 트리거 멱등성과 로드셀 시계열 해석 계약을 검증 | TTL 중복 제거, plateau 분석, 채널별 변화·안정화, 현재 primary인 BOCPD의 급변·creep·반품·평탄 시계열. 장치 입력의 첫 도메인 경계다. |
-| `test_judgment.py` | 79 | 판정 전략 우선순위와 냉장/냉동 안전 불변식을 세밀하게 고정 | strict/relaxed 탐색, 재고·품절, 전량 설명, freezer vision-first, refit, segment/count 조합, PARTIAL 거부권, 실기 사고 재현 및 롤백 노브. 가장 큰 순수 도메인 회귀 스위트다. |
+| `test_judgment.py` | 81 | 판정 전략 우선순위와 냉장/냉동 안전 불변식을 세밀하게 고정 | strict/relaxed 탐색, 재고·품절, 전량 설명, freezer vision-first, 저신뢰 near-gate 차단·롤백, refit, segment/count 조합, PARTIAL 거부권, 실기 사고 재현 및 롤백 노브. 가장 큰 순수 도메인 회귀 스위트다. |
 | `test_ledger.py` | 28 | 트리거별 판정을 세션 단위 청구로 바꾸는 정산기를 검증 | 배리어, 멱등 확정, 반품·교차존·net delta, error policy, 냉동 재해석, 비전 조합 가드, 잠정 집계의 결제 차단. 금액 확정 안전성 때문에 유지한다. |
 | `test_lifecycle.py` | 33 | 장시간 운영에서 상태·파일·메모리가 무한히 자라지 않도록 검증 | 결과 deque 상한, 세션 prune, 저널 일자 회전·보존·replay, 동시 poll/drain, cabinet/profile 및 env 설정 배선. 24h soak 전 자동 방어선이다. |
 | `test_ops_logging.py` | 4 | 현장 장애 분석에 필요한 CLOSE 구조화 로그를 보장 | 정상·오류 세션 로그, 재폴링 중복 억제, 존별 무게·트리거 수·notes 포함. 기능 결과가 같아도 운영 관측성이 사라지는 회귀를 막는다. |

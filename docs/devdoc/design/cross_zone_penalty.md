@@ -249,13 +249,15 @@ E'가 아직 무판정/저신뢰(`confidence < θ`)면 **그 상품은 소스에
 > 유지 — 후보를 목록에서 빼지 않는다.
 
 **⑥ 게이트** — 재판정 결과가 count gate·tolerance를 통과하지 못하면
-원 판정 유지. "보정하려다 더 나빠지는" 경로를 차단 (freezer close
-re-solve의 I3 원칙과 동일한 태도).
+COMPLETE 원 판정과 오염과 무관한 PARTIAL은 유지한다. 실제 과금된 PARTIAL
+상품이 페널티 대상 오염 클래스이고, 페널티 후 동일 PARTIAL이 생존하지 못한
+경우에만 해당 상품을 제거한다(이슈 #27 ses-43/44). 동일상품 PARTIAL이 다시
+이기면 실제 동일상품 취출 가능성이 있으므로 soft 페널티 원칙대로 유지한다.
 > 구현: 재판정은 기존 `JudgmentRouter`를 그대로 재사용하므로 통과 판정도
 > 라우터에 위임된다 — 라우터가 I6(`enforce_full_delta_match`)로 전량 설명을
 > 강제하니 **재판정 결과 `status == COMPLETE`가 곧 게이트 통과**다.
-> COMPLETE가 아니면(NO_DETECTION/PARTIAL 강등 포함) 원 판정 유지 +
-> `cross_zone_penalty_gate_failed` note. 재판정 결과가 원 판정과 같은
+> COMPLETE가 아니면 `cross_zone_penalty_gate_failed` note를 남기고 위 정책에
+> 따라 유지 또는 `suppress_contaminated_partial` 처리한다. 재판정 결과가 원 판정과 같은
 > 상품·수량이면 교체·note 없이 그대로 둔다 (⑤의 "이기면 인정").
 
 ### 4.3 원안과의 차이 정리

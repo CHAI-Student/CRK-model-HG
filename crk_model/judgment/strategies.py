@@ -141,8 +141,10 @@ class FreezerVisionFirstStrategy:
     ② top 근접 실패 (gate_n < 잔차 ≤ near_factor×gate_n): 접촉 하중 오염이
        실측 8~18g(segment_retry_gap 주석) — "delta가 오염됐다"가 "정체성이
        틀렸다"보다 우세. top 정체성·개수를 보존한 PARTIAL 반환
-       (freezer_vision_first_near_gate, conf×0.6). 이슈 #15의 −370g 케이스는
-       gate_n(2)=20 ≥ 잔차 18이라 이제 ①에서 COMPLETE로 격상된다 (과금 동일).
+       (freezer_vision_first_near_gate, conf×0.6). 단, 강등 후 confidence가
+       partial_min_confidence 미만이면 후보 쇼핑 없이 NO_DETECTION으로 종료한다.
+       이슈 #15의 −370g 케이스는 gate_n(2)=20 ≥ 잔차 18이라 이제 ①에서
+       COMPLETE로 격상된다 (과금 동일).
     ③ 조합: **top 정체성 포함 필수**(최선 증거는 설명에 반드시 참여) +
        멤버는 combo_share(기본 30%) 이상 득표 — 배경 후보가 오염 잔차의
        filler로 끼어드는 것(이슈 #10 메로나 79×3)을 차단.
@@ -200,6 +202,10 @@ class FreezerVisionFirstStrategy:
         # **기본 off** — 레포 관행(신규 판정 기제는 기본값 = 기존 동작).
         segment_combo_min_segments: int = 2,
         # 도전 자격의 removal 세그먼트 최소 수 (ⓒ). 올리면 더 보수적.
+        partial_min_confidence: float = 0.18,
+        # ② near-gate의 무게 미검증 PARTIAL 청구 하한. 9.2/9.4와 같은
+        # MODEL__JUDGMENT__PARTIAL_MIN_CONFIDENCE를 공유한다. 하한 미달은
+        # 다른 후보/후단 전략으로 폴스루하지 않고 NO_DETECTION (후보 쇼핑 금지).
     ):
         self._max_kinds = max_kinds
         self._identity_pool = identity_pool
@@ -215,6 +221,7 @@ class FreezerVisionFirstStrategy:
         self._count_occam = count_occam
         self._segment_combo = segment_combo
         self._segment_combo_min_segments = segment_combo_min_segments
+        self._partial_min_conf = partial_min_confidence
 
     @staticmethod
     def _occam_filter(
@@ -359,10 +366,20 @@ class FreezerVisionFirstStrategy:
         # ② top 근접 실패 → 정체성 교체 대신 오염 가정, 개수 보존 PARTIAL
         n_top, r_top = fit(top_p)
         if r_top <= self._near_factor * gate_n(n_top):
+            confidence = top_c.confidence * 0.6
+            if confidence < self._partial_min_conf:
+                # 저증거 top을 버린 뒤 다른 후보를 고르면 conf 하한이 정체성을
+                # 선택하는 후보 쇼핑이 된다. 후단 9.2/9.3 우회도 막기 위해
+                # 명시적 NO_DETECTION으로 이 이벤트의 판정을 종료한다.
+                return JudgmentResult(
+                    JudgmentStatus.NO_DETECTION,
+                    confidence=confidence,
+                    reason="freezer_vision_first_near_gate_low_conf",
+                )
             return JudgmentResult(
                 JudgmentStatus.PARTIAL,
                 (ProductCount(top_p, n_top),),
-                confidence=top_c.confidence * 0.6,
+                confidence=confidence,
                 reason="freezer_vision_first_near_gate",
             )
 
