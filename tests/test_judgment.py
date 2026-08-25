@@ -319,6 +319,23 @@ class TestSegmentMatching:
         )
         assert result.strategy == "strict"
 
+    def test_strong_repeated_candidate_beats_noisy_multi_count(self):
+        porridge = ActiveProduct(
+            "P53", "소고기죽", class_id=53, unit_weight=312.0,
+            unit_price=1200, stock_qty=20,
+        )
+        bag = ActiveProduct(
+            "P43", "꽃게랑", class_id=43, unit_weight=79.0,
+            unit_price=500, stock_qty=20,
+        )
+        result = JudgmentRouter().judge(ctx(
+            -640.0,
+            [porridge, bag],
+            [cand(53, conf=1.0, votes=78), cand(43, conf=0.847, votes=6)],
+            segments=[WeightSegment(0, 1, -320.0), WeightSegment(1, 2, -320.0)],
+        ))
+        assert [(pc.product.class_id, pc.count) for pc in result.products] == [(53, 2)]
+
 
 class TestGuards:
     def test_min_weight_gate(self, cola):
@@ -1100,6 +1117,21 @@ class TestStrictCountOccam:
         result = JudgmentRouter().judge(ctx(-275.0, [self.ORONAMIN, self.BAR], self.CANDS))
         assert result.strategy == "strict"
         assert [(pc.product.class_id, pc.count) for pc in result.products] == [(23, 1)]
+
+    def test_near_equal_multi_count_yields_to_single(self):
+        porridge = ActiveProduct(
+            "P53", "소고기죽", class_id=53, unit_weight=312.0,
+            unit_price=1200, stock_qty=20,
+        )
+        bag = ActiveProduct(
+            "P43", "꽃게랑", class_id=43, unit_weight=79.0,
+            unit_price=500, stock_qty=20,
+        )
+        result = JudgmentRouter().judge(ctx(
+            -315.0, [porridge, bag],
+            [cand(43, conf=1.0, votes=11), cand(53, conf=1.0, votes=5)],
+        ))
+        assert [(pc.product.class_id, pc.count) for pc in result.products] == [(53, 1)]
 
     def test_rollback_restores_old_behavior(self):
         # MODEL__JUDGMENT__STRICT_COUNT_OCCAM=0 → conf 우세 ×5가 종전대로 승리

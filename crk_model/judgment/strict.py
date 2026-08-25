@@ -92,13 +92,13 @@ class StrictWeightMatcher:
                 )
             )
         if self.count_occam:
-            combos = self._occam_filter(combos)
+            combos = self._occam_filter(combos, tolerance)
         # combination_sort_key: -match_score → 종류 수 → 오차
         combos.sort(key=lambda c: (-c.match_score, len(c.products), c.weight_error))
         return combos
 
     @staticmethod
-    def _occam_filter(combos: list[Combination]) -> list[Combination]:
+    def _occam_filter(combos: list[Combination], tolerance: float) -> list[Combination]:
         """단일 종 ×N 개수 오컴 (모듈 docstring): n=1 적합의 최소 잔차보다
         엄격히 더 잘 맞지 않는 단일 종 n≥2 적합을 실격. n=1 적합이 없으면
         (진짜 다량 취출) 무발동 — freezer `_occam_filter`와 동일 규칙."""
@@ -112,12 +112,13 @@ class StrictWeightMatcher:
         )
         if best_single is None:
             return combos
+        multi_count_margin = tolerance * 0.5
         return [
             c
             for c in combos
             if len(c.products) > 1
             or c.products[0].count == 1
-            or c.weight_error < best_single
+            or c.weight_error + multi_count_margin < best_single
         ]
 
     def best(self, *args, **kwargs) -> Combination | None:

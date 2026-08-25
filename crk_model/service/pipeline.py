@@ -463,20 +463,25 @@ class TriggerPipeline:
     ) -> list[tuple[ChannelWeightEvent, JudgmentResult]]:
         """동일 무게 충돌의 중복 COMPLETE만 남은 후보로 재판정한다."""
         complete_by_class: dict[int, list[int]] = {}
+        guard_by_class: dict[int, list[int]] = {}
         for index, (_, judgment) in enumerate(results):
-            if (
-                judgment.status is JudgmentStatus.COMPLETE
-                and judgment.reason == "same_weight_collision_guard"
-            ):
-                for product_count in judgment.products:
-                    complete_by_class.setdefault(product_count.product.class_id, []).append(index)
+            if judgment.status is not JudgmentStatus.COMPLETE:
+                continue
+            for product_count in judgment.products:
+                class_id = product_count.product.class_id
+                complete_by_class.setdefault(class_id, []).append(index)
+                if judgment.reason == "same_weight_collision_guard":
+                    guard_by_class.setdefault(class_id, []).append(index)
 
-        duplicate_indexes = {
-            index
-            for indexes in complete_by_class.values()
-            if len(indexes) > 1
-            for index in indexes[1:]
-        }
+        duplicate_indexes: set[int] = set()
+        for class_id, guard_indexes in guard_by_class.items():
+            indexes = complete_by_class[class_id]
+            if len(indexes) < 2:
+                continue
+            if any(index not in guard_indexes for index in indexes):
+                duplicate_indexes.update(guard_indexes)
+            else:
+                duplicate_indexes.update(guard_indexes[1:])
         if not duplicate_indexes:
             return results
 
@@ -486,11 +491,9 @@ class TriggerPipeline:
             if index not in duplicate_indexes
             for product_count in judgment.products
         }
-        for indexes in complete_by_class.values():
-            consumed.update(
-                product_count.product.class_id
-                for product_count in results[indexes[0]][1].products
-            )
+        for class_id, indexes in complete_by_class.items():
+            if any(index not in duplicate_indexes for index in indexes):
+                consumed.add(class_id)
         out = list(results)
         for index in sorted(duplicate_indexes):
             ev, judgment = results[index]

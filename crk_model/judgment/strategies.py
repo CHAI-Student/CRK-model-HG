@@ -617,6 +617,7 @@ class SegmentWeightMatchingStrategy:
         removal = [s for s in ctx.segments if s.delta_grams < 0]
         merged: dict[str, ProductCount] = {}
         scores: list[float] = []
+        best_by_segment = []
         for seg in removal:
             best = self._matcher.best(
                 ctx.vision_candidates, seg.delta_grams, ctx.active_products,
@@ -624,11 +625,17 @@ class SegmentWeightMatchingStrategy:
             )
             if best is None:
                 return None  # 한 구간이라도 실패 → aggregate 경로로 폴백
+            best_by_segment.append(best)
             scores.append(best.match_score)
             for pc in best.products:
                 pid = pc.product.product_id
                 prev = merged.get(pid)
                 merged[pid] = ProductCount(pc.product, (prev.count if prev else 0) + pc.count)
+        repeated = self._strong_repeated_candidate(ctx, removal, best_by_segment)
+        if repeated is not None:
+            candidate, product = repeated
+            merged = {product.product_id: ProductCount(product, len(removal))}
+            scores = [candidate.confidence] * len(removal)
         # I12: 구간 합산 count가 stock을 넘으면 무효
         for pc in merged.values():
             if pc.count > pc.product.stock_qty:
@@ -637,8 +644,45 @@ class SegmentWeightMatchingStrategy:
             JudgmentStatus.COMPLETE,
             tuple(sorted(merged.values(), key=lambda pc: pc.product.product_id)),
             confidence=sum(scores) / len(scores),
-            reason="segment_weight_matching",
+            reason=(
+                "segment_weight_matching+strong_repeated_candidate"
+                if repeated is not None else "segment_weight_matching"
+            ),
         )
+
+    @staticmethod
+    def _strong_repeated_candidate(ctx, removal, best_by_segment):
+        if len(removal) < 2:
+            return None
+        if any(len(best.products) != 1 or best.products[0].count < 2 for best in best_by_segment):
+            return None
+        selected_class = best_by_segment[0].products[0].product.class_id
+        if any(best.products[0].product.class_id != selected_class for best in best_by_segment):
+            return None
+        selected = next((c for c in ctx.vision_candidates if c.class_id == selected_class), None)
+        if selected is None:
+            return None
+        products = {p.class_id: p for p in ctx.active_products if p.stock_qty > 0}
+        alternatives = []
+        for candidate in ctx.vision_candidates:
+            product = products.get(candidate.class_id)
+            if (
+                product is None
+                or candidate.class_id == selected_class
+                or candidate.confidence <= selected.confidence
+                or candidate.vote_count < selected.vote_count * 3
+            ):
+                continue
+            if any(
+                abs(abs(segment.delta_grams) - product.unit_weight)
+                > ctx.profile.tolerance_grams * 2
+                for segment in removal
+            ):
+                continue
+            alternatives.append((candidate, product))
+        if not alternatives:
+            return None
+        return max(alternatives, key=lambda item: (item[0].vote_count, item[0].confidence))
 
 
 class StageCountCombinationStrategy:

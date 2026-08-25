@@ -187,6 +187,33 @@ class TestMultiTrayEvents:
             for rc in outcome.trace.reason_codes
         )
 
+    def test_collision_guard_retries_duplicate_strict_result(self):
+        cola = ActiveProduct("P59", "토레타", class_id=59, unit_weight=525.0,
+                             unit_price=2000, stock_qty=5)
+        tea = ActiveProduct("P11", "트레비", class_id=11, unit_weight=523.0,
+                            unit_price=1600, stock_qty=5)
+        pipe = TriggerPipeline(FakeDetector(), {4: REFRIGERATOR}, ActiveProductStore())
+        ctx = JudgmentContext(
+            4, REFRIGERATOR, -1055.0, (),
+            (VisionCandidate(59, 1.0, 34, 0.32), VisionCandidate(11, 0.50, 2, 0.02)),
+            (cola, tea),
+        )
+        results = [
+            (ChannelWeightEvent(0, -530.0, ()), JudgmentResult(
+                JudgmentStatus.COMPLETE, (ProductCount(cola, 1),), 0.7, "strict", "strict",
+            )),
+            (ChannelWeightEvent(1, -525.0, ()), JudgmentResult(
+                JudgmentStatus.COMPLETE, (ProductCount(cola, 1),), 1.0,
+                "same_weight_collision_guard", "same_weight_collision_guard",
+            )),
+        ]
+        trace = TriggerTrace()
+        out = pipe._collision_complete_retry(ctx, results, trace)
+        assert [(pc.product.class_id, pc.count) for _, j in out for pc in j.products] == [
+            (59, 1), (11, 1),
+        ]
+        assert "multi_tray_collision_complete_retry:ch1" in trace.reason_codes
+
     def test_collision_complete_and_partial_recover_distinct_product(self):
         cola = ActiveProduct("P59", "토레타", class_id=59, unit_weight=525.0,
                              unit_price=2000, stock_qty=5)
