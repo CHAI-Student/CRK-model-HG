@@ -7,8 +7,15 @@ import pytest
 
 from crk_model.core.config import Settings
 from crk_model.core.profiles import FREEZER, REFRIGERATOR
-from crk_model.core.types import ActiveProduct, JudgmentStatus
-from crk_model.ingest.loadcell import LoadcellAnalyzer, LoadcellSample
+from crk_model.core.types import (
+    ActiveProduct,
+    JudgmentResult,
+    JudgmentStatus,
+    ProductCount,
+    VisionCandidate,
+)
+from crk_model.ingest.loadcell import ChannelWeightEvent, LoadcellAnalyzer, LoadcellSample
+from crk_model.judgment.interfaces import JudgmentContext
 from crk_model.ledger.journal import EventJournal
 from crk_model.ledger.settler import CloseSettler
 from crk_model.perception.detector import Detection
@@ -19,6 +26,7 @@ from crk_model.service import (
     TriggerPipeline,
     TriggerRequest,
 )
+from crk_model.service.pipeline import TriggerTrace
 
 
 class FakeClock:
@@ -178,6 +186,36 @@ class TestMultiTrayEvents:
             rc.startswith("multi_tray_collision_complete_retry")
             for rc in outcome.trace.reason_codes
         )
+
+    def test_collision_complete_and_partial_recover_distinct_product(self):
+        cola = ActiveProduct("P59", "토레타", class_id=59, unit_weight=525.0,
+                             unit_price=2000, stock_qty=5)
+        tea = ActiveProduct("P11", "트레비", class_id=11, unit_weight=525.0,
+                            unit_price=1800, stock_qty=5)
+        pipe = TriggerPipeline(
+            FakeDetector(), {4: REFRIGERATOR}, ActiveProductStore()
+        )
+        candidates = (
+            VisionCandidate(59, 0.997, 5, 0.07),
+            VisionCandidate(11, 0.788, 3, 0.04),
+        )
+        partial = JudgmentResult(
+            JudgmentStatus.PARTIAL, (ProductCount(cola, 1),), 0.25,
+            "relaxed_combination+full_delta_unexplained", "relaxed",
+        )
+        complete = JudgmentResult(
+            JudgmentStatus.COMPLETE, (ProductCount(cola, 1),), 0.99,
+            "same_weight_collision_guard", "same_weight_collision_guard",
+        )
+        ctx = JudgmentContext(4, REFRIGERATOR, -1056.7, (), candidates, (cola, tea))
+        results = [
+            (ChannelWeightEvent(0, -535.0, ()), partial),
+            (ChannelWeightEvent(1, -536.7, ()), complete),
+        ]
+        out = pipe._collision_partial_retry(ctx, results, TriggerTrace())
+        assert [(pc.product.class_id, pc.count) for _, j in out for pc in j.products] == [
+            (11, 1), (59, 1),
+        ]
 
     def test_issue16_vote_dominated_second_tray_recovered(self):
         # 이슈 #16 재현: 냉동, 동시 2트레이 취출 — ch0 베이글(155g, 다득표)

@@ -322,6 +322,7 @@ class TriggerPipeline:
             results.append((ev, j))
         results = self._pool_exhaustion_retry(ctx, results, trace)
         results = self._collision_complete_retry(ctx, results, trace)
+        results = self._collision_partial_retry(ctx, results, trace)
 
         complete = [
             (ev, j) for ev, j in results
@@ -523,6 +524,57 @@ class TriggerPipeline:
                 )
             else:
                 out[index] = (ev, judgment)
+        return out
+
+    def _collision_partial_retry(
+        self,
+        ctx: JudgmentContext,
+        results: list[tuple[ChannelWeightEvent, JudgmentResult]],
+        trace: TriggerTrace,
+    ) -> list[tuple[ChannelWeightEvent, JudgmentResult]]:
+        """collision COMPLETE와 같은 class의 PARTIAL을 남은 후보로 보정한다."""
+        collision_classes = {
+            pc.product.class_id
+            for _, judgment in results
+            if judgment.status is JudgmentStatus.COMPLETE
+            and judgment.reason == "same_weight_collision_guard"
+            for pc in judgment.products
+        }
+        if not collision_classes:
+            return results
+        out = list(results)
+        for index, (ev, judgment) in enumerate(results):
+            if judgment.status is not JudgmentStatus.PARTIAL:
+                continue
+            if not any(pc.product.class_id in collision_classes for pc in judgment.products):
+                continue
+            alternatives = [
+                (candidate, product)
+                for candidate in ctx.vision_candidates
+                if candidate.class_id not in collision_classes
+                for product in ctx.active_products
+                if product.class_id == candidate.class_id
+                and product.stock_qty > 0
+                and product.unit_weight > 0
+                and abs(abs(ev.delta_grams) - product.unit_weight)
+                <= ctx.profile.tolerance_grams * 3.0
+            ]
+            if not alternatives:
+                continue
+            candidate, product = max(
+                alternatives, key=lambda item: (item[0].vote_count, item[0].confidence)
+            )
+            out[index] = (
+                ev,
+                JudgmentResult(
+                    JudgmentStatus.PARTIAL,
+                    (ProductCount(product, 1),),
+                    confidence=candidate.confidence * 0.5,
+                    reason="multi_tray_collision_alternative_partial",
+                    strategy="multi_tray_collision_alternative_partial",
+                ),
+            )
+            trace.reason_codes.append(f"multi_tray_collision_partial_retry:ch{ev.channel}")
         return out
 
     def _segment_target_retry(

@@ -515,7 +515,7 @@ def _robust_alternative_partial(
     """오염 후보를 제외한 경쟁 단품을 상품 편차 범위에서 보존한다."""
     if (
         not profile.weight_is_discriminative
-        or e.judgment.status is not JudgmentStatus.COMPLETE
+        or e.judgment.status not in (JudgmentStatus.COMPLETE, JudgmentStatus.PARTIAL)
         or not any(pc.count > 1 for pc in e.judgment.products)
     ):
         return None
