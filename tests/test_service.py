@@ -151,6 +151,34 @@ class TestMultiTrayEvents:
         assert close["status"] == "success"
         assert close["totalPrice"] == 1500 * 2
 
+    def test_same_weight_collision_retries_duplicate_complete(self):
+        cola = ActiveProduct("P1", "콜라", class_id=1, unit_weight=100.0,
+                             unit_price=1500, stock_qty=5)
+        water = ActiveProduct("P2", "물", class_id=2, unit_weight=105.0,
+                              unit_price=1000, stock_qty=5)
+        detector = FakeDetector(detections=[
+            Detection(1, 0.85, bbox=(50.0, 50.0, 100.0, 100.0)),
+            Detection(2, 0.80, bbox=(150.0, 50.0, 200.0, 100.0)),
+        ])
+        store = ActiveProductStore()
+        store.update([cola, water])
+        pipe = TriggerPipeline(detector, {1: REFRIGERATOR}, store)
+        outcome = pipe.process(
+            "s1",
+            TriggerRequest(
+                1,
+                {"top": moving_frames(20), "side": moving_frames(20)},
+                dual_tray_samples((500, 400), (400, 300)),
+                1.0,
+            ),
+        )
+        billed = {pc.product.class_id: pc.count for pc in outcome.event.judgment.products}
+        assert billed == {1: 1, 2: 1}
+        assert any(
+            rc.startswith("multi_tray_collision_complete_retry")
+            for rc in outcome.trace.reason_codes
+        )
+
     def test_issue16_vote_dominated_second_tray_recovered(self):
         # 이슈 #16 재현: 냉동, 동시 2트레이 취출 — ch0 베이글(155g, 다득표)
         # ch1 135g 상품(소득표, share 게이트 미달). 1차 판정에서 ch1이

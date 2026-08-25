@@ -27,7 +27,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 
 from crk_model.core.profiles import REFRIGERATOR, SensorProfile
-from crk_model.core.types import ActiveProduct, JudgmentResult, JudgmentStatus
+from crk_model.core.types import ActiveProduct, JudgmentResult, JudgmentStatus, ProductCount
 from crk_model.judgment.interfaces import JudgmentContext
 from crk_model.judgment.router import JudgmentRouter
 from crk_model.ledger.events import TriggerEvent
@@ -388,8 +388,13 @@ def _repass_event(
     # 과금했는데 ④가 침묵 KEEP해 재판정 기회 자체가 없었다. PARTIAL 원
     # 판정은 ④를 건너뛰고 재판정으로 — ⑥ COMPLETE 게이트가 여전히
     # "보정하려다 더 나빠지는" 경로를 막는다 (R2).
-    if e.judgment.status is JudgmentStatus.COMPLETE and not _weight_ambiguous(
-        e, active_products, profile
+    robust_alternative = _robust_alternative_partial(
+        e, penalized, active_products, profile
+    )
+    if (
+        e.judgment.status is JudgmentStatus.COMPLETE
+        and not _weight_ambiguous(e, active_products, profile)
+        and robust_alternative is None
     ):
         return None  # ④ 무게가 유일 해 → 원 판정 유지 (KEEP)
 
@@ -413,6 +418,13 @@ def _repass_event(
     # 확인된 경우에는 이 전제가 성립하지 않는다. 무게 미검증 오염 과금을
     # 보호하는 대신 오염 상품만 제거한다 (COMPLETE 보호 정책은 무변경).
     if rejudged.status is not JudgmentStatus.COMPLETE or not rejudged.products:
+        if robust_alternative is not None:
+            notes.append(
+                f"zone{e.zone}:cross_zone_robust_alternative:"
+                f"adopted={robust_alternative.products[0].product.product_id}x1:"
+                f"source={src_part}"
+            )
+            return replace(e, judgment=robust_alternative)
         contaminated = tuple(
             pc for pc in e.judgment.products if pc.product.class_id in penalized
         )
@@ -457,8 +469,15 @@ def _repass_event(
             f"zone{e.zone}:cross_zone_penalty_gate_failed:keep_original:source={src_part}"
         )
         return None
-    if _same_products(rejudged, e.judgment):
+    if _same_products(rejudged, e.judgment) and robust_alternative is None:
         return None  # 페널티 후에도 오염 후보가 이김 — 그대로 인정 (⑤)
+    if _same_products(rejudged, e.judgment) and robust_alternative is not None:
+        notes.append(
+            f"zone{e.zone}:cross_zone_robust_alternative:"
+            f"adopted={robust_alternative.products[0].product.product_id}x1:"
+            f"source={src_part}"
+        )
+        return replace(e, judgment=robust_alternative)
 
     demoted = sorted(
         pc.product.product_id
@@ -484,6 +503,51 @@ def _repass_event(
         judgment=replace(
             rejudged, reason=rejudged.reason + "+cross_zone_vision_penalty"
         ),
+    )
+
+
+def _robust_alternative_partial(
+    e: TriggerEvent,
+    penalized: set[int],
+    active_products: Sequence[ActiveProduct],
+    profile: SensorProfile,
+) -> JudgmentResult | None:
+    """오염 후보를 제외한 경쟁 단품을 상품 편차 범위에서 보존한다."""
+    if (
+        not profile.weight_is_discriminative
+        or e.judgment.status is not JudgmentStatus.COMPLETE
+        or not any(pc.count > 1 for pc in e.judgment.products)
+    ):
+        return None
+    candidates = {candidate.class_id: candidate for candidate in e.vision_candidates}
+    source_votes = max(
+        (candidates[cid].vote_count for cid in penalized if cid in candidates),
+        default=0,
+    )
+    if source_votes <= 0:
+        return None
+    products = {product.class_id: product for product in active_products}
+    target = abs(e.delta_weight)
+    tolerance = profile.tolerance_grams * 3.0
+    alternatives = [
+        (candidate, products[candidate.class_id])
+        for candidate in e.vision_candidates
+        if candidate.class_id not in penalized
+        and candidate.class_id in products
+        and products[candidate.class_id].stock_qty > 0
+        and products[candidate.class_id].unit_weight > 0
+        and abs(target - products[candidate.class_id].unit_weight) <= tolerance
+    ]
+    if not alternatives:
+        return None
+    candidate, product = max(
+        alternatives, key=lambda item: (item[0].vote_count, item[0].confidence)
+    )
+    return JudgmentResult(
+        JudgmentStatus.PARTIAL,
+        (ProductCount(product, 1),),
+        confidence=candidate.confidence * 0.5,
+        reason="cross_zone_robust_alternative_partial",
     )
 
 

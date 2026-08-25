@@ -91,6 +91,7 @@ class TestFullDeltaMatch:
         assert result.status is not JudgmentStatus.COMPLETE
 
 
+
 class TestFreezer:
     def test_vision_first_single_not_summed(self, bar170, bar178, cola):
         # 178g 사건 재발 방지: 근접 단일 후보(170g, 오차 8g ≤ 15g)가 있으면

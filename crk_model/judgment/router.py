@@ -168,5 +168,6 @@ class JudgmentRouter:
                 )
             self.telemetry[entry.name] += 1
             return replace(result, strategy=entry.name)
+
         # FinalFallback이 항상 잡지만 방어적으로:
         return JudgmentResult(JudgmentStatus.NO_DETECTION, reason="pipeline_exhausted")

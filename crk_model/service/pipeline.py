@@ -321,6 +321,7 @@ class TriggerPipeline:
             j = self._segment_target_retry(ectx, j, ev, trace)
             results.append((ev, j))
         results = self._pool_exhaustion_retry(ctx, results, trace)
+        results = self._collision_complete_retry(ctx, results, trace)
 
         complete = [
             (ev, j) for ev, j in results
@@ -451,6 +452,77 @@ class TriggerPipeline:
                 out.append((ev, rj))
             else:
                 out.append((ev, j))  # 악화 금지 — 원 판정 유지
+        return out
+
+    def _collision_complete_retry(
+        self,
+        ctx: JudgmentContext,
+        results: list[tuple[ChannelWeightEvent, JudgmentResult]],
+        trace: TriggerTrace,
+    ) -> list[tuple[ChannelWeightEvent, JudgmentResult]]:
+        """동일 무게 충돌의 중복 COMPLETE만 남은 후보로 재판정한다."""
+        complete_by_class: dict[int, list[int]] = {}
+        for index, (_, judgment) in enumerate(results):
+            if (
+                judgment.status is JudgmentStatus.COMPLETE
+                and judgment.reason == "same_weight_collision_guard"
+            ):
+                for product_count in judgment.products:
+                    complete_by_class.setdefault(product_count.product.class_id, []).append(index)
+
+        duplicate_indexes = {
+            index
+            for indexes in complete_by_class.values()
+            if len(indexes) > 1
+            for index in indexes[1:]
+        }
+        if not duplicate_indexes:
+            return results
+
+        consumed = {
+            product_count.product.class_id
+            for index, (_, judgment) in enumerate(results)
+            if index not in duplicate_indexes
+            for product_count in judgment.products
+        }
+        for indexes in complete_by_class.values():
+            consumed.update(
+                product_count.product.class_id
+                for product_count in results[indexes[0]][1].products
+            )
+        out = list(results)
+        for index in sorted(duplicate_indexes):
+            ev, judgment = results[index]
+            remaining = tuple(
+                candidate
+                for candidate in ctx.vision_candidates
+                if candidate.class_id not in consumed
+            )
+            if not remaining:
+                continue
+            trace.reason_codes.append(
+                f"multi_tray_collision_complete_retry:ch{ev.channel}"
+            )
+            retry_ctx = replace(
+                ctx,
+                delta_weight=ev.delta_grams,
+                segments=ev.segments,
+                vision_candidates=remaining,
+            )
+            retried = self._router.judge(retry_ctx)
+            retried = self._segment_target_retry(retry_ctx, retried, ev, trace)
+            if retried.status is JudgmentStatus.COMPLETE and retried.products:
+                retried = replace(
+                    retried,
+                    reason=(retried.reason or retried.status.value)
+                    + "+collision_complete_retry",
+                )
+                out[index] = (ev, retried)
+                consumed.update(
+                    product_count.product.class_id for product_count in retried.products
+                )
+            else:
+                out[index] = (ev, judgment)
         return out
 
     def _segment_target_retry(

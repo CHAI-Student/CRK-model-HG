@@ -118,6 +118,32 @@ class TestCrossZonePenalty:
         assert by_zone[1].products[0].product.product_id == "P178"
         assert any("cross_zone_vision_penalty" in n for n in result.notes)
 
+    def test_retrieves_competing_refrigerator_item_with_product_variance(self):
+        bag = ActiveProduct("P43", "꽃게랑", class_id=43, unit_weight=79.0,
+                            unit_price=500, stock_qty=20)
+        porridge = ActiveProduct("P53", "소고기죽", class_id=53, unit_weight=312.0,
+                                 unit_price=2000, stock_qty=20)
+        z1 = event(
+            "s", 1, 100.0,
+            judged(bag, conf=0.88), -80.0,
+            candidates=[cand(43, conf=1.0, votes=35), cand(53, conf=0.58, votes=22)],
+            change_ts=(100.0,),
+        )
+        z2 = event(
+            "s", 2, 101.0,
+            judged(bag, count=4, conf=0.37), -325.0,
+            candidates=[cand(43, conf=1.0, votes=69), cand(53, conf=1.0, votes=59)],
+            change_ts=(101.0,),
+        )
+        notes: list[str] = []
+        out = apply_cross_zone_penalty(
+            [z1, z2], {1: REFRIGERATOR, 2: REFRIGERATOR},
+            (bag, porridge), CFG, notes,
+        )
+        assert out[1].judgment.status is JudgmentStatus.PARTIAL
+        assert [(pc.product.class_id, pc.count) for pc in out[1].judgment.products] == [(53, 1)]
+        assert any("cross_zone_robust_alternative" in note for note in notes)
+
     def test_mutual_demotion_guard_keeps_better_residual_zone(self, bar170, bar178):
         # 8차 ses-3 실사고: 동시 멀티존 취출이 영상을 공유해 두 존 모두 X를
         # 판정 → 서로를 소스로 X를 강등 → X가 정산에서 통째로 소멸 (잔차 1로
