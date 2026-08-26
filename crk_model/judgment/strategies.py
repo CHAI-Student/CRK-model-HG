@@ -166,6 +166,13 @@ class FreezerVisionFirstStrategy:
     """
 
     name = "freezer_vision_first"
+    # ① 근접 동률 무게 중재 (session49: 10표/conf0.99 vs 9표/conf0.97 — 득표차
+    # 1·conf차는 conf_margin 이내라 노이즈 수준인데도 종전엔 무조건 top-vote가
+    # 이겼다). 득표 격차가 이 이하 + conf 격차가 conf_margin 이하일 때만 잔차
+    # 우위로 승자를 넘긴다 — _SELF_FIT_MARGIN_G(cross_zone.py)와 같은 성격의
+    # 사설 안전판 상수라 노브로 노출하지 않는다.
+    _NEAR_TIE_VOTE_GAP = 1
+    _NEAR_TIE_RESIDUAL_MARGIN_G = 10.0
 
     def __init__(
         self,
@@ -201,11 +208,23 @@ class FreezerVisionFirstStrategy:
         # 실측 근거가 2-4 한 건이고 세그먼트 구조가 아카이브로 미확인이라
         # **기본 off** — 레포 관행(신규 판정 기제는 기본값 = 기존 동작).
         segment_combo_min_segments: int = 2,
-        # 도전 자격의 removal 세그먼트 최소 수 (ⓒ). 올리면 더 보수적.
+        # 도전 자격의 removal 세그먼트 최소 수 (ⓒ). 올리면 더 보수적. ①의
+        # 이종 혼합 의심 강등(_mixed_kind_suspect)도 같은 문턱을 공유한다 —
+        # "분리 취출을 증언하는 세그먼트 수"는 두 기제가 같은 개념.
         partial_min_confidence: float = 0.18,
         # ② near-gate의 무게 미검증 PARTIAL 청구 하한. 9.2/9.4와 같은
         # MODEL__JUDGMENT__PARTIAL_MIN_CONFIDENCE를 공유한다. 하한 미달은
         # 다른 후보/후단 전략으로 폴스루하지 않고 NO_DETECTION (후보 쇼핑 금지).
+        mixed_kind_demotion: bool = False,
+        # ①의 단일 종 ×N(count>=2) 확정이, 실제로는 무게가 우연히 완전
+        # 설명하는 이종 혼합 취출을 덮어쓰는 경우의 안전망(session40 실기:
+        # 데리야끼가 득표 붕괴로 밀려나고 쿠키앤크림×5가 잔차 4g로 확정). 무게로는
+        # 혼합 여부를 구분할 수 없으므로(단위무게 유사) 정체성·개수는 그대로 두고
+        # 과신만 낮춘다(COMPLETE→PARTIAL). segment_combo와 별개의 스위치다
+        # — segment_combo는 "조합 실패 시 단일을 그대로 유지"가 기존 회귀
+        # 계약(테스트)이라 같은 스위치를 공유하면 깨진다. 임계값은 새 숫자를
+        # 따로 두지 않고 segment_combo_min_segments와 "표 1개 이상"을 재사용한다.
+        # 기본 off (레포 관행 — 신규 판정 기제는 기본값 = 기존 동작).
     ):
         self._max_kinds = max_kinds
         self._identity_pool = identity_pool
@@ -221,7 +240,32 @@ class FreezerVisionFirstStrategy:
         self._count_occam = count_occam
         self._segment_combo = segment_combo
         self._segment_combo_min_segments = segment_combo_min_segments
+        self._mixed_kind_demotion = mixed_kind_demotion
         self._partial_min_conf = partial_min_confidence
+
+    def _mixed_kind_suspect(
+        self,
+        ctx: JudgmentContext,
+        identities: list[tuple[ActiveProduct, VisionCandidate]],
+        winner_product: ActiveProduct,
+        count: int,
+    ) -> bool:
+        """session40 안전망 — 단일 종 ×N(count>=2) 확정이 실제로는 무게로
+        구분 불가능한 이종 혼합 취출을 덮어쓴 것일 수 있는지 관측만 한다
+        (판정을 뒤집지 않음, COMPLETE→PARTIAL 강등의 트리거일 뿐). 신규 노브
+        없이 기존 개념 재사용: removal 세그먼트 수는 ①⁺ 조합 도전과 같은
+        segment_combo_min_segments 문턱을 쓰고(분리 취출 증언), 경쟁 종은
+        "실제로 한 표라도 받았는가"만 본다(완전 미탐지는 구제 대상이 아니라
+        판단 재료도 아니다 — 임의 최소 득표수를 새로 정하지 않는다)."""
+        if count < 2:
+            return False
+        removals = sum(1 for s in ctx.segments if s.delta_grams < 0)
+        if removals < self._segment_combo_min_segments:
+            return False
+        return any(
+            p.class_id != winner_product.class_id and cand.vote_count > 0
+            for p, cand in identities
+        )
 
     @staticmethod
     def _occam_filter(
@@ -325,21 +369,38 @@ class FreezerVisionFirstStrategy:
             fits = self._occam_filter(fits)
         winner: tuple[ActiveProduct, VisionCandidate, int, float] | None = None
         arbitrated = False
+        near_tie = False
         if len(fits) == 1:
             winner = fits[0]
         elif len(fits) >= 2:
-            vt = max(fits, key=lambda f: (f[1].vote_count, f[1].confidence))
-            bc = max(fits, key=lambda f: (f[1].confidence, f[1].vote_count))
-            if bc is vt:
-                winner = vt  # 득표·conf 증거 일치
-            elif bc[1].confidence >= self._arb_threshold(vt[1].confidence):
-                # 상한 포화 (docstring ①): vt conf가 0.85를 넘으면 +margin이
-                # 1.0을 초과해 중재가 원리적으로 봉쇄된다 — conf 척도는
-                # 천장에서 압축되므로 0.99 이상은 결정적 우세로 취급.
-                winner, arbitrated = bc, True  # conf 결정적 우세 (설계 3b)
-            elif vt[1] is top_c:
-                winner = vt  # 전역 득표 1위가 적합 — 종전 서열 존중
-            # else: 전역 top 미적합 + conf 격차 부족 → 모호, ② near로 폴스루
+            ranked_fits = sorted(
+                fits, key=lambda f: (-f[1].vote_count, -f[1].confidence)
+            )
+            lead, runner = ranked_fits[0], ranked_fits[1]
+            vote_gap = lead[1].vote_count - runner[1].vote_count
+            conf_gap = lead[1].confidence - runner[1].confidence
+            if (
+                vote_gap <= self._NEAR_TIE_VOTE_GAP
+                and conf_gap <= self._conf_margin
+                and runner[3] + self._NEAR_TIE_RESIDUAL_MARGIN_G <= lead[3]
+            ):
+                # 득표·conf가 통계적으로 구분 안 되는 근접 동률일 때만 잔차가
+                # 더 좋은 쪽으로 (session49) — 일반 서열 다툼은 아래 vt/bc가
+                # 그대로 처리한다.
+                winner, near_tie = runner, True
+            else:
+                vt = max(fits, key=lambda f: (f[1].vote_count, f[1].confidence))
+                bc = max(fits, key=lambda f: (f[1].confidence, f[1].vote_count))
+                if bc is vt:
+                    winner = vt  # 득표·conf 증거 일치
+                elif bc[1].confidence >= self._arb_threshold(vt[1].confidence):
+                    # 상한 포화 (docstring ①): vt conf가 0.85를 넘으면 +margin이
+                    # 1.0을 초과해 중재가 원리적으로 봉쇄된다 — conf 척도는
+                    # 천장에서 압축되므로 0.99 이상은 결정적 우세로 취급.
+                    winner, arbitrated = bc, True  # conf 결정적 우세 (설계 3b)
+                elif vt[1] is top_c:
+                    winner = vt  # 전역 득표 1위가 적합 — 종전 서열 존중
+                # else: 전역 top 미적합 + conf 격차 부족 → 모호, ② near로 폴스루
         if winner is not None:
             # ①⁺ 세그먼트 근거 조합 도전 (_segment_combo_challenge, 기본 off):
             # "A×2"와 "A1+B1"은 무게로 구분 불가 — 분리 취출의 물증(removal
@@ -352,12 +413,26 @@ class FreezerVisionFirstStrategy:
                     *challenge, "freezer_vision_first_segment_combo"
                 )
             p, cand, count, _ = winner
+            if self._mixed_kind_demotion and self._mixed_kind_suspect(
+                ctx, identities, p, count
+            ):
+                # 무게로는 "쿠키앤크림×5"와 "쿠키앤크림×4+데리야끼×1"을 구분할
+                # 수 없다(단위무게가 비슷) — 정체성/개수는 그대로 두고 과신만
+                # 낮춘다(session40). 실제 구제는 perception 득표 복원이 정답.
+                return JudgmentResult(
+                    JudgmentStatus.PARTIAL,
+                    (ProductCount(p, count),),
+                    confidence=cand.confidence * 0.5,
+                    reason="freezer_vision_first_single_mixed_kind_suspected",
+                )
             return JudgmentResult(
                 JudgmentStatus.COMPLETE,
                 (ProductCount(p, count),),
                 confidence=cand.confidence,
                 reason=(
-                    "freezer_vision_first_single_arbitrated"
+                    "freezer_vision_first_single_near_tie_weight"
+                    if near_tie
+                    else "freezer_vision_first_single_arbitrated"
                     if arbitrated
                     else "freezer_vision_first_single"
                 ),

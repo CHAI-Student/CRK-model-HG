@@ -200,6 +200,7 @@ class ModelService:
                     partial_min_confidence=(
                         self.settings.judgment_partial_min_confidence
                     ),
+                    mixed_kind_demotion=self.settings.judgment_mixed_kind_demotion,
                 ),
                 partial_min_confidence=self.settings.judgment_partial_min_confidence,
                 partial_impossible_factor=(

@@ -2068,3 +2068,75 @@ unit_weight는 정책상 고정이고 실측과 10~30g 편차가 있으므로(�
   `test_cross_zone.py`(+3), docs 03·04·06, 패키지 README 2종.
 
 - **검증**: `pytest -q` → **443 passed** (0806 이전 436 + 신규 7, 회귀 0).
+
+## 2026-08-26 냉동 session 42/49/40 오판정 보완 (yoona 실기 6건 중 3건)
+
+- 증상: 8/26 냉동 장비 테스트에서 6건의 오판정이 관측됨. 이 중 3건을 보완.
+  1. session 42: 소바바치킨(class 67) 1개 취출이 인접 zone 1·2·3에서 각
+     1개씩 총 3개로 과금.
+  2. session 49: 하겐다즈(68)·쿠키앤크림(69) 취출 후 69 반납 시 68이
+     청구돼야 하는데 69가 청구됨(득표 10 vs 9, conf 0.99 vs 0.97 — 근소한
+     격차인데도 무조건 최다 득표가 승리).
+  3. session 40: 데리야끼(71)·쿠키앤크림(69) 각 2개 순차 취출이 쿠키앤
+     크림 5개로 과금(71 득표가 2표로 붕괴, 69×5=350g이 실제 delta
+     354.17g을 잔차 4g로 우연히 거의 완벽 설명).
+
+- 원인:
+  - session 42: `cross_zone.py`의 soft 페널티는 "경쟁 후보 없는 단독
+    후보는 인접 zone이 실제로도 같은 상품을 팔았을 수 있다"는 2-zone
+    가정 위에 설계돼 있다. FOV 겹침으로 zone2·zone3도 소바바치킨 하나만
+    유일 후보로 들고 있어 페널티를 적용해도 대안이 없어 그대로
+    재확정(keep_original)됐다 — 2곳 이상이 동시에 같은 상품을 "우연히
+    진짜로도" 팔았을 개연성보다 순수 카메라 유출일 개연성이 압도적으로
+    크다는 점이 반영돼 있지 않았다.
+  - session 49: I-V 불변식(무게는 정체성을 선택하지 않는다) 구현이
+    득표·conf 격차가 노이즈 수준이어도 무조건 최다 득표를 승자로
+    확정하도록 돼 있어, 잔차로는 훨씬 정확한 68이 배제됐다.
+  - session 40: 데리야끼(71)가 실사고 영상에서 득표 붕괴(2표)로
+    `single_share`·`combo_share` 자격을 모두 못 채웠다. `segment_combo`
+    (기존 기능)를 켜고 재현해도 두 상품 단위무게가 비슷해 조합 잔차가
+    단일보다 좋아지지 않아 뒤집히지 않음을 확인 — 무게만으로는 근본적으로
+    구제 불가능.
+
+- 해결방안:
+  - `crk_model/ledger/cross_zone.py`에 `_captive_only_zones()` 추가:
+    특정 class를 **유일** 비전 후보로 든 zone 집합을 계산해, 소스 zone
+    외 "피해 zone"이 2곳 이상이면(3자 이상 유출) 페널티 후 같은 후보가
+    재확정돼도 강제로 억제(NO_DETECTION). 피해 zone 1곳뿐인 기존 2-zone
+    케이스는 그대로 보존. 새 파라미터 없이 기존
+    `_mutual_exemptions`·`_penalty_sources` 인프라만 재사용.
+  - `FreezerVisionFirstStrategy`에 근접 동률 무게 중재 추가: top-2 적합의
+    득표 격차가 1표 이하 + conf 격차가 기존 `conf_margin`(0.15) 이내 +
+    잔차가 사설 상수 `_NEAR_TIE_RESIDUAL_MARGIN_G`(10g,
+    `cross_zone._SELF_FIT_MARGIN_G`와 같은 성격)만큼 더 좋을 때만 잔차
+    우위 후보로 승자를 넘긴다. 일반 득표 격차는 기존 vt/bc 서열 로직이
+    그대로 처리 — 새 Settings/env 노브 없음, 기존 `conf_margin` 재사용 +
+    클래스 내부 상수.
+  - 같은 전략에 `_mixed_kind_suspect()` + `mixed_kind_demotion`(기본
+    off) 옵트인 추가: 단일 종 ×N(count≥2) 확정에서 removal 세그먼트 수가
+    기존 `segment_combo_min_segments` 이상이고 실제 득표(1표 이상)를
+    받은 다른 종이 있으면 정체성·개수는 그대로 두고 COMPLETE→PARTIAL로만
+    강등(신뢰도 절반). `segment_combo` 스위치를 공유하려 했으나
+    "조합 실패 시 단일 유지"가 이미 회귀 테스트 계약이라 공유하면
+    `TestSegmentBackedCombo0730Case24` 6건이 깨짐을 확인, 별개 스위치로
+    분리. 임계값은 새 숫자 없이 `segment_combo_min_segments`·"표 1개
+    이상"만 재사용.
+
+- 미해결: session 41·52·57은 vision이 클래스를 아예 후보로 못 올리거나
+  (0표) 다른 클래스로 오분류(71→75)한 사례라 judgment 로직 구제 대상이
+  아님 — perception 층(모션 증거·클래스 균형·데이터셋) 감사 필요.
+
+- 관련 파일:
+  - `crk_model/ledger/cross_zone.py` — `_captive_only_zones()`, 3자
+    이상 유출 강제 억제
+  - `crk_model/judgment/strategies.py` — 근접 동률 무게 중재
+    (`_NEAR_TIE_*`), 이종 혼합 의심 강등(`_mixed_kind_suspect`,
+    `mixed_kind_demotion`)
+  - `crk_model/core/config.py` — `judgment_mixed_kind_demotion`
+    Settings/env 배선
+  - `crk_model/service/model_service.py` — 전략 생성자에
+    `mixed_kind_demotion` 배선
+  - `tests/test_cross_zone.py`(+1), `tests/test_judgment.py`(+8)
+
+- **검증**: `pytest -q` → **441 passed, 24 skipped** (회귀 0).
+  `python -m compileall -q crk_model tests` · `git diff --check` 통과.

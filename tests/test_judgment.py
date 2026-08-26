@@ -16,6 +16,7 @@ from crk_model.judgment import (
     default_pipeline,
     enforce_full_delta_match,
 )
+from crk_model.judgment.strategies import FreezerVisionFirstStrategy
 
 
 def ctx(delta, products, candidates, profile=REFRIGERATOR, segments=(), vision_only=False):
@@ -901,6 +902,131 @@ class TestCountOccam0730Scenario:
         ))
         assert result is not None
         assert [(pc.product.class_id, pc.count) for pc in result.products] == [(30, 2)]
+
+
+class TestSession49NearTieWeightTiebreak:
+    """session49 실사고 재현: 하겐다즈(68)와 쿠키앤크림(69)을 반출/반납했는데
+    득표(10 vs 9)·conf(0.9923 vs 0.9685)가 노이즈 수준으로 근접한데도 종전
+    로직은 무조건 vote 1위(69)를 청구했다 — 실제로는 68이 잔차가 훨씬 작다."""
+
+    COOKIE = ActiveProduct("P69", "쿠키앤크림", class_id=69, unit_weight=70.0,
+                           unit_price=2500, stock_qty=20)
+    HAAGEN = ActiveProduct("P68", "하겐다즈", class_id=68, unit_weight=90.0,
+                           unit_price=3000, stock_qty=20)
+
+    def test_near_tied_votes_defer_to_weight_residual(self):
+        result = FreezerVisionFirstStrategy().solve(ctx(
+            -85.0, [self.COOKIE, self.HAAGEN],
+            [cand(69, 0.9923, 10), cand(68, 0.9685, 9)],
+            profile=FREEZER,
+        ))
+        assert result is not None
+        assert result.reason == "freezer_vision_first_single_near_tie_weight"
+        assert [(pc.product.class_id, pc.count) for pc in result.products] == [(68, 1)]
+
+    def test_clear_vote_lead_keeps_legacy_ranking(self):
+        # 격차가 통계적으로 유의미하면(득표차 3) 근접 동률 예외가 발동하지
+        # 않고 종전 vote 서열이 유지된다 — 정상 사례 회귀 없음.
+        result = FreezerVisionFirstStrategy().solve(ctx(
+            -85.0, [self.COOKIE, self.HAAGEN],
+            [cand(69, 0.9923, 12), cand(68, 0.9685, 9)],
+            profile=FREEZER,
+        ))
+        assert result is not None
+        assert result.reason == "freezer_vision_first_single"
+        assert [(pc.product.class_id, pc.count) for pc in result.products] == [(69, 1)]
+
+    def test_tiny_residual_gap_does_not_trigger_tiebreak(self):
+        # 잔차 차이가 near_tie_residual_margin(기본 10g) 미만이면 근소한
+        # 개선만으로는 넘어가지 않는다(과도한 재정 방지).
+        close_weight = ActiveProduct("P68b", "하겐다즈b", class_id=68, unit_weight=78.0,
+                                     unit_price=3000, stock_qty=20)
+        result = FreezerVisionFirstStrategy().solve(ctx(
+            -85.0, [self.COOKIE, close_weight],
+            [cand(69, 0.9923, 10), cand(68, 0.9685, 9)],
+            profile=FREEZER,
+        ))
+        assert result is not None
+        assert result.reason == "freezer_vision_first_single"
+        assert [(pc.product.class_id, pc.count) for pc in result.products] == [(69, 1)]
+
+
+class TestSession40MixedKindDemotion:
+    """session40 실사고 재현: 데리야끼(71)와 쿠키앤크림(69)을 2개씩 순차
+    취출했는데 71 득표가 붕괴(2표)해 자격 미달 — 우연히 69×5가 잔차 4g로
+    거의 완벽 설명해 COMPLETE 확정됐다. 무게로는 혼합 여부를 못 가르므로
+    (단위무게 유사) 정체성/개수는 유지한 채 과신만 낮춘다. 전용 옵트인
+    플래그 하나만 두고(기본 off — 레포 관행), 나머지 임계값은 새 숫자를
+    만들지 않고 기존 segment_combo_min_segments·"표 1개 이상"을 재사용한다."""
+
+    COOKIE = ActiveProduct("P69", "쿠키앤크림", class_id=69, unit_weight=70.0,
+                           unit_price=2500, stock_qty=30)
+    TERIYAKI = ActiveProduct("P71", "데리야끼", class_id=71, unit_weight=68.0,
+                             unit_price=2000, stock_qty=30)
+
+    @staticmethod
+    def _segs(*grams):
+        return [WeightSegment(i, i + 1.0, g) for i, g in enumerate(grams)]
+
+    def test_default_off_keeps_legacy_complete(self):
+        # mixed_kind_demotion=False(기본)면 강등도 무발동 — 종전 동작 그대로.
+        result = FreezerVisionFirstStrategy().solve(ctx(
+            -354.1666, [self.COOKIE, self.TERIYAKI],
+            [cand(69, 1.0, 25), cand(71, 0.58, 2)],
+            profile=FREEZER,
+            segments=self._segs(20.0, -130.0, -67.5, -105.0, -71.66),
+        ))
+        assert result is not None
+        assert result.status is JudgmentStatus.COMPLETE
+        assert result.reason == "freezer_vision_first_single"
+        assert [(pc.product.class_id, pc.count) for pc in result.products] == [(69, 5)]
+
+    def test_enabled_demotes_to_partial_without_changing_identity(self):
+        result = FreezerVisionFirstStrategy(mixed_kind_demotion=True).solve(ctx(
+            -354.1666, [self.COOKIE, self.TERIYAKI],
+            [cand(69, 1.0, 25), cand(71, 0.58, 2)],
+            profile=FREEZER,
+            segments=self._segs(20.0, -130.0, -67.5, -105.0, -71.66),
+        ))
+        assert result is not None
+        assert result.status is JudgmentStatus.PARTIAL
+        assert result.reason == "freezer_vision_first_single_mixed_kind_suspected"
+        # 정체성·개수는 종전과 동일 — 강등은 신뢰도만 낮춘다 (무게가 혼합
+        # 여부를 못 가르므로 함부로 4+1로 쪼개지 않는다).
+        assert [(pc.product.class_id, pc.count) for pc in result.products] == [(69, 5)]
+
+    def test_single_segment_grab_is_not_demoted(self):
+        # 세그먼트가 1개(동시 취출)면 정상적인 ×N이라 강등 대상이 아니다.
+        result = FreezerVisionFirstStrategy(mixed_kind_demotion=True).solve(ctx(
+            -354.1666, [self.COOKIE, self.TERIYAKI],
+            [cand(69, 1.0, 25), cand(71, 0.58, 2)],
+            profile=FREEZER,
+            segments=self._segs(-354.1666),
+        ))
+        assert result is not None
+        assert result.status is JudgmentStatus.COMPLETE
+
+    def test_no_rival_votes_is_not_demoted(self):
+        # 경쟁 종이 완전 미탐지(0표)면 강등 근거가 없다 — 미탐지는 구제 대상 아님.
+        result = FreezerVisionFirstStrategy(mixed_kind_demotion=True).solve(ctx(
+            -350.0, [self.COOKIE],
+            [cand(69, 1.0, 25)],
+            profile=FREEZER,
+            segments=self._segs(20.0, -130.0, -220.0),
+        ))
+        assert result is not None
+        assert result.status is JudgmentStatus.COMPLETE
+
+    def test_single_unit_claim_is_never_demoted(self):
+        # count=1 확정은 애초에 "혼합 ×N" 우려 대상이 아니다.
+        result = FreezerVisionFirstStrategy(mixed_kind_demotion=True).solve(ctx(
+            -70.0, [self.COOKIE, self.TERIYAKI],
+            [cand(69, 1.0, 25), cand(71, 0.58, 2)],
+            profile=FREEZER,
+            segments=self._segs(-40.0, -30.0),
+        ))
+        assert result is not None
+        assert result.status is JudgmentStatus.COMPLETE
 
 
 class TestSegmentBackedCombo0730Case24:

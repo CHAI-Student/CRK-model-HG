@@ -23,6 +23,7 @@ FinalizedSettlement만 보정 (I10 정합).
 from __future__ import annotations
 
 import logging
+from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 
@@ -201,6 +202,22 @@ def _self_fit_prefers_alternative(
     return best_alt is not None and best_alt + _SELF_FIT_MARGIN_G <= r_x
 
 
+def _captive_only_zones(events: Sequence[TriggerEvent]) -> dict[int, set[int]]:
+    """class_id → 그 클래스를 **유일한** 비전 후보로 들고 있는 zone 집합.
+
+    session42 실사고: zone1(진짜 소스)·zone2·zone3이 모두 소바바치킨(67) 하나만
+    후보로 들고 있었다(FOV 겹침 유출). 이 경우 zone2/zone3처럼 소스 외에도
+    같은 클래스만 유일 후보로 든 '피해 zone'이 2곳 이상이면, 이는 인접 zone이
+    우연히 같은 상품을 진짜로도 팔았을 개연성보다 순수 유출일 개연성이
+    압도적으로 크다 — soft 페널티의 '경쟁 후보 없는 단독 후보는 신뢰'
+    원칙(2-zone 가정)이 깨지는 지점이다."""
+    out: dict[int, set[int]] = defaultdict(set)
+    for e in events:
+        if e.status == "ok" and len(e.vision_candidates) == 1:
+            out[e.vision_candidates[0].class_id].add(e.zone)
+    return out
+
+
 def _mutual_exemptions(
     events: Sequence[TriggerEvent],
     cfg: CrossZonePenaltyConfig,
@@ -324,11 +341,12 @@ def apply_cross_zone_penalty(
         return list(events)
     router = router or JudgmentRouter()
     exempt = _mutual_exemptions(events, cfg, active_products)
+    captive = _captive_only_zones(events)
     out: list[TriggerEvent] = []
     for e in events:
         replaced = _repass_event(
             e, events, profiles, active_products, cfg, notes, default_profile,
-            router, exempt,
+            router, exempt, captive,
         )
         out.append(replaced if replaced is not None else e)
     return out
@@ -344,6 +362,7 @@ def _repass_event(
     default_profile: SensorProfile,
     router: JudgmentRouter,
     exempt: set[tuple[int, int]] = frozenset(),
+    captive: Mapping[int, set[int]] | None = None,
 ) -> TriggerEvent | None:
     # 대상: 정상 removal 판정 + vision 후보 보유 (반품·에러·무후보는 무관)
     if (
@@ -435,10 +454,24 @@ def _repass_event(
         same_partial_survived = bool(rejudged.products) and _same_products(
             rejudged, e.judgment
         )
+        # 3자 이상 유출 강제 억제 (session42): 이 zone이 오염 클래스를 유일
+        # 후보로만 들고 있고, 같은 소스에서 유출된 '피해 zone'이 이 zone
+        # 말고도 하나 더 있으면 — soft 페널티가 이겨도(경쟁 후보가 없어
+        # 당연히 이김) 인접 zone 실판매 개연성보다 순수 유출 개연성이 훨씬
+        # 크다고 본다. 2-zone(소스 1 + 피해 1) 케이스는 기존 동작 유지.
+        forced_suppress = False
+        if same_partial_survived and captive:
+            for pc in contaminated:
+                cid = pc.product.class_id
+                source_zone = sources[cid][1] if cid in sources else None
+                victims = captive.get(cid, set()) - {source_zone}
+                if e.zone in victims and len(victims) >= 2:
+                    forced_suppress = True
+                    break
         if (
             e.judgment.status is JudgmentStatus.PARTIAL
             and contaminated
-            and not same_partial_survived
+            and (not same_partial_survived or forced_suppress)
         ):
             remaining = tuple(
                 pc

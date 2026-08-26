@@ -427,7 +427,53 @@ class TestCrossZonePenalty:
         ]
         assert any("cross_zone_penalty_gate_failed:keep_original" in n for n in notes)
 
-    def test_issue27_partial_contamination_is_not_billed_at_settlement(self):
+    def test_session42_three_zone_bleed_suppresses_both_victims(self, bar178):
+        """session42 실사고: 소바바치킨(bar178 대역)이 zone1(진짜)뿐 아니라
+        FOV 유출로 zone2·zone3에도 유일 후보로 잡혀 3개 모두 과금됐다.
+        test_penalized_partial_winner_still_wins(2-zone)와 달리 피해 zone이
+        2곳 이상이면 "인접 존도 진짜 팔았을 수 있다"는 가정이 깨져 강제
+        억제된다 — 소스 zone1만 유지."""
+        source = event(
+            "s", 1, 100.0, judged(bar178, conf=1.0), -178.0,
+            candidates=[cand(4, conf=1.0, votes=122)], change_ts=(100.0,),
+        )
+        victim2 = event(
+            "s", 2, 101.0,
+            JudgmentResult(
+                JudgmentStatus.PARTIAL, (ProductCount(bar178, 1),), 0.3,
+                "vision_first_identity_partial",
+            ),
+            -90.0, candidates=[cand(4, conf=1.0, votes=122)], change_ts=(101.0,),
+        )
+        victim3 = event(
+            "s", 3, 102.0,
+            JudgmentResult(
+                JudgmentStatus.PARTIAL, (ProductCount(bar178, 1),), 0.3,
+                "vision_first_identity_partial",
+            ),
+            -105.0, candidates=[cand(4, conf=1.0, votes=122)], change_ts=(102.0,),
+        )
+        notes: list[str] = []
+        out = apply_cross_zone_penalty(
+            [source, victim2, victim3], {1: FREEZER, 2: FREEZER, 3: FREEZER},
+            (bar178,), CFG, notes,
+        )
+        by_zone = {e.zone: e for e in out}
+        assert [(pc.product.product_id, pc.count) for pc in by_zone[1].judgment.products] == [
+            ("P178", 1)
+        ]
+        assert not by_zone[2].judgment.products
+        assert not by_zone[3].judgment.products
+        assert any(
+            "zone2:cross_zone_penalty_gate_failed:suppress_contaminated_partial=P178"
+            in n for n in notes
+        )
+        assert any(
+            "zone3:cross_zone_penalty_gate_failed:suppress_contaminated_partial=P178"
+            in n for n in notes
+        )
+
+
         """ses-43/44 형태 통합 회귀: c75 소스가 있는 상태에서 zone3의 c75
         PARTIAL이 페널티 후 다른 PARTIAL로 바뀌면 원 c75 과금은 정산에서 빠진다."""
         p75 = ActiveProduct("P75", "월드콘", 75, 70.0, 1400, 20)

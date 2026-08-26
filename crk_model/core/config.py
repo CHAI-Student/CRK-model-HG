@@ -260,6 +260,12 @@ class Settings:
     # 미확인이라 기본 off — 아카이브로 확인 후 승격.
     judgment_segment_combo: bool = False
     judgment_segment_combo_min_segments: int = 2
+    # ① 단일 종 ×N(count>=2) 확정의 이종 혼합 의심 강등 (session40): removal
+    # 세그먼트 다수 + 실제 표를 받은 다른 종 존재 시 COMPLETE→PARTIAL만 강등
+    # (정체성·개수는 불변 — 무게로는 혼합 여부를 못 가른다). 임계값은 새
+    # 숫자를 두지 않고 segment_combo_min_segments·"표 1개 이상"을 재사용한다.
+    judgment_mixed_kind_demotion: bool = False
+
     # ---- 조기 종료 (D7) — removal & 비freezer에서만 유효 ----
     # 기본 off (이슈 #22 0805 냉장 20종 실기): 후보 창 안의 무게 설명은
     # "남은 프레임이 판정을 못 바꾼다"의 근거가 못 된다 — 정답 등장 전에
@@ -440,6 +446,9 @@ class Settings:
             ),
             judgment_segment_combo_min_segments=_env_int(
                 "MODEL__JUDGMENT__SEGMENT_COMBO_MIN_SEGMENTS", 2
+            ),
+            judgment_mixed_kind_demotion=_env_bool(
+                "MODEL__JUDGMENT__MIXED_KIND_DEMOTION", False
             ),
             early_termination_enabled=_env_bool(
                 "MODEL__VISION__EARLY_TERMINATION", False
