@@ -473,7 +473,52 @@ class TestCrossZonePenalty:
             in n for n in notes
         )
 
+    def test_contamination_unrelated_to_billed_products_keeps_multi_tray_result(self):
+        """0826 2차 재테스트(ses-3 zone2 재구성): zone2가 68x1+70x1로 두 상품을
+        정확히 나눠 잡았는데(multi_tray), 오염 후보가 실제로는 그중 어느
+        것도 아닌 class75(옆 zone에서 진짜 판매)인 경우. 예전에는 재판정이
+        zone 전체 무게를 통째로 다시 계산해 68이 사라지고 70x2로 뭉개졌다 —
+        오염 클래스가 과금 상품과 무관하면 재판정 자체를 건너뛴다."""
+        p68 = ActiveProduct(
+            "P68", "하겐다즈68", class_id=68, unit_weight=95.0, unit_price=5000,
+            stock_qty=10,
+        )
+        p70 = ActiveProduct(
+            "P70", "브라보콘70", class_id=70, unit_weight=105.0, unit_price=2000,
+            stock_qty=10,
+        )
+        p75 = ActiveProduct(
+            "P75", "월드콘75", class_id=75, unit_weight=70.0, unit_price=1400,
+            stock_qty=10,
+        )
+        source = event(
+            "s", 4, 100.0, judged(p75, conf=0.98), -70.0,
+            candidates=[cand(75, conf=0.98, votes=8)], change_ts=(100.0,),
+        )
+        target = event(
+            "s", 2, 101.0,
+            JudgmentResult(
+                JudgmentStatus.COMPLETE,
+                (ProductCount(p68, 1), ProductCount(p70, 1)), 0.91,
+                "multi_tray[freezer_vision_first,freezer_vision_first]",
+            ),
+            -193.75,
+            candidates=[
+                cand(70, conf=1.0, votes=35), cand(71, conf=0.58, votes=26),
+                cand(68, conf=0.91, votes=18), cand(75, conf=0.98, votes=8),
+            ],
+            change_ts=(101.0,),
+        )
+        notes: list[str] = []
+        out = apply_cross_zone_penalty(
+            [source, target], {2: FREEZER, 4: FREEZER}, (p68, p70, p75), CFG, notes,
+        )
+        assert out[1] is target
+        assert sorted(
+            (pc.product.product_id, pc.count) for pc in out[1].judgment.products
+        ) == [("P68", 1), ("P70", 1)]
 
+    def test_issue27_partial_contamination_is_not_billed_at_settlement(self):
         """ses-43/44 형태 통합 회귀: c75 소스가 있는 상태에서 zone3의 c75
         PARTIAL이 페널티 후 다른 PARTIAL로 바뀌면 원 c75 과금은 정산에서 빠진다."""
         p75 = ActiveProduct("P75", "월드콘", 75, 70.0, 1400, 20)

@@ -400,6 +400,21 @@ def _repass_event(
         )
     if not penalized:
         return None  # 오염 창 겹침 없음 또는 후보와 무관 — 기존 동작과 동일
+    billed_classes = {pc.product.class_id for pc in e.judgment.products}
+    if (
+        e.judgment.status is JudgmentStatus.COMPLETE
+        and billed_classes
+        and not (penalized & billed_classes)
+    ):
+        # 0826 실기(ses-3 zone2): 오염 후보가 실제 과금 상품과 무관하면(예:
+        # multi_tray로 이미 여러 상품을 나눠 잡은 zone인데, 오염 클래스가 그중
+        # 어느 것도 아님) 재판정 자체가 불필요 — 지금 재판정은 트리거의
+        # 다중 채널/세그먼트 분리 결과를 통째로 버리고 zone 전체 무게를
+        # 단일 후보로 다시 계산하므로, 손댈 필요가 없는데 재판정하면 이미
+        # 맞았던 다중 상품 결과가 단일 상품으로 뭉개질 위험만 있다. PARTIAL은
+        # 기존 경로(재판정 후 무변화 확인)가 이미 안전하게 처리하므로 그대로
+        # 둔다 — COMPLETE만 최적화한다.
+        return None
     profile = profiles.get(e.zone, default_profile)
     # ④의 KEEP 전제("무게가 유일 해 → 기존 무게 매칭이 이미 방어했다")는 원
     # 판정이 COMPLETE(무게 검증 통과)일 때만 참이다 — 이슈 #22 ses-4 z3:

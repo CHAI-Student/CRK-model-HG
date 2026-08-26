@@ -454,7 +454,7 @@ class CloseSettler:
                     self._vision_combo(
                         zone, -net, gate, events, {p.class_id: c_inc},
                         ghosts=ghosts, backed_zones=backed_zones,
-                        excluded_out=excluded,
+                        excluded_out=excluded, prefer_residual=snap_ok,
                     )
                     if self.vision_combo and (count >= 2 or not snap_ok)
                     else None
@@ -542,14 +542,94 @@ class CloseSettler:
                     b.set_count(p.product_id, count)
                     notes.append(f"freezer_close_resolve:zone{zone}:{p.product_id}={count}")
                 else:
-                    # I3: 게이트 실패 시 다품목/재solve 확정 금지 → 증분 결과 유지
-                    notes.append(f"freezer_close_gate_failed:zone{zone}:keep_incremental")
+                    # I3: 게이트 실패 + 2종 조합도 실패 — 마지막으로 "사실
+                    # 처음부터 완전히 다른 한 종이었다"는 가능성을 본다
+                    # (session ses-5 실기: 69로 판정됐지만 68이 표 28개·
+                    # conf 1.0으로 훨씬 잘 맞았는데 구제 경로가 아예 없었다).
+                    swap = (
+                        self._single_species_swap(
+                            zone, -net, gate, events, p.class_id,
+                            ghosts=ghosts, backed_zones=backed_zones,
+                        )
+                        if self.vision_combo
+                        else None
+                    )
+                    if swap is not None:
+                        swap_p, swap_n = swap
+                        for pid in list(b.counts):
+                            b.set_count(pid, 0)
+                        b.add(swap_p, swap_n)
+                        notes.append(
+                            f"freezer_close_resolve_swap:zone{zone}:"
+                            f"{swap_p.product_id}={swap_n}"
+                        )
+                    else:
+                        # 증분 결과 유지 (구제 실패)
+                        notes.append(f"freezer_close_gate_failed:zone{zone}:keep_incremental")
             elif len(kinds) > 1:
                 notes.append(f"freezer_close_multi_kind:zone{zone}:keep_incremental")
 
     # 조합의 각 클래스가 요구하는 최소 자격 표 수 — 변위 몰수를 통과한 표가
     # 이만큼 있어야 "vision이 그 클래스를 봤다"로 친다 (유령 스파이크 차단).
     _COMBO_VOTE_FLOOR = 3
+
+    def _single_species_swap(
+        self,
+        zone: int,
+        target: float,
+        gate: float,
+        events: Sequence[TriggerEvent],
+        exclude_class: int,
+        ghosts: Mapping[int, tuple[int, ...]] | None = None,
+        backed_zones: Mapping[int, set[int]] | None = None,
+    ) -> tuple[ActiveProduct, int] | None:
+        """단일 종 스냅·2종 조합이 모두 실패했을 때의 마지막 구제 — vision이
+        강하게 지목한 **전혀 다른 한 종**이 통째로 정답을 대체할 수 있다
+        (session ses-5: 원판정은 69였지만 68이 표 28개·conf 1.0인데도 이
+        가능성 자체를 검토하지 않았다). 2종 조합과 같은 실존 증거 하한
+        (combo_min_vote_ratio/combo_min_conf, ghost·타존 뒷받침 제외)을
+        재사용하되, 실패한 원래 클래스(exclude_class)는 후보에서 뺀다."""
+        if self._products_provider is None:
+            return None
+        votes: dict[int, int] = {}
+        confs: dict[int, float] = {}
+        for e in events:
+            if e.zone != zone or e.delta_weight >= 0 or e.status != "ok":
+                continue
+            for c in e.vision_candidates:
+                if (
+                    c.class_id > 0
+                    and c.class_id != exclude_class
+                    and c.vote_count >= self._COMBO_VOTE_FLOOR
+                ):
+                    votes[c.class_id] = max(votes.get(c.class_id, 0), c.vote_count)
+                    confs[c.class_id] = max(confs.get(c.class_id, 0.0), c.confidence)
+        for cid in list(votes):
+            if ghosts and cid in ghosts:
+                del votes[cid]
+            elif backed_zones and backed_zones.get(cid) and zone not in backed_zones[cid]:
+                del votes[cid]
+        top_votes = max(votes.values(), default=0)
+        for cid in list(votes):
+            if (
+                votes[cid] < self.combo_min_vote_ratio * top_votes
+                and confs.get(cid, 0.0) < self.combo_min_conf
+            ):
+                del votes[cid]
+        if not votes:
+            return None
+        best: tuple[tuple, ActiveProduct, int] | None = None
+        for p in self._products_provider():
+            if p.class_id not in votes or p.unit_weight <= 0 or p.stock_qty <= 0:
+                continue
+            for n in range(1, min(p.stock_qty, 6) + 1):
+                residual = abs(target - n * p.unit_weight)
+                if residual > gate + self.count_unit_slack * (n - 1):  # I3
+                    continue
+                score = (votes[p.class_id], confs[p.class_id], -residual, -n)
+                if best is None or score > best[0]:
+                    best = (score, p, n)
+        return (best[1], best[2]) if best else None
 
     @staticmethod
     def _class_evidence(
@@ -600,6 +680,7 @@ class CloseSettler:
         ghosts: Mapping[int, tuple[int, ...]] | None = None,
         backed_zones: Mapping[int, set[int]] | None = None,
         excluded_out: dict[int, str] | None = None,
+        prefer_residual: bool = False,
     ) -> tuple[tuple[ActiveProduct, int], ...] | None:
         """단일 종 ×N 스냅의 비전 교차 검증 대안: 이 존 removal 이벤트들에서
         자격 표(≥ _COMBO_VOTE_FLOOR)를 받은 서로 다른 2종의 (n_A, n_B) 조합 중
@@ -612,6 +693,13 @@ class CloseSettler:
         실존 표·판정 증거가 해야 한다. 증분 편차 항은 같은 2종 안에서 개수
         배분이 갈릴 때(27×3+30×1 vs 27×1+30×4) 트리거 판정이 실제로 본
         개수를 존중한다. I12(재고 상한)·I3(게이트) 준수.
+
+        prefer_residual=True면 증분·잔차의 우선순위를 뒤집는다(session 71→69
+        실기): 원래 스냅 자체가 무게 게이트를 이미 통과한 상태(snap_ok=True)
+        에서 확신 스냅 가드가 대칭 검사로 콤보를 허용한 경우, incremental은
+        "이미 신뢰가 깨진" 단일 종 판정 개수라 편차 우선은 그 틀린 판정
+        쪽으로 다시 끌려간다. 이 경우엔 잔차(물리적 적합)를 먼저 본다.
+        gate 실패 구제(snap_ok=False) 경로는 기존처럼 증분 우선 그대로.
 
         guarded=True(기본)면 12·13차 자격 강화를 적용한다 — ① ghost 클래스
         제외, ② 다른 존의 무게 뒷받침 과금이 이미 설명한 클래스 제외,
@@ -710,11 +798,11 @@ class CloseSettler:
                             abs(combo_counts.get(cid, 0) - incremental.get(cid, 0))
                             for cid in set(combo_counts) | set(incremental)
                         )
+                        vote_sum = votes[pa.class_id] + votes[pb.class_id]
                         score = (
-                            votes[pa.class_id] + votes[pb.class_id],
-                            -deviation,
-                            -residual,
-                            -total,
+                            (vote_sum, -residual, -deviation, -total)
+                            if prefer_residual
+                            else (vote_sum, -deviation, -residual, -total)
                         )
                         if best is None or score > best[0]:
                             best = (score, ((pa, na), (pb, nb)))

@@ -439,6 +439,91 @@ class TestVisionComboResolve:
         assert any("freezer_close_resolve_combo:zone9" in n for n in result.notes)
         assert not any("freezer_combo_rejected_confident_snap" in n for n in result.notes)
 
+    def test_combo_split_prefers_residual_when_snap_already_gate_passed(self):
+        # 0826 2차 재테스트(ses-2 재구성): 71→69 순차 취출이 69x3+71x1(잔차
+        # 26.67g)로 쪼개졌는데, 69x2+71x2(잔차 18.33g)가 더 정확했다. 원인은
+        # 조합 tie-break이 "원래(단일 종) 판정 개수"와의 편차를 우선시해서 —
+        # 그 원판정 자체가 이미 신뢰가 깨진 상태(확신 스냅 대칭 검사로 콤보가
+        # 열린 상황)라 편차 기준이 틀린 쪽으로 편향된다. snap_ok=True일 때는
+        # 잔차를 먼저 봐야 한다.
+        p69 = ActiveProduct(
+            "P69", "쿠키앤크림69", class_id=69, unit_weight=70.0, unit_price=2500,
+            stock_qty=10,
+        )
+        p71 = ActiveProduct(
+            "P71", "데리야끼71", class_id=71, unit_weight=115.0, unit_price=2500,
+            stock_qty=10,
+        )
+        s = self.settler(p69, p71)
+        e = self.removal_with_cands(
+            "s1", 9, 1.0, p69, 5, -351.6666666,
+            [cand(69, conf=1.0, votes=159), cand(71, conf=0.96, votes=19)],
+            conf=1.0,
+        )
+        result = s.settle("s1", [e], PROFILES)
+        billed = {pc.product.product_id: pc.count for z in result.zones for pc in z.products}
+        assert billed == {"P69": 2, "P71": 2}
+        assert any("freezer_close_resolve_combo:zone9" in n for n in result.notes)
+
+    def test_combo_split_still_prefers_deviation_on_gate_failure(self):
+        # 회귀 보호: gate 실패 구제 경로(snap_ok=False)는 여전히 증분 우선
+        # 그대로 — test_combo_rescues_gate_failure와 동일 데이터로 재확인.
+        s = self.settler(self.P27, self.P30)
+        e = self.removal_with_cands(
+            "s1", 9, 1.0, self.P27, 3, -560.0,
+            [cand(27, conf=0.9, votes=30), cand(30, conf=0.8, votes=12)],
+        )
+        result = s.settle("s1", [e], PROFILES)
+        billed = {pc.product.product_id: pc.count for z in result.zones for pc in z.products}
+        assert billed == {"P27": 3, "P30": 1}
+
+    def test_single_species_swap_when_snap_and_combo_both_fail(self):
+        # 0826 2차 재테스트(ses-5 재구성): 68→69 취출 후 69 반납 시 68이
+        # 나와야 하는데(비전은 68을 표 28개·conf 1.0으로 강하게 잡음) 69x2로
+        # 남았다. 단일 종 스냅(69)도 게이트 실패, 2종 조합도 실패(69 최소 1개
+        # 포함해야 하는데 그러면 오버슈트)라 "완전히 다른 한 종(68)"으로
+        # 통째로 바꿔치기하는 마지막 구제 경로가 필요하다.
+        p68 = ActiveProduct(
+            "P68", "하겐다즈68", class_id=68, unit_weight=95.0, unit_price=5000,
+            stock_qty=10,
+        )
+        p69 = ActiveProduct(
+            "P69", "쿠키앤크림69", class_id=69, unit_weight=70.0, unit_price=2500,
+            stock_qty=10,
+        )
+        s = self.settler(p68, p69)
+        e = self.removal_with_cands(
+            "s1", 9, 1.0, p69, 2, -92.5,
+            [cand(69, conf=1.0, votes=10), cand(68, conf=1.0, votes=28)],
+            conf=1.0,
+        )
+        result = s.settle("s1", [e], PROFILES)
+        billed = {pc.product.product_id: pc.count for z in result.zones for pc in z.products}
+        assert billed == {"P68": 1}
+        assert any("freezer_close_resolve_swap:zone9:P68=1" in n for n in result.notes)
+
+    def test_single_species_swap_does_not_fire_with_weak_evidence(self):
+        # 회귀 보호: 대체 후보 표가 약하면(자격 표 미달) 스왑하지 않고 기존
+        # keep_incremental 동작 그대로 — 노이즈로 함부로 바꿔치기 금지.
+        p68 = ActiveProduct(
+            "P68", "하겐다즈68", class_id=68, unit_weight=95.0, unit_price=5000,
+            stock_qty=10,
+        )
+        p69 = ActiveProduct(
+            "P69", "쿠키앤크림69", class_id=69, unit_weight=70.0, unit_price=2500,
+            stock_qty=10,
+        )
+        s = self.settler(p68, p69)
+        e = self.removal_with_cands(
+            "s1", 9, 1.0, p69, 2, -92.5,
+            [cand(69, conf=1.0, votes=10), cand(68, conf=0.4, votes=2)],
+            conf=1.0,
+        )
+        result = s.settle("s1", [e], PROFILES)
+        billed = {pc.product.product_id: pc.count for z in result.zones for pc in z.products}
+        assert billed == {"P69": 2}
+        assert any("freezer_close_gate_failed:zone9" in n for n in result.notes)
+
     def test_combo_vote_top_billed_stays_eligible(self):
         # ④의 반대 방향 보존: 판정이 득표 1위(44)를 과금한 경우(보호 케이스
         # 시그니처)는 제외가 걸리지 않아 조합 구제가 그대로 동작한다 —
