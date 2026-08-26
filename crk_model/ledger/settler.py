@@ -467,6 +467,12 @@ class CloseSettler:
                 # 자신 없는 앨리어싱 스냅"과 "vision이 확신한 정답 스냅"을
                 # 판정 자신감이 가른다. 게이트 실패 구제(snap_ok=False)는
                 # 이 규칙과 무관하게 기존대로 동작.
+                # 0826 실기(ses-36): 위 판단은 스냅 쪽 conf만 보고 챌린저
+                # (콤보의 non-snap 클래스) 쪽은 안 봤다 — 챌린저가 63표/
+                # conf 1.0처럼 스냅과 똑같이 확신 구간이면 "vision이 자신
+                # 없는 스냅"이라는 전제 자체가 깨진다. 챌린저도 같은 문턱
+                # (combo_override_max_conf) 이상이면 거부권을 걸지 않는다 —
+                # 새 노브 없이 기존 문턱을 양쪽에 대칭 적용.
                 conf_rejected = False
                 if combo is not None and snap_ok:
                     zone_conf = max(
@@ -480,9 +486,18 @@ class CloseSettler:
                         ),
                         default=None,
                     )
+                    challenger_conf = max(
+                        (
+                            self._class_evidence(zone, prod.class_id, events)[1]
+                            for prod, _n in combo
+                            if prod.product_id != p.product_id
+                        ),
+                        default=0.0,
+                    )
                     if (
                         zone_conf is not None
                         and zone_conf >= self.combo_override_max_conf
+                        and challenger_conf < self.combo_override_max_conf
                     ):
                         notes.append(
                             f"freezer_combo_rejected_confident_snap:zone{zone}:"
@@ -535,6 +550,24 @@ class CloseSettler:
     # 조합의 각 클래스가 요구하는 최소 자격 표 수 — 변위 몰수를 통과한 표가
     # 이만큼 있어야 "vision이 그 클래스를 봤다"로 친다 (유령 스파이크 차단).
     _COMBO_VOTE_FLOOR = 3
+
+    @staticmethod
+    def _class_evidence(
+        zone: int, class_id: int, events: Sequence[TriggerEvent]
+    ) -> tuple[int, float]:
+        """이 zone의 removal 이벤트들에서 특정 class_id가 받은 최대 표·conf
+        (⑤ 확신 스냅 가드의 챌린저 강도 판단 재료 — _vision_combo의 표
+        수집 루프와 동일 소스)."""
+        votes = 0
+        conf = 0.0
+        for e in events:
+            if e.zone != zone or e.delta_weight >= 0 or e.status != "ok":
+                continue
+            for c in e.vision_candidates:
+                if c.class_id == class_id:
+                    votes = max(votes, c.vote_count)
+                    conf = max(conf, c.confidence)
+        return votes, conf
 
     @staticmethod
     def _backed_zones_by_class(

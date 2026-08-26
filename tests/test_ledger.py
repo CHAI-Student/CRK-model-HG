@@ -414,6 +414,31 @@ class TestVisionComboResolve:
             for n in result.notes
         )
 
+    def test_combo_overrides_confident_snap_when_challenger_equally_confident(self):
+        # 0826 ses-36 재구성: 스냅(69x5, conf 1.0)이 확신 구간이라도, 콤보의
+        # 챌린저(71)가 표 63개(스냅 대비 49%)·conf 1.0으로 똑같이 확신
+        # 구간이면 "vision이 자신 없는 스냅"이라는 ⑤ 전제가 깨진다 — 거부권
+        # 미발동, 콤보(71x1+69x3=355g, 잔차 0) 채택.
+        p69 = ActiveProduct(
+            "P69", "쿠키앤크림69", class_id=69, unit_weight=70.0, unit_price=2500,
+            stock_qty=10,
+        )
+        p71 = ActiveProduct(
+            "P71", "한맥불벅71", class_id=71, unit_weight=145.0, unit_price=2000,
+            stock_qty=10,
+        )
+        s = self.settler(p69, p71)
+        e = self.removal_with_cands(
+            "s1", 9, 1.0, p69, 5, -355.0,
+            [cand(69, conf=1.0, votes=129), cand(71, conf=1.0, votes=63)],
+            conf=1.0,
+        )
+        result = s.settle("s1", [e], PROFILES)
+        billed = {pc.product.product_id: pc.count for z in result.zones for pc in z.products}
+        assert billed == {"P69": 3, "P71": 1}
+        assert any("freezer_close_resolve_combo:zone9" in n for n in result.notes)
+        assert not any("freezer_combo_rejected_confident_snap" in n for n in result.notes)
+
     def test_combo_vote_top_billed_stays_eligible(self):
         # ④의 반대 방향 보존: 판정이 득표 1위(44)를 과금한 경우(보호 케이스
         # 시그니처)는 제외가 걸리지 않아 조합 구제가 그대로 동작한다 —
