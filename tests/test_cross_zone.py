@@ -767,3 +767,89 @@ class TestNoOverlapDiagnosis:
         notes: list[str] = []
         apply_cross_zone_penalty([z1, z2], PROFILES, (bar170, bar178), CFG, notes)
         assert not any("cross_zone_no_overlap" in n for n in notes)
+
+
+class TestFingerprintDuplicateSuppression:
+    """2026-08-28 재테스트(ses-34/35, ses-36/37): 카메라 화각 겹침으로 같은
+    클래스가 서로 다른 zone에서 개수·표·확신도까지 거의 완전히 동일하게
+    청구되면, 대체 상품을 추정해 끼워넣지 않고 무게 잔차가 더 나쁜 쪽의
+    중복 청구만 제거한다."""
+
+    PROFILES_34 = {3: FREEZER, 4: FREEZER}
+
+    def test_identical_fingerprint_across_zones_suppresses_worse_fit(
+        self, hanmaek115, thirdclass75
+    ):
+        # ses-34/35: zone3·zone4 모두 71을 표36·확신도1.0으로 완전히 동일하게
+        # 청구 — zone3(잔차0g)만 남기고 zone4(잔차15g)의 중복은 제거된다.
+        z3 = event(
+            "s", 3, 100.0, judged(hanmaek115, conf=1.0), -115.0,
+            candidates=[cand(71, conf=1.0, votes=36), cand(75, conf=1.0, votes=11)],
+        )
+        z4 = event(
+            "s", 4, 105.0, judged(hanmaek115, conf=1.0), -100.0,
+            candidates=[cand(71, conf=1.0, votes=36), cand(75, conf=1.0, votes=11)],
+        )
+        notes: list[str] = []
+        out = apply_cross_zone_penalty(
+            [z3, z4], self.PROFILES_34, (hanmaek115, thirdclass75), CFG, notes
+        )
+        by_zone = {e.zone: e for e in out}
+        assert [pc.product.class_id for pc in by_zone[3].judgment.products] == [71]
+        assert by_zone[4].judgment.status is JudgmentStatus.NO_DETECTION
+        assert any(
+            "zone4:cross_zone_fingerprint_duplicate_suppressed:class71" in n
+            for n in notes
+        )
+
+    def test_near_identical_confidence_with_vote_drift_still_suppresses(
+        self, hagendaz95, bravocon105
+    ):
+        # ses-36/37: 표는 60 vs 58로 갈리지만(카메라별 프레임 수 차이) 확신도가
+        # 소수점 13자리까지 동일 — 강한 유출 증거라 표 오차 10% 안에서 억제된다.
+        z2 = event(
+            "s", 2, 200.0,
+            JudgmentResult(
+                JudgmentStatus.COMPLETE,
+                (ProductCount(hagendaz95, 1), ProductCount(bravocon105, 1)),
+                0.99, "multi_tray",
+            ),
+            -185.0,
+            candidates=[
+                cand(70, conf=0.9902377456426621, votes=60),
+                cand(68, conf=0.9977415680885315, votes=57),
+            ],
+        )
+        z4 = event(
+            "s", 4, 205.0, judged(bravocon105, conf=0.99), -100.0,
+            candidates=[
+                cand(70, conf=0.9902377456426621, votes=58),
+                cand(68, conf=0.9977415680885315, votes=51),
+            ],
+        )
+        notes: list[str] = []
+        out = apply_cross_zone_penalty(
+            [z2, z4], self.PROFILES_34, (hagendaz95, bravocon105), CFG, notes
+        )
+        by_zone = {e.zone: e for e in out}
+        assert [pc.product.class_id for pc in by_zone[2].judgment.products] == [68]
+        assert [pc.product.class_id for pc in by_zone[4].judgment.products] == [70]
+
+    def test_different_count_is_not_treated_as_duplicate(
+        self, hanmaek115, thirdclass75
+    ):
+        # 개수가 다르면(1개 vs 2개) 지문이 같아도 손대지 않는다 — 서로 다른
+        # 실제 판매였을 개연성을 배제할 수 없다.
+        z3 = event(
+            "s", 3, 100.0, judged(hanmaek115, count=1, conf=1.0), -115.0,
+            candidates=[cand(71, conf=1.0, votes=36)],
+        )
+        z4 = event(
+            "s", 4, 105.0, judged(hanmaek115, count=2, conf=1.0), -230.0,
+            candidates=[cand(71, conf=1.0, votes=36)],
+        )
+        notes: list[str] = []
+        out = apply_cross_zone_penalty(
+            [z3, z4], self.PROFILES_34, (hanmaek115, thirdclass75), CFG, notes
+        )
+        assert not any("cross_zone_fingerprint_duplicate_suppressed" in n for n in notes)

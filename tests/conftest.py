@@ -34,5 +34,33 @@ def bar178():
     )
 
 
+@pytest.fixture
+def hanmaek115():
+    return ActiveProduct(
+        "P71", "한맥불벅", class_id=71, unit_weight=115.0, unit_price=2000, stock_qty=20
+    )
+
+
+@pytest.fixture
+def thirdclass75():
+    return ActiveProduct(
+        "P75", "써드클래스", class_id=75, unit_weight=70.0, unit_price=2000, stock_qty=20
+    )
+
+
+@pytest.fixture
+def hagendaz95():
+    return ActiveProduct(
+        "P68", "하겐다즈", class_id=68, unit_weight=95.0, unit_price=5000, stock_qty=20
+    )
+
+
+@pytest.fixture
+def bravocon105():
+    return ActiveProduct(
+        "P70", "브라보콘", class_id=70, unit_weight=105.0, unit_price=2000, stock_qty=20
+    )
+
+
 def cand(class_id, conf=0.8, votes=10, ratio=0.5):
     return VisionCandidate(class_id, conf, votes, ratio)

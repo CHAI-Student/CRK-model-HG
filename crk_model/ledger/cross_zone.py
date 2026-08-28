@@ -28,7 +28,13 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 
 from crk_model.core.profiles import REFRIGERATOR, SensorProfile
-from crk_model.core.types import ActiveProduct, JudgmentResult, JudgmentStatus, ProductCount
+from crk_model.core.types import (
+    ActiveProduct,
+    JudgmentResult,
+    JudgmentStatus,
+    ProductCount,
+    VisionCandidate,
+)
 from crk_model.judgment.interfaces import JudgmentContext
 from crk_model.judgment.router import JudgmentRouter
 from crk_model.ledger.events import TriggerEvent
@@ -218,6 +224,121 @@ def _captive_only_zones(events: Sequence[TriggerEvent]) -> dict[int, set[int]]:
     return out
 
 
+# 지문 일치 억제(ses-34/35, ses-36/37) 판정 여유. 확신도는 여러 소수 자리까지
+# 일치해야 하는 강한 신호라 오차를 거의 안 둔다(ses-36/37 70: 두 zone
+# confidence가 0.9902377456426621로 13자리까지 동일 — 우연으론 불가능한
+# 수준). 표는 카메라별 프레임 수 차이로 자연 변동이 있어 상대 오차(10%)로
+# 넓히되, 확신도 정밀 일치를 필수 조건으로 둬서 남발을 막는다(ses-36/37
+# 70: 표 60 vs 58, 3.4% 차이 — 절대 오차 1표로는 못 잡았다).
+_FINGERPRINT_VOTE_RATIO_TOLERANCE = 0.1
+_FINGERPRINT_CONF_TOLERANCE = 1e-6
+
+
+def _same_fingerprint(a: VisionCandidate, b: VisionCandidate) -> bool:
+    if abs(a.confidence - b.confidence) > _FINGERPRINT_CONF_TOLERANCE:
+        return False
+    vote_tolerance = max(1, round(_FINGERPRINT_VOTE_RATIO_TOLERANCE * max(a.vote_count, b.vote_count)))
+    return abs(a.vote_count - b.vote_count) <= vote_tolerance
+
+
+def _fingerprint_duplicate_suppression(
+    events: Sequence[TriggerEvent], notes: list[str]
+) -> list[TriggerEvent]:
+    """서로 다른 zone에서 같은 클래스가 표·확신도까지 거의 완전히 동일하게
+    청구되는 경우(ses-34/35의 71, ses-36/37의 70 — zone3·zone4 양쪽에 토씨
+    하나 안 틀리게 잡힘) — 인접 zone이 실제로 같은 상품을 또 팔았다고 보기엔
+    후보 지문이 지나치게 정확히 일치해 카메라 화각 유출로 본다.
+
+    _captive_only_zones(session42)와 달리 후보가 여러 개 있는(비-captive)
+    zone에도 적용되지만, 대체 상품을 추정해 끼워넣지 않고 잔차가 더 나쁜
+    쪽의 중복 청구만 제거한다(I13/D9: 미청구가 과청구보다 낫다) — 오탐
+    상품을 새로 끼워넣는 위험이 없다. _repass_event의 재판정 결과(out)에
+    최종 한 번만 적용해 기존 재판정 로직은 건드리지 않는다."""
+    zone_billing: dict[int, dict[int, TriggerEvent]] = defaultdict(dict)
+    for e in events:
+        if e.status != "ok" or e.judgment.status is not JudgmentStatus.COMPLETE:
+            continue
+        for pc in e.judgment.products:
+            if pc.product.class_id > 0:
+                zone_billing[pc.product.class_id].setdefault(e.zone, e)
+
+    to_strip: dict[int, set[int]] = defaultdict(set)  # id(event) -> class_ids
+    for cid, per_zone in zone_billing.items():
+        if len(per_zone) < 2:
+            continue  # 서로 다른 zone 2곳 이상에서 청구된 경우만 대상
+        fingerprint: dict[int, VisionCandidate] = {}
+        counts: dict[int, int] = {}
+        for zone, e in per_zone.items():
+            for c in e.vision_candidates:
+                if c.class_id == cid:
+                    fingerprint[zone] = c
+                    break
+            for pc in e.judgment.products:
+                if pc.product.class_id == cid:
+                    counts[zone] = pc.count
+                    break
+        matched: set[int] = set()
+        zones = sorted(fingerprint)
+        for i, z1 in enumerate(zones):
+            for z2 in zones[i + 1 :]:
+                # 개수까지 같아야 진짜 유출 지문 — 개수가 다르면 각 zone이
+                # 서로 다른 실제 판매를 봤을 개연성이 있어 손대지 않는다
+                # (ses-8 상호 강등 fixture: 같은 후보 목록을 재사용했지만
+                # zone1=2개·zone2=1개로 실제로는 다른 판매였다).
+                if counts.get(z1) != counts.get(z2):
+                    continue
+                if _same_fingerprint(fingerprint[z1], fingerprint[z2]):
+                    matched.add(z1)
+                    matched.add(z2)
+        if len(matched) < 2:
+            continue
+        survivors = [per_zone[z] for z in matched]
+        best = min(
+            survivors,
+            key=lambda e: (
+                r if (r := _judgment_residual(e)) is not None else float("inf")
+            ),
+        )
+        for e in survivors:
+            if e is not best:
+                to_strip[id(e)].add(cid)
+
+    if not to_strip:
+        return list(events)
+
+    out: list[TriggerEvent] = []
+    for e in events:
+        strip = to_strip.get(id(e))
+        if not strip:
+            out.append(e)
+            continue
+        remaining = tuple(
+            pc for pc in e.judgment.products if pc.product.class_id not in strip
+        )
+        removed = ",".join(
+            f"class{pc.product.class_id}"
+            for pc in e.judgment.products
+            if pc.product.class_id in strip
+        )
+        notes.append(
+            f"zone{e.zone}:cross_zone_fingerprint_duplicate_suppressed:{removed}"
+        )
+        if remaining:
+            judgment = replace(
+                e.judgment,
+                products=remaining,
+                reason=e.judgment.reason + "+cross_zone_fingerprint_duplicate",
+            )
+        else:
+            judgment = JudgmentResult(
+                JudgmentStatus.NO_DETECTION,
+                confidence=0.0,
+                reason="cross_zone_fingerprint_duplicate_suppressed",
+            )
+        out.append(replace(e, judgment=judgment))
+    return out
+
+
 def _mutual_exemptions(
     events: Sequence[TriggerEvent],
     cfg: CrossZonePenaltyConfig,
@@ -349,7 +470,7 @@ def apply_cross_zone_penalty(
             router, exempt, captive,
         )
         out.append(replaced if replaced is not None else e)
-    return out
+    return _fingerprint_duplicate_suppression(out, notes)
 
 
 def _repass_event(

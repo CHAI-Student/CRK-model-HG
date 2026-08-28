@@ -159,6 +159,32 @@ class TestMultiTrayEvents:
         assert close["status"] == "success"
         assert close["totalPrice"] == 1500 * 2
 
+    def test_one_tray_with_two_different_products_still_combos(self, cola, water, bar170):
+        # 한 트레이 위에 서로 다른 두 상품(콜라100+아이스바170=−270)이 같이
+        # 있어도 채널별 판정이 여전히 router의 다종 조합 매칭(max_kinds=3)
+        # 으로 해석한다 — 콜라 단독 배수(100×N)로는 270을 못 맞춰 조합만
+        # 유일하게 성립 (채널 충돌 재시도들이 후보 하나만 강제 배정하지
+        # 않음을 보장하는 회귀).
+        detector = FakeDetector(detections=[
+            Detection(1, 0.85, bbox=(50.0, 50.0, 100.0, 100.0)),
+            Detection(bar170.class_id, 0.80, bbox=(150.0, 50.0, 200.0, 100.0)),
+            Detection(2, 0.80, bbox=(250.0, 50.0, 300.0, 100.0)),
+        ])
+        svc = make_service(detector)
+        svc.handle_multi_zone({
+            "session_id": "s1", "state": "OPEN",
+            "active_products": [asdict(cola), asdict(water), asdict(bar170)],
+        })
+        payload = trigger_payload()
+        # ch0: 콜라+아이스바170 동시 취출(−270), ch1: 물 단독(−200)
+        payload["loadcells"] = dual_tray_samples((500, 230), (400, 200))
+        svc.handle_trigger(payload)
+        svc.process_pending()
+        close = svc.handle_multi_zone({"session_id": "s1", "state": "CLOSE"})
+        assert close["status"] == "success"
+        assert close["totalPrice"] == 1500 + 2000 + 1000
+        assert close["productCount"] == 3
+
     def test_same_weight_collision_retries_duplicate_complete(self):
         cola = ActiveProduct("P1", "콜라", class_id=1, unit_weight=100.0,
                              unit_price=1500, stock_qty=5)
