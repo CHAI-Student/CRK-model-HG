@@ -57,6 +57,68 @@ def _vision_top_not_billed(candidates, judgment) -> str | None:
     return f"vision_top_not_billed:class{top.class_id}"
 
 
+def _quantized_top_single_retry(
+    ctx: JudgmentContext, judgment: JudgmentResult
+) -> JudgmentResult:
+    """5g 양자화 경계에서 탈락한 비전 1위 단품을 제한적으로 보존한다.
+
+    기존 strict와 점수식은 그대로 둔다. strict가 단일 removal을 다품종·다량
+    조합으로 확정했지만, 누락된 비전 1위 단품이 현재 관측의 ±반 분해능을
+    반영하면 tolerance 안에 들어오는 경우만 count=1 PARTIAL로 교정한다.
+    DB 값이 이미 5g 단위이면 raw 오차도 5g 배수라 이 경계 조건에 새로
+    들어오지 않는다.
+    """
+    if (
+        not ctx.profile.weight_is_discriminative
+        or judgment.status is not JudgmentStatus.COMPLETE
+        or judgment.strategy != "strict"
+        or len(judgment.products) < 2
+        or sum(pc.count for pc in judgment.products) < 3
+        or sum(1 for segment in ctx.segments if segment.delta_grams < 0) != 1
+        or not ctx.vision_candidates
+    ):
+        return judgment
+
+    top = max(ctx.vision_candidates, key=lambda c: (c.vote_count, c.confidence))
+    billed_classes = {pc.product.class_id for pc in judgment.products}
+    if top.class_id in billed_classes:
+        return judgment
+    billed_candidates = [
+        candidate
+        for candidate in ctx.vision_candidates
+        if candidate.class_id in billed_classes
+    ]
+    if not billed_candidates or top.vote_count < max(c.vote_count for c in billed_candidates):
+        return judgment
+    product = next(
+        (
+            product
+            for product in ctx.active_products
+            if product.class_id == top.class_id
+            and product.stock_qty > 0
+            and product.unit_weight > 0
+        ),
+        None,
+    )
+    if product is None:
+        return judgment
+    raw_error = abs(abs(ctx.delta_weight) - product.unit_weight)
+    if raw_error <= ctx.profile.tolerance_grams:
+        return judgment  # 원래 strict 후보였다면 양자화 경계 탈락 문제가 아니다.
+    if (
+        ctx.profile.quantization_adjusted_error(ctx.delta_weight, product.unit_weight)
+        > ctx.profile.tolerance_grams
+    ):
+        return judgment
+    return JudgmentResult(
+        JudgmentStatus.PARTIAL,
+        (ProductCount(product, 1),),
+        confidence=top.confidence * 0.5,
+        reason="quantized_top_single_partial",
+        strategy="quantized_top_single_retry",
+    )
+
+
 def _with_tubes(tube_summary: dict | None, evidence) -> dict | None:
     """tube_diag에 튜브 구성 진단(tube_detail)을 동봉 — 의류 산탄의
     "한 궤적, 여러 클래스" 실측 근거. summary가 None이면 그대로."""
@@ -288,6 +350,10 @@ class TriggerPipeline:
             judgment = self._judge_tray_events(ctx, analysis, trace)
         else:
             judgment = self._router.judge(ctx)
+            retried = _quantized_top_single_retry(ctx, judgment)
+            if retried is not judgment:
+                trace.reason_codes.append("quantized_top_single_retry")
+                judgment = retried
             judgment = self._segment_target_retry(ctx, judgment, analysis, trace)
         top_code = _vision_top_not_billed(candidates, judgment)
         if top_code:

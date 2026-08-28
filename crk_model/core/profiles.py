@@ -39,6 +39,17 @@ class SensorProfile:
     # static_track/baseline이 대리 신호로 쫓던 물리의 일반해. freezer는
     # 김서림·AE 스윙 노이즈 때문에 원본과 동일하게 +2px 보수적.
     motion_evidence_floor_px: float = 10.0
+    # IO-BOARD가 내보내는 무게 양자화 간격. 관측값 w는 실제로
+    # [w-resolution/2, w+resolution/2] 구간을 뜻한다. DB 무게가 이미 5g
+    # 단위인지와 무관하게 현재 관측의 불확실성에만 적용한다.
+    measurement_resolution_grams: float = 5.0
+
+    def quantization_adjusted_error(self, observed: float, expected: float) -> float:
+        """현재 관측의 반 분해능을 제외한 보수적 무게 오차."""
+        return max(
+            0.0,
+            abs(abs(observed) - abs(expected)) - self.measurement_resolution_grams / 2,
+        )
 
     @property
     def count_gate(self) -> float:

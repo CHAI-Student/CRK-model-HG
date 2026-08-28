@@ -816,6 +816,79 @@ class TestVisionTopObservability:
         assert _vision_top_not_billed((top23,), empty) is None  # 무과금은 대상 아님
 
 
+class TestQuantizedTopSingleRetry:
+    def _context(self, coke, milk, pepero, *, top_votes=15):
+        from crk_model.core.types import WeightSegment
+
+        return JudgmentContext(
+            zone=5,
+            profile=REFRIGERATOR,
+            delta_weight=-550.0,
+            segments=(WeightSegment(1.0, 2.0, -550.0),),
+            vision_candidates=(
+                VisionCandidate(60, 0.915, top_votes, 0.19),
+                VisionCandidate(18, 0.547, 13, 0.17),
+                VisionCandidate(45, 0.545, 3, 0.04),
+            ),
+            active_products=(coke, milk, pepero),
+        )
+
+    @staticmethod
+    def _strict_combo(milk, pepero):
+        return JudgmentResult(
+            JudgmentStatus.COMPLETE,
+            (ProductCount(milk, 1), ProductCount(pepero, 5)),
+            0.724,
+            "strict",
+            "strict",
+        )
+
+    def test_ses22_resolution_boundary_preserves_coke_partial(self):
+        from crk_model.judgment.router import JudgmentRouter
+        from crk_model.service.pipeline import _quantized_top_single_retry
+
+        coke = ActiveProduct("P60", "코카콜라", 60, 543.0, 2000, 10)
+        milk = ActiveProduct("P45", "매일우유", 45, 219.0, 800, 10)
+        pepero = ActiveProduct("P18", "빼빼로", 18, 66.0, 2500, 10)
+        ctx = self._context(coke, milk, pepero)
+        original = JudgmentRouter().judge(ctx)
+        assert original.status is JudgmentStatus.COMPLETE
+        assert [(pc.product.class_id, pc.count) for pc in original.products] == [
+            (45, 1), (18, 5)
+        ]
+        out = _quantized_top_single_retry(ctx, original)
+        assert out.status is JudgmentStatus.PARTIAL
+        assert [(pc.product.class_id, pc.count) for pc in out.products] == [(60, 1)]
+        assert out.reason == "quantized_top_single_partial"
+
+    def test_already_quantized_db_weight_does_not_create_new_override(self):
+        from crk_model.service.pipeline import _quantized_top_single_retry
+
+        coke = ActiveProduct("P60", "코카콜라", 60, 545.0, 2000, 10)
+        milk = ActiveProduct("P45", "매일우유", 45, 219.0, 800, 10)
+        pepero = ActiveProduct("P18", "빼빼로", 18, 66.0, 2500, 10)
+        original = self._strict_combo(milk, pepero)
+        out = _quantized_top_single_retry(
+            self._context(coke, milk, pepero), original
+        )
+        assert out is original
+
+    def test_weaker_top_or_outside_resolution_boundary_keeps_strict(self):
+        from crk_model.service.pipeline import _quantized_top_single_retry
+
+        milk = ActiveProduct("P45", "매일우유", 45, 219.0, 800, 10)
+        pepero = ActiveProduct("P18", "빼빼로", 18, 66.0, 2500, 10)
+        for coke, votes in (
+            (ActiveProduct("P60", "코카콜라", 60, 542.0, 2000, 10), 15),
+            (ActiveProduct("P60", "코카콜라", 60, 543.0, 2000, 10), 12),
+        ):
+            original = self._strict_combo(milk, pepero)
+            out = _quantized_top_single_retry(
+                self._context(coke, milk, pepero, top_votes=votes), original
+            )
+            assert out is original
+
+
 class TestFilterChain:
     def test_side_roi_drops_out_of_zone(self):
         f = DetectionFilterChain(side_roi_max_center_x=240.0)
