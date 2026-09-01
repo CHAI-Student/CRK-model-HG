@@ -119,6 +119,78 @@ def _quantized_top_single_retry(
     )
 
 
+def _dominant_top_single_retry(
+    ctx: JudgmentContext, judgment: JudgmentResult
+) -> JudgmentResult:
+    """단일 이벤트에서 강한 비전 1위 단품을 strict ×N보다 보존한다.
+
+    strict가 동일 상품 ×3 이상을 만들면 relaxed(±2×gate) 안의 강한 비전
+    1위 단품도 제한적으로 재비교한다. 단일 removal에서 비전 1위 conf≥0.95이고,
+    50% 무게 + 40% 비전 + 10% 단순성 재점수로 기존 ×N을 이길 때만 PARTIAL로
+    교정한다. 이 함수는 단일 이벤트 분기에서만 호출되므로 multi-tray 후보
+    공유 문제(ses-3)에는 개입하지 않으며 전역 strict 게이트도 바꾸지 않는다.
+    """
+    if (
+        not ctx.profile.weight_is_discriminative
+        or judgment.status is not JudgmentStatus.COMPLETE
+        or judgment.strategy != "strict"
+        or len(judgment.products) != 1
+        or judgment.products[0].count < 3
+        or sum(1 for segment in ctx.segments if segment.delta_grams < 0) != 1
+        or not ctx.vision_candidates
+    ):
+        return judgment
+
+    top = max(ctx.vision_candidates, key=lambda c: (c.vote_count, c.confidence))
+    if top.confidence < 0.95:
+        return judgment
+    billed = judgment.products[0]
+    if top.class_id == billed.product.class_id:
+        return judgment
+    product = next(
+        (
+            product
+            for product in ctx.active_products
+            if product.class_id == top.class_id
+            and product.stock_qty > 0
+            and product.unit_weight > 0
+        ),
+        None,
+    )
+    if product is None:
+        return judgment
+
+    gate = ctx.profile.tolerance_grams * 2.0
+    target = abs(ctx.delta_weight)
+    top_error = abs(target - product.unit_weight)
+    if top_error > gate:
+        return judgment
+
+    billed_candidate = next(
+        (c for c in ctx.vision_candidates if c.class_id == billed.product.class_id),
+        None,
+    )
+    if billed_candidate is None:
+        return judgment
+
+    def score(error: float, confidence: float) -> float:
+        weight_score = max(0.0, 1.0 - error / gate)
+        return weight_score * 0.5 + confidence * 0.4 + 0.1
+
+    billed_error = abs(target - billed.product.unit_weight * billed.count)
+    if score(top_error, top.confidence) <= score(
+        billed_error, billed_candidate.confidence
+    ):
+        return judgment
+    return JudgmentResult(
+        JudgmentStatus.PARTIAL,
+        (ProductCount(product, 1),),
+        confidence=score(top_error, top.confidence),
+        reason="dominant_top_single_relaxed_weight",
+        strategy="dominant_top_single_retry",
+    )
+
+
 def _with_tubes(tube_summary: dict | None, evidence) -> dict | None:
     """tube_diag에 튜브 구성 진단(tube_detail)을 동봉 — 의류 산탄의
     "한 궤적, 여러 클래스" 실측 근거. summary가 None이면 그대로."""
@@ -354,6 +426,10 @@ class TriggerPipeline:
             if retried is not judgment:
                 trace.reason_codes.append("quantized_top_single_retry")
                 judgment = retried
+            dominant = _dominant_top_single_retry(ctx, judgment)
+            if dominant is not judgment:
+                trace.reason_codes.append("dominant_top_single_retry")
+                judgment = dominant
             judgment = self._segment_target_retry(ctx, judgment, analysis, trace)
         top_code = _vision_top_not_billed(candidates, judgment)
         if top_code:

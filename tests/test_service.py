@@ -13,6 +13,7 @@ from crk_model.core.types import (
     JudgmentStatus,
     ProductCount,
     VisionCandidate,
+    WeightSegment,
 )
 from crk_model.ingest.loadcell import ChannelWeightEvent, LoadcellAnalyzer, LoadcellSample
 from crk_model.judgment.interfaces import JudgmentContext
@@ -887,6 +888,89 @@ class TestQuantizedTopSingleRetry:
                 self._context(coke, milk, pepero, top_votes=votes), original
             )
             assert out is original
+
+
+class TestDominantTopSingleRetry:
+    def test_ses20_high_confidence_top_single_beats_x4(self):
+        from crk_model.service.pipeline import _dominant_top_single_retry
+
+        porridge = ActiveProduct(
+            "P53", "소고기죽", 53, 312.0, 1200, 10
+        )
+        snack = ActiveProduct(
+            "P43", "꽃게랑", 43, 79.0, 500, 10
+        )
+        ctx = JudgmentContext(
+            zone=2,
+            profile=REFRIGERATOR,
+            delta_weight=-320.0,
+            segments=(WeightSegment(1.0, 2.0, -320.0),),
+            vision_candidates=(
+                VisionCandidate(53, 1.0, 7, 0.1628),
+                VisionCandidate(43, 0.3950094938278198, 2, 0.0465),
+            ),
+            active_products=(porridge, snack),
+        )
+        original = JudgmentResult(
+            JudgmentStatus.COMPLETE,
+            (ProductCount(snack, 4),),
+            0.3385028481483459,
+            "strict",
+            "strict",
+        )
+
+        out = _dominant_top_single_retry(ctx, original)
+
+        assert out.status is JudgmentStatus.PARTIAL
+        assert [(pc.product.class_id, pc.count) for pc in out.products] == [(53, 1)]
+        assert out.confidence == pytest.approx(0.6)
+        assert out.reason == "dominant_top_single_relaxed_weight"
+
+    def test_top_single_outside_relaxed_is_not_expanded(self):
+        from crk_model.service.pipeline import _dominant_top_single_retry
+
+        porridge = ActiveProduct("P53", "소고기죽", 53, 312.0, 1200, 10)
+        snack = ActiveProduct("P43", "꽃게랑", 43, 79.0, 500, 10)
+        ctx = JudgmentContext(
+            2,
+            REFRIGERATOR,
+            -325.0,
+            (WeightSegment(1.0, 2.0, -325.0),),
+            (
+                VisionCandidate(53, 1.0, 7, 0.1628),
+                VisionCandidate(43, 0.395, 2, 0.0465),
+            ),
+            (porridge, snack),
+        )
+        original = JudgmentResult(
+            JudgmentStatus.COMPLETE, (ProductCount(snack, 4),),
+            0.3385, "strict", "strict",
+        )
+
+        assert _dominant_top_single_retry(ctx, original) is original
+
+    def test_requires_point_95_top_confidence(self):
+        from crk_model.service.pipeline import _dominant_top_single_retry
+
+        porridge = ActiveProduct("P53", "소고기죽", 53, 312.0, 1200, 10)
+        snack = ActiveProduct("P43", "꽃게랑", 43, 79.0, 500, 10)
+        ctx = JudgmentContext(
+            2,
+            REFRIGERATOR,
+            -320.0,
+            (WeightSegment(1.0, 2.0, -320.0),),
+            (
+                VisionCandidate(53, 0.9499, 7, 0.1628),
+                VisionCandidate(43, 0.395, 2, 0.0465),
+            ),
+            (porridge, snack),
+        )
+        original = JudgmentResult(
+            JudgmentStatus.COMPLETE, (ProductCount(snack, 4),),
+            0.3385, "strict", "strict",
+        )
+
+        assert _dominant_top_single_retry(ctx, original) is original
 
 
 class TestFilterChain:

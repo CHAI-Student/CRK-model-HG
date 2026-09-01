@@ -348,3 +348,79 @@ git diff --check 통과
   - ses-22 재현 및 기존 판정 보호 테스트
 - `yoona.md`
   - 원인, 기존 분해능 반영 범위, 보정 범위와 검증 기록
+
+---
+
+# 2026-09-01 냉장 ses-20 저증거 ×N 증폭 보정
+
+## 현상과 원인
+
+`ses-20-1788243166`에서 소고기죽(class 53) 한 개를 취출했지만 꽃게랑
+(class 43) 네 개로 판정됐다.
+
+```text
+관측 delta:       -320g
+정답 53 단품:      312g, 오차 8g, 7표, confidence 1.0
+기존 strict 결과: 43 x4 = 316g, 오차 4g, 2표, confidence 0.395
+```
+
+냉장 strict 범위는 ±5g이므로 53 단품은 strict 후보에서 빠졌고, 비전에
+잠깐 나타난 43을 무게 역산한 `43 x4`만 strict 후보로 남았다. vote 수는
+상품 개수가 아니므로 영상이 네 개를 확인한 결과가 아니라, 약한 클래스
+정체성이 무게 조합으로 다량 증폭된 결과다.
+
+## 보완 내용
+
+단일 로드셀 이벤트에 한정해 `_dominant_top_single_retry()`를 추가했다.
+다음 조건을 모두 만족할 때만 기존 strict ×N과 비전 1위 단품을 재비교한다.
+
+- 냉장처럼 `weight_is_discriminative=True`인 프로파일
+- 기존 판정이 strict COMPLETE
+- 기존 결과가 동일 상품 한 종류의 3개 이상
+- removal segment가 정확히 1개
+- 기존 과금 상품과 다른 비전 득표 1위가 존재
+- 비전 1위 confidence가 0.95 이상
+- 비전 1위 단품 오차가 기존 relaxed 범위(±10g) 안
+- 50% 무게 + 40% 비전 + 10% 단순성 점수로 비전 1위가 승리
+
+ses-20 재점수는 다음과 같다.
+
+```text
+53 x1: 0.60
+43 x4: 약 0.558
+결과: 53 x1 PARTIAL
+```
+
+확장 범위에서 선택한 정체성이므로 COMPLETE가 아니라 PARTIAL로 기록한다.
+
+```text
+strategy: dominant_top_single_retry
+reason: dominant_top_single_relaxed_weight
+trace: dominant_top_single_retry
+```
+
+## 적용 범위와 한계
+
+이 보정은 `analysis.events < 2`인 단일 이벤트 파이프라인에서만 호출된다.
+따라서 `ses-3-1788247030`처럼 multi-tray 후보 풀 공유로 `18 x3`이 `26 x2`로
+바뀐 문제에는 적용되지 않으며, 해당 문제를 해결한다고 가정하지 않는다.
+
+전역 냉장 tolerance와 `StrictWeightMatcher` 점수도 변경하지 않았다. 일반
+strict 판정은 기존 60% 무게 + 30% 비전 + 10% 단순성을 유지하고, 위의 좁은
+재검토에서만 40% 비전 가중치를 사용한다.
+
+## 회귀 테스트
+
+- ses-20 실제 수치에서 `43 x4 COMPLETE`를 `53 x1 PARTIAL`로 교정
+- 비전 1위 confidence가 0.95 미만이면 기존 strict 유지
+- 비전 1위 단품이 relaxed ±10g 밖이면 기존 strict 유지
+- 냉장·냉동·multi-tray·정산 전체 테스트 실행
+
+검증 결과:
+
+```text
+439 passed, 24 skipped
+ruff check 통과
+compileall 통과
+git diff --check 통과
+```
