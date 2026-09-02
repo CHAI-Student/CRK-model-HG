@@ -853,3 +853,49 @@ class TestFingerprintDuplicateSuppression:
             [z3, z4], self.PROFILES_34, (hanmaek115, thirdclass75), CFG, notes
         )
         assert not any("cross_zone_fingerprint_duplicate_suppressed" in n for n in notes)
+
+    def test_duplicate_suppression_replaces_with_weight_fit_candidate(self):
+        """중복 75 제거 뒤 zone3의 72(115g)를 COMPLETE로 복구한다."""
+        yomamte = ActiveProduct("P17437536515731485", "요맘때", 75, 95.0, 1500, 10)
+        candidate72 = ActiveProduct("P72", "class72", 72, 115.0, 1800, 10)
+        candidates = [
+            cand(77, conf=0.711431121826172, votes=37, ratio=0.13553113553113552),
+            cand(75, conf=1.0, votes=15, ratio=0.054945054945054944),
+            cand(72, conf=0.7813407719135284, votes=10, ratio=0.03663003663003663),
+        ]
+        zone3 = event(
+            "ses-44-1788333361", 3, 100.0,
+            JudgmentResult(
+                JudgmentStatus.COMPLETE, (ProductCount(yomamte, 1),), 1.0,
+                "freezer_vision_first_single",
+            ),
+            -110.0, candidates=candidates,
+        )
+        zone4 = event(
+            "ses-44-1788333361", 4, 200.0,
+            JudgmentResult(
+                JudgmentStatus.COMPLETE, (ProductCount(yomamte, 1),), 1.0,
+                "freezer_vision_first_single",
+            ),
+            -100.0, candidates=candidates,
+        )
+        notes: list[str] = []
+
+        out = apply_cross_zone_penalty(
+            [zone3, zone4], self.PROFILES_34, (yomamte, candidate72), CFG, notes
+        )
+
+        by_zone = {event.zone: event for event in out}
+        assert [(pc.product.class_id, pc.count) for pc in by_zone[3].judgment.products] == [
+            (72, 1)
+        ]
+        assert [(pc.product.class_id, pc.count) for pc in by_zone[4].judgment.products] == [
+            (75, 1)
+        ]
+        assert any(
+            note == (
+                "zone3:cross_zone_fingerprint_duplicate_replaced:"
+                "removed=class75:adopted=P72x1"
+            )
+            for note in notes
+        )

@@ -242,7 +242,12 @@ def _same_fingerprint(a: VisionCandidate, b: VisionCandidate) -> bool:
 
 
 def _fingerprint_duplicate_suppression(
-    events: Sequence[TriggerEvent], notes: list[str]
+    events: Sequence[TriggerEvent],
+    profiles: Mapping[int, SensorProfile],
+    active_products: Sequence[ActiveProduct],
+    notes: list[str],
+    default_profile: SensorProfile,
+    router: JudgmentRouter,
 ) -> list[TriggerEvent]:
     """서로 다른 zone에서 같은 클래스가 표·확신도까지 거의 완전히 동일하게
     청구되는 경우(ses-34/35의 71, ses-36/37의 70 — zone3·zone4 양쪽에 토씨
@@ -250,10 +255,10 @@ def _fingerprint_duplicate_suppression(
     후보 지문이 지나치게 정확히 일치해 카메라 화각 유출로 본다.
 
     _captive_only_zones(session42)와 달리 후보가 여러 개 있는(비-captive)
-    zone에도 적용되지만, 대체 상품을 추정해 끼워넣지 않고 잔차가 더 나쁜
-    쪽의 중복 청구만 제거한다(I13/D9: 미청구가 과청구보다 낫다) — 오탐
-    상품을 새로 끼워넣는 위험이 없다. _repass_event의 재판정 결과(out)에
-    최종 한 번만 적용해 기존 재판정 로직은 건드리지 않는다."""
+    zone에도 적용된다. 중복 클래스를 제거한 후보 풀로 재판정해 COMPLETE
+    대체가 있으면 채택하고, 없으면 잔차가 더 나쁜 쪽의 중복 청구만
+    제거한다. _repass_event의 재판정 결과(out)에 최종 한 번만 적용해 기존
+    재판정 로직은 건드리지 않는다."""
     zone_billing: dict[int, dict[int, TriggerEvent]] = defaultdict(dict)
     for e in events:
         if e.status != "ok" or e.judgment.status is not JudgmentStatus.COMPLETE:
@@ -330,11 +335,41 @@ def _fingerprint_duplicate_suppression(
                 reason=e.judgment.reason + "+cross_zone_fingerprint_duplicate",
             )
         else:
-            judgment = JudgmentResult(
-                JudgmentStatus.NO_DETECTION,
-                confidence=0.0,
-                reason="cross_zone_fingerprint_duplicate_suppressed",
+            profile = profiles.get(e.zone, default_profile)
+            replacement = router.judge(
+                JudgmentContext(
+                    zone=e.zone,
+                    profile=profile,
+                    delta_weight=e.delta_weight,
+                    segments=e.segments,
+                    vision_candidates=tuple(
+                        candidate
+                        for candidate in e.vision_candidates
+                        if candidate.class_id not in strip
+                    ),
+                    active_products=tuple(active_products),
+                    vision_only=False,
+                )
             )
+            if replacement.status is JudgmentStatus.COMPLETE and replacement.products:
+                adopted = ",".join(
+                    f"{pc.product.product_id}x{pc.count}"
+                    for pc in replacement.products
+                )
+                notes.append(
+                    f"zone{e.zone}:cross_zone_fingerprint_duplicate_replaced:"
+                    f"removed={removed}:adopted={adopted}"
+                )
+                judgment = replace(
+                    replacement,
+                    reason=replacement.reason + "+cross_zone_fingerprint_duplicate",
+                )
+            else:
+                judgment = JudgmentResult(
+                    JudgmentStatus.NO_DETECTION,
+                    confidence=0.0,
+                    reason="cross_zone_fingerprint_duplicate_suppressed",
+                )
         out.append(replace(e, judgment=judgment))
     return out
 
@@ -470,7 +505,9 @@ def apply_cross_zone_penalty(
             router, exempt, captive,
         )
         out.append(replaced if replaced is not None else e)
-    return _fingerprint_duplicate_suppression(out, notes)
+    return _fingerprint_duplicate_suppression(
+        out, profiles, active_products, notes, default_profile, router
+    )
 
 
 def _repass_event(
