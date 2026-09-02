@@ -118,6 +118,70 @@ class TestCrossZonePenalty:
         assert by_zone[1].products[0].product.product_id == "P178"
         assert any("cross_zone_vision_penalty" in n for n in result.notes)
 
+    def test_ses_36_1788332797_keeps_class76_after_class69_return(self):
+        """2026-09-02 freezer field session: simultaneous 69/76 pickup, 69 return."""
+        bar69 = ActiveProduct(
+            "P17854812077466827", "FROZEN_STICK_HAGENDAZS", class_id=69,
+            unit_weight=95.0, unit_price=5000, stock_qty=10,
+        )
+        cone76 = ActiveProduct(
+            "P17355177269742847", "BOX_LOTTE_WORLDCON_160ML", class_id=76,
+            unit_weight=100.0, unit_price=1400, stock_qty=10,
+        )
+        candidates = [
+            cand(77, conf=0.7063987255096436, votes=53, ratio=0.18213058419243985),
+            cand(69, conf=1.0, votes=41, ratio=0.140893470790378),
+            cand(76, conf=1.0, votes=15, ratio=0.05154639175257732),
+        ]
+        removal69 = event(
+            "ses-36-1788332797", 2, 1788332798.222933,
+            JudgmentResult(
+                JudgmentStatus.COMPLETE, (ProductCount(bar69, 1),), 1.0,
+                "freezer_vision_first_single",
+            ),
+            -85.0, candidates=candidates, change_ts=(1788332801.399152,),
+        )
+        removal76 = event(
+            "ses-36-1788332797", 4, 1788332798.222933,
+            JudgmentResult(
+                JudgmentStatus.COMPLETE, (ProductCount(bar69, 1),), 1.0,
+                "freezer_vision_first_single",
+            ),
+            -100.0, candidates=candidates, change_ts=(1788332801.399152,),
+        )
+        returned69 = event(
+            "ses-36-1788332797", 2, 1788332806.173655,
+            JudgmentResult(JudgmentStatus.NO_DETECTION, reason="forced_final_no_match"),
+            85.0, candidates=[
+                cand(77, conf=0.7169692039489747, votes=83, ratio=0.3192307692307692),
+                cand(69, conf=1.0, votes=9, ratio=0.03461538461538462),
+            ], change_ts=(1788332809.404019,),
+        )
+
+        result = CloseSettler(
+            default_profile=FREEZER,
+            cross_zone=CFG,
+            active_products_provider=lambda: (bar69, cone76),
+        ).settle(
+            "ses-36-1788332797", [removal69, removal76, returned69],
+            {2: FREEZER, 4: FREEZER},
+        )
+
+        by_zone = {zone.zone: zone for zone in result.zones}
+        assert by_zone[2].products == ()
+        assert [(pc.product.product_id, pc.count) for pc in by_zone[4].products] == [
+            ("P17355177269742847", 1)
+        ]
+        assert result.total_price == 1400
+        assert "zone2:cross_zone_mutual_exempt:class69" in result.notes
+        assert any(
+            note.startswith(
+                "zone4:cross_zone_vision_penalty:demoted=P17854812077466827:"
+                "adopted=P17355177269742847x1:source=zone2@1788332801.399"
+            )
+            for note in result.notes
+        )
+
     def test_retrieves_competing_refrigerator_item_with_product_variance(self):
         bag = ActiveProduct("P43", "꽃게랑", class_id=43, unit_weight=79.0,
                             unit_price=500, stock_qty=20)
