@@ -195,7 +195,7 @@ class CloseSettler:
         # 알려진 트레이드오프: 같은 클래스를 두 존에서 동시에 집는 세션에서
         # 한쪽 판정이 그 클래스를 놓치면 콤보 구제도 막힌다 — 실패 방향은
         # "비전 판정 유지"라 안전.
-        combo_override_max_conf: float = 0.95,
+        combo_override_max_conf: float = 0.92,
         # ⑤ (14차 ses-2): 게이트 안 스냅을 콤보가 뒤집으려면 존 판정
         # (COMPLETE) conf가 이 값 미만이어야 한다. 실측 오버라이드 오답
         # 6건은 전부 conf 0.96~1.0, 보호 케이스는 0.9/0.72. >1로 설정하면

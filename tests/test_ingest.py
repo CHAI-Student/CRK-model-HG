@@ -281,6 +281,18 @@ class TestBocpdPrimaryAdapter:
         assert analysis.terminal_levels[0].end_median == -105.0
         assert analysis.terminal_levels[0].end_span == 0.0
 
+    def test_freezer_accepts_a_trigger_that_starts_during_the_weight_change(self):
+        from crk_model.core.profiles import FREEZER
+        from crk_model.ingest.bocpd import BocpdLoadcellAnalyzer
+
+        samples = self._series([0.0, -100.0, -110.0] + [-110.0] * 7, per=1)
+        analysis = BocpdLoadcellAnalyzer(FREEZER).analyze(samples)
+
+        assert analysis.stabilized
+        assert analysis.delta_weight == -110.0
+        assert analysis.terminal_levels[0].start_span == 110.0
+        assert analysis.terminal_levels[0].end_span == 0.0
+
     def test_freezer_unstable_terminal_delta_is_not_used_for_billing(self):
         from crk_model.core.profiles import FREEZER
         from crk_model.ingest.bocpd import BocpdLoadcellAnalyzer

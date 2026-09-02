@@ -151,7 +151,7 @@ tolerance를 쓰게 하는 단일 소스 원칙이다.
 | ② | 교차존 설명 제외 (`other_zone_backed`) | 다른 존의 **무게 뒷받침 과금**이 이미 설명한 클래스 제외 | 12차 ses-5 — 동시 멀티존 취출이 연장 병합 영상을 공유해 z3의 27표가 z1 콤보로 유입 |
 | ④ | 판정 기각 존중 (`rejected_by_judgment`) | 이 존의 COMPLETE 판정이 **과금 클래스 이상 득표**한 클래스를 보고도 과금하지 않았다면 콤보가 되살릴 수 없다 | 13차 ses-20(c13 28표 기각), 14차 ses-1(c13 137표·c30 48표 기각) — 강한 증거의 오염 클래스는 ③을 정의상 통과하므로 이 규칙이 방어선 |
 | ③ | 실존 증거 하한 (`low_evidence`) | ①②④ 적용 후 남은 풀 기준, top 대비 득표율 ≥ `combo_min_vote_ratio` **또는** conf ≥ `combo_min_conf` — 많이 보였거나 확실하게 보였거나 | 12차 ses-11 — 이동 상품의 오분류 플리커(7~9표, conf .45~.73)가 정상 스냅을 쪼갬 |
-| ⑤ | 확신 스냅 보호 | 게이트 안 스냅을 뒤집으려면 존 판정(COMPLETE) conf가 `combo_override_max_conf`(0.95) 미만이어야 한다 | 14차 ses-2 — 오버라이드 오답 6건은 전부 conf 0.96~1.0, 보호해야 할 케이스는 0.9/0.72 |
+| ⑤ | 확신 스냅 보호 | 게이트 안 스냅을 뒤집으려면 존 판정(COMPLETE) conf가 `combo_override_max_conf`(0.92) 미만이어야 한다 | 14차 ses-2 — 오버라이드 오답 6건은 전부 conf 0.96~1.0, 보호해야 할 케이스는 0.9/0.72 |
 
 번호는 코드 주석의 도입 순서이고 실제 적용 순서는 ①② → ④ → ③이다(③은 남은 풀 기준).
 **모든 실패 방향이 "콤보 미형성 = 비전 판정 유지"**라는 점이 이 설계의 안전성이다 — 가드가
@@ -354,7 +354,7 @@ barrier_timeout)도 트리거 이벤트만으로 존별 근사 요약을 재구�
 | `MODEL__CLOSE__VISION_COMBO` | `1` | 콤보 중재 kill switch (0이면 스냅/증분 유지) |
 | `MODEL__CLOSE__COMBO_MIN_VOTE_RATIO` / `COMBO_MIN_CONF` | `0.5` / `0.8` | 가드 ③ 실존 증거 하한 — 득표율(0이면 비활성) 또는 conf |
 | `MODEL__CLOSE__COMBO_SESSION_GUARD` | `1` | 가드 ①②④ 일괄 스위치 |
-| `MODEL__CLOSE__COMBO_OVERRIDE_MAX_CONF` | `0.95` | 가드 ⑤ 확신 스냅 보호 (>1이면 비활성) |
+| `MODEL__CLOSE__COMBO_OVERRIDE_MAX_CONF` | `0.92` | 가드 ⑤ 확신 스냅 보호 (>1이면 비활성) |
 | `MODEL__CROSS_ZONE__PENALTY_ENABLED` | `1` | 교차존 2차 패스 ON/OFF |
 | `MODEL__CROSS_ZONE__REPLAY_S` / `TRIGGER_S` | `4.0` / `4.0` | 오염 창 — **CRK-CAMERA 설정과 단일 소스** |
 | `MODEL__CROSS_ZONE__EPSILON_S` | `1.0` | IO-BOARD 감지 지연 마진(폴링 0.8s 지배) |

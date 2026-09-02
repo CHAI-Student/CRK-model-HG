@@ -203,7 +203,6 @@ class BocpdLoadcellAnalyzer:
                 channel.channel for channel in moved_channels
                 if (
                     (level := terminal_by_channel.get(channel.channel)) is None
-                    or level.start_span > final_span
                     or level.end_span > final_span
                 )
             ]
@@ -243,7 +242,7 @@ class BocpdLoadcellAnalyzer:
                 and c.channel in terminal_by_channel
             ):
                 level = terminal_by_channel[c.channel]
-                delta = level.end_median - level.start_median
+                delta = level.end_median - c.segments[0].level
             if abs(delta) < min_change:
                 continue  # 평탄/노이즈 트레이 — baseline에만 기여
             if delta > 0:

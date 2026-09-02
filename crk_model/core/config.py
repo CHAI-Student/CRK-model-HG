@@ -99,7 +99,7 @@ class Settings:
     close_combo_session_guard: bool = True
     # 14차: 게이트 안 스냅을 콤보가 뒤집으려면 존 판정 conf가 이 값 미만
     # (확신 스냅 존중 — 오버라이드 오답 6건 전부 conf 0.96~1.0). >1로 비활성.
-    close_combo_override_max_conf: float = 0.95
+    close_combo_override_max_conf: float = 0.92
     # D8/T2-2: 게이트 통과 프레임 마이크로배치 크기. 기본 OFF(1) — >1은
     # 정적 batch 엔진 재수출(scripts/convert_engine.sh BATCH=N) 전제.
     batch_size: int = 1
@@ -351,7 +351,7 @@ class Settings:
                 "MODEL__CLOSE__COMBO_SESSION_GUARD", True
             ),
             close_combo_override_max_conf=_env_float(
-                "MODEL__CLOSE__COMBO_OVERRIDE_MAX_CONF", 0.95
+                "MODEL__CLOSE__COMBO_OVERRIDE_MAX_CONF", 0.92
             ),
             batch_size=_env_int("MODEL__VISION__BATCH_SIZE", 1),
             prefetch_depth=_env_int("MODEL__VIDEO__PREFETCH", 0),

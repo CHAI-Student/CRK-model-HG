@@ -292,7 +292,7 @@ dataclass 기본값과 `from_env()` 기본값이 일치함을 확인한 값입�
 | `MODEL__CLOSE__COMBO_MIN_VOTE_RATIO` | `0.5` | 콤보 소수 클래스의 실존 증거 하한 — top 대비 득표율. 오분류 플리커 7~9표가 정상 ×N 스냅을 쪼개는 사고 차단. `0`=하한 비활성 |
 | `MODEL__CLOSE__COMBO_MIN_CONF` | `0.8` | 위 득표율 대신 넘어도 되는 conf 하한 (**둘 중 하나**만 넘으면 자격) |
 | `MODEL__CLOSE__COMBO_SESSION_GUARD` | `1` | 세션 관측 증거 기반 콤보 자격 제외 (ghost / 타존 무게 뒷받침) — 동시 멀티존 취출의 공유 영상 표 유입 차단 |
-| `MODEL__CLOSE__COMBO_OVERRIDE_MAX_CONF` | `0.95` | 게이트 안 스냅을 콤보가 뒤집으려면 존 판정 conf가 이 값 **미만**이어야 합니다 (확신 스냅 존중 — 오버라이드 오답 6건 전부 conf 0.96~1.0). `>1`로 비활성 |
+| `MODEL__CLOSE__COMBO_OVERRIDE_MAX_CONF` | `0.92` | 게이트 안 스냅을 콤보가 뒤집으려면 존 판정 conf가 이 값 **미만**이어야 합니다 (확신 스냅 존중 — 오버라이드 오답 6건 전부 conf 0.96~1.0). `>1`로 비활성 |
 
 ### 4.10 교차존 비전 오염 페널티
 

@@ -439,6 +439,20 @@ class TestVisionComboResolve:
         assert any("freezer_close_resolve_combo:zone9" in n for n in result.notes)
         assert not any("freezer_combo_rejected_confident_snap" in n for n in result.notes)
 
+    def test_combo_overrides_confident_snap_at_new_confidence_boundary(self):
+        """0.92 threshold: a 0.937 challenger may override a 1.0 snap."""
+        s = self.settler(self.P13, self.P24)
+        e = self.removal_with_cands(
+            "s1", 9, 1.0, self.P13, 4, -742.5,
+            [cand(13, conf=1.0, votes=74), cand(24, conf=0.937, votes=30)],
+            conf=1.0,
+        )
+        result = s.settle("s1", [e], PROFILES)
+        billed = {pc.product.product_id: pc.count for z in result.zones for pc in z.products}
+        assert billed == {"P13": 3, "P24": 1}
+        assert any("freezer_close_resolve_combo:zone9" in n for n in result.notes)
+        assert not any("freezer_combo_rejected_confident_snap" in n for n in result.notes)
+
     def test_combo_split_prefers_residual_when_snap_already_gate_passed(self):
         # 0826 2차 재테스트(ses-2 재구성): 71→69 순차 취출이 69x3+71x1(잔차
         # 26.67g)로 쪼개졌는데, 69x2+71x2(잔차 18.33g)가 더 정확했다. 원인은

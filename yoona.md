@@ -503,13 +503,14 @@ IO Board polling이 약 `0.8s`이므로 3개 샘플은 약 2.4초다. median을 
 
 구체적인 흐름은 다음과 같다.
 
-1. BOCPD가 기존과 동일하게 채널별 변화 segment를 만든다.
-2. 냉동 removal 채널에서 trigger 시작 3개와 종료 3개 sample의 median/span을 계산한다.
-3. 시작과 종료 span이 모두 10g 이하면 `종료 median - 시작 median`을 해당 채널의
-   최종 delta로 사용한다.
+1. BOCPD가 기존과 동일하게 채널별 변화 segment와 시작 plateau를 만든다.
+2. 냉동 removal 채널에서 trigger 종료 3개 sample의 median/span을 계산한다.
+3. 종료 span이 10g 이하면 `종료 median - BOCPD 시작 plateau`를 해당 채널의
+  최종 delta로 사용한다. trigger가 이미 변화 중에 시작될 수 있어 시작 3개 sample의
+  span은 안정성 차단 조건으로 쓰지 않는다.
 4. 중간 `WeightSegment`는 제거하거나 합산하지 않고, 비전 분석 시간창과 진단용으로
    그대로 유지한다.
-5. 움직인 removal 채널의 시작 또는 종료 span이 10g을 넘으면 `final_delta_unstable`로
+5. 움직인 removal 채널의 종료 span이 10g을 넘으면 `final_delta_unstable`로
    판단한다. 이때 delta를 0으로 보내므로 불안정한 부호가 `unmatched_return` 또는
    반품 차감으로 확정되는 것을 막는다.
 6. 반품(delta 양수)은 기존 `needs_return_stabilization` 계약을 그대로 우선한다.
@@ -553,8 +554,8 @@ loadcell_final_delta_unstable
 
 로드셀 회귀 테스트를 추가했다.
 
-- `0 -> +110 -> +320 -> -105`처럼 중간 변화가 있어도 시작/종료 median으로
-  `delta=-105g`가 되는지
+- `0 -> +110 -> +320 -> -105`처럼 중간 변화가 있어도 BOCPD 시작 plateau와 종료
+  median으로 `delta=-105g`가 되는지
 - 종료 3개 샘플의 span이 10g을 넘으면 `final_delta_unstable`과 `delta=0`이 되는지
 - 기존 빠른 취출 BOCPD 처리와 반품 stabilization 계약이 유지되는지
 
