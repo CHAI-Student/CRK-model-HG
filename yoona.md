@@ -412,3 +412,175 @@ conf(60)=0.15                → PARTIAL, [(59, 1), (60, 1)]  — 둘 다 정상
 ## 미해결로 남긴 것
 
 냉장 59/60 혼동은 판정 로직으로는 해결되지 않는다. 새 장비 환경에서 vision이 60을 과도한 확신도로 오탐하지 않도록 인식(perception) 쪽(카메라 각도/조명/모델) 점검이 필요하다.
+
+---
+
+# 2026-09-02 냉동 교차 존 보정 및 로드셀 종료 안정화
+
+## 1. 교차 존 중복 억제 뒤의 대체 상품 복구
+
+### 문제
+
+동일한 상품이 인접 zone에서 같은 표 수와 confidence로 청구되면,
+`_fingerprint_duplicate_suppression()`은 카메라 화각 유출로 판단해 무게 잔차가
+더 큰 zone의 중복 청구를 제거한다. 기존 동작은 제거 뒤 결과를 무조건
+`NO_DETECTION`으로 만들었다.
+
+`ses-44-1788333361`에서는 zone3/zone4가 모두 class 75로 잠정 청구됐고,
+zone3의 중복 class 75가 제거됐다. 하지만 zone3에는 class 72(단위중량 115g)가
+후보로 있었으며, zone3 delta `-110g`에 대한 잔차는 5g이었다. 즉 중복 class 75를
+제거한 뒤에도 확정 가능한 대체 상품이 있었는데 기존 로직은 이를 사용하지 못했다.
+
+### 수정
+
+[crk_model/ledger/cross_zone.py](crk_model/ledger/cross_zone.py)의 fingerprint
+중복 억제 단계에서 다음을 수행하도록 변경했다.
+
+1. 제거할 중복 class를 후보 목록에서 제외한다.
+2. 남은 후보와 원래 zone delta로 기존 `JudgmentRouter`를 다시 실행한다.
+3. 재판정 결과가 `COMPLETE`이고 상품이 있을 때만 대체 결과를 채택한다.
+4. 대체가 불가능하거나 `PARTIAL`이면 기존 정책대로 중복 상품만 제거한다.
+
+따라서 임의 상품을 새로 추정해 넣지 않는다. 원래 영상에서 이미 관측된 후보만
+사용하고, 기존 router의 재고·단위중량·냉동 count gate 검증을 모두 통과한 경우만
+복구한다.
+
+관측 note:
+
+```text
+zoneN:cross_zone_fingerprint_duplicate_replaced:
+removed=class75:adopted=P...x1
+```
+
+`ses-36-1788332797`의 class 69 반납 후 class 76만 남는 흐름과,
+`ses-44-1788333361`의 class 75 중복 제거 뒤 class 72 복구를 회귀 테스트로
+고정했다.
+
+## 2. 냉동 로드셀 최종 delta 안정화
+
+### 관측된 문제
+
+냉동 장비에서는 문이 열린 동안 손으로 상품을 집고 옮기는 과정에서 중간 하중이
+여러 번 바뀐다. 중간 변화는 비전 분석 구간을 찾는 데 유용하지만, 결제용 최종
+상품 변화량으로 신뢰하면 안 된다.
+
+대표 사례:
+
+```text
+시작 안정값:       0g
+중간 변화:   +110g, +210g, -315g
+종료 안정값:    -105g
+```
+
+결제 delta는 `-105g`여야 한다. 중간 변화의 합 또는 중간 상태만으로 결과를
+확정하면 `+5g`처럼 반품으로 보이는 값이 나와 `unmatched_return`으로 처리될 수
+있다.
+
+### 기존 BOCPD 경로
+
+기본 분석기는 `BocpdLoadcellAnalyzer`다. 기존에도 채널별로 첫 BOCPD level과
+마지막 BOCPD level의 차이를 `delta_weight`로 사용했으며, `WeightSegment`는
+이 level들 사이의 단계 변화를 기록했다. 즉 코드가 단순히 `segments`의 수치를
+더해 delta를 만들던 구조는 아니었다.
+
+다만 BOCPD가 짧거나 흔들리는 마지막 level을 종료값으로 선택할 수 있었고,
+removal(delta 음수)은 return과 달리 마지막 안정 지속시간을 별도로 보호하지
+않았다. 따라서 종료부가 안정됐는지 명시적으로 확인하고, 결제 delta의 근거를
+아카이브에 남길 필요가 있었다.
+
+### 수정 내용
+
+냉동 프로파일에 다음 최종 안정성 기준을 추가했다.
+
+```text
+종료/시작 window: 채널별 3개 샘플
+대표값:           median
+허용 흔들림:       max(samples) - min(samples) <= 10g
+```
+
+IO Board polling이 약 `0.8s`이므로 3개 샘플은 약 2.4초다. median을 사용해
+한 프레임의 튐이나 손 접촉값이 종료값을 바꾸지 않도록 했다.
+
+구체적인 흐름은 다음과 같다.
+
+1. BOCPD가 기존과 동일하게 채널별 변화 segment를 만든다.
+2. 냉동 removal 채널에서 trigger 시작 3개와 종료 3개 sample의 median/span을 계산한다.
+3. 시작과 종료 span이 모두 10g 이하면 `종료 median - 시작 median`을 해당 채널의
+   최종 delta로 사용한다.
+4. 중간 `WeightSegment`는 제거하거나 합산하지 않고, 비전 분석 시간창과 진단용으로
+   그대로 유지한다.
+5. 움직인 removal 채널의 시작 또는 종료 span이 10g을 넘으면 `final_delta_unstable`로
+   판단한다. 이때 delta를 0으로 보내므로 불안정한 부호가 `unmatched_return` 또는
+   반품 차감으로 확정되는 것을 막는다.
+6. 반품(delta 양수)은 기존 `needs_return_stabilization` 계약을 그대로 우선한다.
+   이번 보정으로 반품 재수집 흐름을 바꾸지 않았다.
+
+### 저장되는 진단값
+
+`TriggerTrace.loadcell_terminal_levels`와 세션 archive의
+`triggers[].trace.loadcell_terminal_levels`에 채널별 다음 정보가 남는다.
+
+```text
+channel
+start_median
+end_median
+start_span
+end_span
+```
+
+종료 안정화에 실패하면 trace의 `reason_codes`에는 아래 값도 남는다.
+
+```text
+loadcell_final_delta_unstable
+```
+
+따라서 이후 `unmatched_return` 또는 `below_min_weight_change`가 나와도,
+중간 segment뿐 아니라 실제 최종 delta가 어떤 시작/종료 프레임에서 계산됐는지
+세션 YAML만으로 확인할 수 있다.
+
+### 범위와 제약
+
+- 적용 범위는 기본 `BOCPD` 냉동 경로다. 냉장 프로파일과 `plateau` 롤백 분석기는
+  기존 동작을 유지한다.
+- 추가 샘플 수집이나 동기 대기는 추가하지 않는다. 이미 trigger payload에 포함된
+  샘플만 사용하므로 결제 지연은 늘지 않는다.
+- 3개 시작/종료 샘플이 모두 있어야 median 안정성 판단을 한다. 빠른 취출처럼
+  종료 샘플이 충분하지 않은 기존 BOCPD 경로는 기존 결과를 유지한다.
+- `final_delta_unstable`은 잘못된 반품 확정을 막는 보호 장치다. 자동 재수집은
+  현재 IO Board/상위 서비스 계약에 없으므로 이번 변경 범위에는 포함하지 않았다.
+
+### 검증
+
+로드셀 회귀 테스트를 추가했다.
+
+- `0 -> +110 -> +320 -> -105`처럼 중간 변화가 있어도 시작/종료 median으로
+  `delta=-105g`가 되는지
+- 종료 3개 샘플의 span이 10g을 넘으면 `final_delta_unstable`과 `delta=0`이 되는지
+- 기존 빠른 취출 BOCPD 처리와 반품 stabilization 계약이 유지되는지
+
+실행 결과:
+
+```text
+tests/test_ingest.py: 20 passed
+tests/test_service.py tests/test_session_archive.py: 66 passed
+```
+
+## 변경 파일 및 Git 정보
+
+- [crk_model/core/profiles.py](crk_model/core/profiles.py) — 냉동 종료 안정 span(10g) 설정
+- [crk_model/ingest/loadcell.py](crk_model/ingest/loadcell.py) — 채널별 terminal median/span 자료형과 계산
+- [crk_model/ingest/bocpd.py](crk_model/ingest/bocpd.py) — 냉동 removal final delta 보정 및 불안정 차단
+- [crk_model/service/pipeline.py](crk_model/service/pipeline.py) — loadcell terminal 진단 trace 기록
+- [crk_model/ledger/archive.py](crk_model/ledger/archive.py) — terminal 진단 YAML 저장
+- [crk_model/ledger/cross_zone.py](crk_model/ledger/cross_zone.py) — fingerprint 중복 삭제 후 COMPLETE 대체 재판정
+- [tests/test_ingest.py](tests/test_ingest.py), [tests/test_cross_zone.py](tests/test_cross_zone.py) — 현장 세션 및 로드셀 회귀 테스트
+
+브랜치: `freeze-yoona`
+
+최근 커밋:
+
+```text
+bd8f9ce cross_zone: restore replacement after duplicate suppression
+da1ca5a test: preserve freezer field session regressions
+57fd957 ingest: stabilize freezer final loadcell delta
+```
