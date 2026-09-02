@@ -29,8 +29,10 @@ from crk_model.core.profiles import SensorProfile
 from crk_model.core.types import WeightSegment
 from crk_model.ingest.loadcell import (
     ChannelWeightEvent,
+    ChannelTerminalLevel,
     LoadcellAnalysis,
     LoadcellSample,
+    terminal_levels,
 )
 
 
@@ -189,6 +191,44 @@ class BocpdLoadcellAnalyzer:
         min_change = self._profile.min_weight_change_grams
         step = self._profile.segment_step_grams
         baseline = sum(c.segments[0].level for c in res.channels)
+        terminals = terminal_levels(samples)
+        terminal_by_channel = {level.channel: level for level in terminals}
+        final_span = self._profile.final_stability_span_grams
+        if final_span is not None:
+            moved_channels = [
+                channel for channel in res.channels
+                if channel.delta <= -min_change
+            ]
+            unstable = [
+                channel.channel for channel in moved_channels
+                if (
+                    (level := terminal_by_channel.get(channel.channel)) is None
+                    or level.start_span > final_span
+                    or level.end_span > final_span
+                )
+            ]
+            if unstable and terminals:
+                segments = tuple(
+                    sorted(
+                        (
+                            WeightSegment(
+                                samples[prev.end].ts,
+                                samples[cur.start].ts,
+                                cur.level - prev.level,
+                            )
+                            for channel in moved_channels
+                            for prev, cur in zip(
+                                channel.segments, channel.segments[1:], strict=False
+                            )
+                            if abs(cur.level - prev.level) >= step
+                        ),
+                        key=lambda segment: segment.start_ts,
+                    )
+                )
+                return LoadcellAnalysis(
+                    0.0, segments, False, baseline, "final_delta_unstable",
+                    terminal_levels=terminals,
+                )
         events: list[ChannelWeightEvent] = []
         pending_delta = 0.0
         pending = False
@@ -196,16 +236,24 @@ class BocpdLoadcellAnalyzer:
         for c in res.channels:
             if len(c.segments) >= 2:
                 moved = True
-            if abs(c.delta) < min_change:
+            delta = c.delta
+            if (
+                final_span is not None
+                and c.delta < 0
+                and c.channel in terminal_by_channel
+            ):
+                level = terminal_by_channel[c.channel]
+                delta = level.end_median - level.start_median
+            if abs(delta) < min_change:
                 continue  # 평탄/노이즈 트레이 — baseline에만 기여
-            if c.delta > 0:
+            if delta > 0:
                 # 반품 안정화 대기 (QA Q3 ①): 마지막 레벨이 충분히 지속돼야
                 # 구간화 — plateau 경로와 동일 계약.
                 last = c.segments[-1]
                 duration = samples[last.end].ts - samples[last.start].ts
                 if duration < self._stab_wait:
                     pending = True
-                    pending_delta += c.delta
+                    pending_delta += delta
                     continue
             segs = tuple(
                 WeightSegment(
@@ -214,11 +262,12 @@ class BocpdLoadcellAnalyzer:
                 for prev, cur in zip(c.segments, c.segments[1:], strict=False)
                 if abs(cur.level - prev.level) >= step
             )
-            events.append(ChannelWeightEvent(c.channel, c.delta, segs))
+            events.append(ChannelWeightEvent(c.channel, delta, segs))
         if pending:
             delta = pending_delta + sum(e.delta_grams for e in events)
             return LoadcellAnalysis(
-                delta, (), False, baseline, "needs_return_stabilization"
+                delta, (), False, baseline, "needs_return_stabilization",
+                terminal_levels=terminals,
             )
         if events:
             segments = sorted(
@@ -226,7 +275,8 @@ class BocpdLoadcellAnalyzer:
             )
             delta = sum(e.delta_grams for e in events)
             return LoadcellAnalysis(
-                delta, tuple(segments), True, baseline, events=tuple(events)
+                delta, tuple(segments), True, baseline, events=tuple(events),
+                terminal_levels=terminals,
             )
         if moved:
             # 변화는 있었지만 전 채널 게이트 미달 — 합산 delta를 실어 보내

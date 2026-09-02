@@ -23,6 +23,8 @@ class SensorProfile:
     weight_is_discriminative: bool
     # freezer 개수 검증 게이트 (I3). None이면 tolerance_grams 사용
     count_gate_tolerance_grams: float | None
+    # trigger 끝 샘플의 안정성 확인. None이면 final-delta median 보정 미사용.
+    final_stability_span_grams: float | None
     # 저무게 스킵 게이트 — 존 타입별 명시 분리 (QA Q8)
     min_weight_change_grams: float
     # D4: ingest 구간화 스텝 임계 (freezer는 노이즈 5~15g 때문에 크게)
@@ -54,6 +56,7 @@ REFRIGERATOR = SensorProfile(
     tolerance_grams=5.0,  # 센서 보증 분해능 5g 미만 임계는 무의미 (C3)
     weight_is_discriminative=True,
     count_gate_tolerance_grams=None,
+    final_stability_span_grams=None,
     min_weight_change_grams=5.0,
     segment_step_grams=5.0,  # 5g 양자화 와이어에서 스텝은 5g 배수로만 옴
     motion_gate_threshold=0.02,
@@ -67,6 +70,7 @@ FREEZER = SensorProfile(
     tolerance_grams=15.0,  # MODEL__WEIGHT__FREEZER_WEIGHT_TOLERANCE_GRAMS 계승
     weight_is_discriminative=False,
     count_gate_tolerance_grams=15.0,  # I3
+    final_stability_span_grams=10.0,
     min_weight_change_grams=5.0,
     segment_step_grams=20.0,  # 컴프레서 사이클·드리프트 가짜 세그먼트 방지 (QA Q3 ②)
     motion_gate_threshold=0.005,  # 김서림/성에 → 스킵 이득이 0에 수렴해도 정확도 무손실 (fail-safe)

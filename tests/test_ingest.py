@@ -268,3 +268,27 @@ class TestBocpdPrimaryAdapter:
         assert a.stabilized and len(a.events) == 2
         deltas = {e.channel: e.delta_grams for e in a.events}
         assert abs(deltas[0] - (-155.0)) < 5.0 and abs(deltas[1] - (-135.0)) < 5.0
+
+    def test_freezer_uses_terminal_medians_not_intermediate_segments(self):
+        from crk_model.core.profiles import FREEZER
+        from crk_model.ingest.bocpd import BocpdLoadcellAnalyzer
+
+        samples = self._series([0.0] * 3 + [110.0] * 3 + [320.0] * 3 + [-105.0] * 3)
+        analysis = BocpdLoadcellAnalyzer(FREEZER).analyze(samples)
+
+        assert analysis.stabilized
+        assert analysis.delta_weight == -105.0
+        assert analysis.terminal_levels[0].end_median == -105.0
+        assert analysis.terminal_levels[0].end_span == 0.0
+
+    def test_freezer_unstable_terminal_delta_is_not_used_for_billing(self):
+        from crk_model.core.profiles import FREEZER
+        from crk_model.ingest.bocpd import BocpdLoadcellAnalyzer
+
+        samples = self._series([0.0] * 3 + [-105.0] * 3 + [-80.0, -105.0, -130.0], per=1)
+        analysis = BocpdLoadcellAnalyzer(FREEZER).analyze(samples)
+
+        assert not analysis.stabilized
+        assert analysis.reason == "final_delta_unstable"
+        assert analysis.delta_weight == 0.0
+        assert analysis.terminal_levels[0].end_span == 50.0

@@ -104,6 +104,8 @@ class TriggerTrace:
     # 카메라별 디코드 크롭 원점 스탬프 (frame_detections의 좌표계 계약):
     # render-session이 같은 크롭으로 AVI를 디코드해야 bbox가 맞는다.
     camera_crops: dict[str, str] | None = None
+    # 냉동 final delta의 시작/종료 안정값. 불안정 판정의 사후 원인 확인용.
+    loadcell_terminal_levels: list[dict] | None = None
 
 
 @dataclass(frozen=True)
@@ -251,6 +253,17 @@ class TriggerPipeline:
 
         analyzer = self._analyzer_factory(profile)
         analysis = analyzer.analyze(req.loadcells)
+        if analysis.terminal_levels:
+            trace.loadcell_terminal_levels = [
+                {
+                    "channel": level.channel,
+                    "start_median": level.start_median,
+                    "end_median": level.end_median,
+                    "start_span": level.start_span,
+                    "end_span": level.end_span,
+                }
+                for level in analysis.terminal_levels
+            ]
         vision_only = not analysis.stabilized and analysis.reason in (
             "insufficient_samples",
             "insufficient_stable_regions",
@@ -263,6 +276,8 @@ class TriggerPipeline:
         if analysis.reason == "needs_return_stabilization":
             # 재수집은 장치측 훅 (QA Q3 ① 순서 계약) — 구간화 보류 사실만 기록
             trace.reason_codes.append("return_stabilization_pending")
+        if analysis.reason == "final_delta_unstable":
+            trace.reason_codes.append("loadcell_final_delta_unstable")
         delta = analysis.delta_weight
         if not vision_only and abs(delta) < profile.min_weight_change_grams:
             # 저무게 스킵: vision 전체 생략 = YOLO 호출 0 (QA Q8)

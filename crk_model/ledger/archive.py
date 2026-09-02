@@ -82,6 +82,8 @@ def _trace_to_dict(trace: TriggerTrace | None) -> dict:
         out["frame_detections"] = list(trace.frame_detections)
         if trace.camera_crops is not None:
             out["camera_crops"] = dict(trace.camera_crops)
+    if trace.loadcell_terminal_levels is not None:
+        out["loadcell_terminal_levels"] = trace.loadcell_terminal_levels
     return out
 
 

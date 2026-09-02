@@ -49,6 +49,17 @@ class ChannelWeightEvent:
 
 
 @dataclass(frozen=True)
+class ChannelTerminalLevel:
+    """채널별 trigger 시작/종료 안정값 진단 — 결제 delta의 근거를 남긴다."""
+
+    channel: int
+    start_median: float
+    end_median: float
+    start_span: float
+    end_span: float
+
+
+@dataclass(frozen=True)
 class LoadcellAnalysis:
     delta_weight: float
     segments: tuple[WeightSegment, ...]
@@ -58,6 +69,30 @@ class LoadcellAnalysis:
     # 게이트(|delta| >= min_weight_change)를 넘은 채널별 이벤트. 2개 이상이면
     # pipeline이 이벤트별로 라우터를 돌려 단품 매칭으로 분해한다 (2단계).
     events: tuple[ChannelWeightEvent, ...] = ()
+    terminal_levels: tuple[ChannelTerminalLevel, ...] = ()
+
+
+def terminal_levels(
+    samples: Sequence[LoadcellSample], window: int = 3
+) -> tuple[ChannelTerminalLevel, ...]:
+    """각 채널의 첫/마지막 window 프레임 median과 흔들림 폭을 계산한다."""
+    if len(samples) < window * 2:
+        return ()
+    levels: list[ChannelTerminalLevel] = []
+    for channel in range(len(samples[0].values)):
+        start = sorted(sample.values[channel] for sample in samples[:window])
+        end = sorted(sample.values[channel] for sample in samples[-window:])
+        midpoint = window // 2
+        levels.append(
+            ChannelTerminalLevel(
+                channel=channel,
+                start_median=start[midpoint],
+                end_median=end[midpoint],
+                start_span=start[-1] - start[0],
+                end_span=end[-1] - end[0],
+            )
+        )
+    return tuple(levels)
 
 
 class LoadcellAnalyzer:
