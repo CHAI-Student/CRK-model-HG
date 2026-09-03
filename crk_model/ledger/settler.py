@@ -494,10 +494,14 @@ class CloseSettler:
                         ),
                         default=0.0,
                     )
+                    strong_combo = self._strong_combo_override(
+                        zone, p, count, -net, combo, events
+                    )
                     if (
                         zone_conf is not None
                         and zone_conf >= self.combo_override_max_conf
                         and challenger_conf < self.combo_override_max_conf
+                        and not strong_combo
                     ):
                         notes.append(
                             f"freezer_combo_rejected_confident_snap:zone{zone}:"
@@ -508,6 +512,13 @@ class CloseSettler:
                         )
                         combo = None
                         conf_rejected = True
+                    elif strong_combo:
+                        notes.append(
+                            f"freezer_combo_override_strong_evidence:zone{zone}:"
+                            + ",".join(
+                                f"{prod.product_id}={n}" for prod, n in combo
+                            )
+                        )
                 # I8 관측 note: 자격 제외가 없었다면 나왔을 조합이 억제된 경우
                 # — analyze-sessions가 가드 정오(억제된 조합 vs GT)를 실측해
                 # ratio/conf/guard 파라미터를 검증·보정할 수 있게 한다.
@@ -649,6 +660,31 @@ class CloseSettler:
                     conf = max(conf, c.confidence)
         return votes, conf
 
+    def _strong_combo_override(
+        self,
+        zone: int,
+        snapped_product: ActiveProduct,
+        snapped_count: int,
+        target: float,
+        combo: tuple[tuple[ActiveProduct, int], ...],
+        events: Sequence[TriggerEvent],
+    ) -> bool:
+        """낮은 conf challenger도 독립 증거가 충분할 때만 확신 스냅을 뒤집는다."""
+        if sum(count for _, count in combo) != snapped_count:
+            return False
+        snap_residual = abs(target - snapped_product.unit_weight * snapped_count)
+        combo_residual = abs(target - sum(p.unit_weight * count for p, count in combo))
+        if snap_residual - combo_residual < 5.0:
+            return False
+        top_votes, _ = self._class_evidence(zone, snapped_product.class_id, events)
+        for product, _ in combo:
+            if product.product_id == snapped_product.product_id:
+                continue
+            votes, confidence = self._class_evidence(zone, product.class_id, events)
+            if confidence >= 0.85 and votes >= 0.35 * top_votes:
+                return True
+        return False
+
     @staticmethod
     def _backed_zones_by_class(
         events: Sequence[TriggerEvent],
@@ -757,7 +793,7 @@ class CloseSettler:
                     if cid in zone_billed:
                         continue
                     dominates_billed = (
-                        billed_votes is not None and votes[cid] >= billed_votes
+                        billed_votes is not None and votes[cid] > billed_votes
                     )
                     if dominates_billed or (
                         billed_votes is None and cid == raw_top_cid

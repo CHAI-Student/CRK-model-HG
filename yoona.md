@@ -585,3 +585,116 @@ bd8f9ce cross_zone: restore replacement after duplicate suppression
 da1ca5a test: preserve freezer field session regressions
 57fd957 ingest: stabilize freezer final loadcell delta
 ```
+
+---
+
+# 2026-09-03 BOCPD 종료 안정성 오탐 수정 및 콤보 판정 미세 조정
+
+## 1. BOCPD 종료 안정성 판단이 정상 취출을 오탐하던 문제
+
+### 문제
+
+앞선(2026-09-02) 종료 안정성 수정의 초기 구현은 시작 3개 샘플의 span도 `<= 10g`을
+요구하고, 종료값을 `end_median - start_median`으로 계산했다. 그런데 trigger는
+이미 무게가 변하는 도중에 시작될 수 있어서, 시작 3개 샘플 자체가 `0, -100, -110`처럼
+아직 흔들리는 경우가 정상적으로 발생한다.
+
+실제 로그(ses-13/ses-16/ses-17)에서 class 72 단독 취출(-110g)이 이 조건에 걸려
+`final_delta_unstable`로 처리됐고, `delta=0`이 되어 비전 호출 자체가 스킵됐다.
+
+### 수정
+
+[crk_model/ingest/bocpd.py](crk_model/ingest/bocpd.py)에서 시작 span 조건을
+제거했다. 이제 안정성 판단은 **종료 3개 샘플의 span만** 본다. 시작 기준값은
+terminal 시작 median이 아니라 BOCPD가 찾은 채널의 첫 segment level
+(`c.segments[0].level`)을 그대로 사용한다.
+
+```text
+0, -100, -110, ... (안정), 종료 median -110
+-> start_span은 보지 않음, end_span만 <=10g면 delta=-110 확정
+```
+
+시작 구간의 흔들림은 원래부터 BOCPD segment 경계가 흡수하는 값이라, 별도
+안정성 요건으로 다시 검사할 필요가 없었다.
+
+### 검증
+
+`tests/test_ingest.py`에 trigger가 무게 변화 도중 시작해도 오탐하지 않는지 확인하는
+회귀 테스트(`test_freezer_accepts_a_trigger_that_starts_during_the_weight_change`)를
+추가했다. 종료부만 불안정한 기존 회귀 테스트는 그대로 유지된다.
+
+## 2. 확신 스냅 가드 문턱 조정 및 낮은 확신 챌린저 구제
+
+### 문턱 하향: 0.95 -> 0.92
+
+콤보가 확신 스냅(존 판정 COMPLETE + 고confidence)을 뒤집지 못하게 막는
+`combo_override_max_conf` 기본값을 `0.95`에서 `0.92`로 낮췄다. 실측 판정
+confidence 분포를 볼 때 0.92~0.95 구간의 스냅도 이미 충분히 확신 구간이라
+판단해, 이 구간에서 콤보가 함부로 뒤집지 못하도록 보호 범위를 넓혔다.
+
+### 낮은confidence 챌린저를 위한 좁은 구제 (`_strong_combo_override`)
+
+문턱을 낮추면서 발생할 수 있는 부작용 — 실제로는 맞는 조합인데 챌린저
+confidence가 문턱 바로 아래(예: 0.877)라 막히는 경우 — 를 위해
+[crk_model/ledger/settler.py](crk_model/ledger/settler.py)에 좁은 예외를 추가했다.
+
+다음을 모두 만족해야만 확신 스냅 가드를 우회한다.
+
+- 콤보 총 개수가 스냅 개수와 같다
+- 콤보 잔차가 스냅 잔차보다 최소 5g 더 낫다
+- 콤보 안의 non-snap 챌린저 confidence가 `>= 0.85`
+- 챌린저 득표가 스냅 클래스 득표의 `35%` 이상
+
+네 조건을 모두 만족하면 `freezer_combo_override_strong_evidence` note를 남기고
+콤보를 허용한다. 새 전역 문턱을 추가하지 않고 기존 파라미터만으로 판단한다.
+
+- 검증: 76×2(스냅, 확신도 1.0) 취출이 실제로는 76+75였던 사례(잔차 5g -> 0g,
+  75 confidence 0.877, 득표 7 vs top 19)를 재구성한 회귀 테스트로 확인했다.
+
+## 3. 판정 기각 조합 제외 조건의 동률 표 예외
+
+### 문제
+
+`_vision_combo()`의 `rejected_by_judgment` 제외는 "이 존의 COMPLETE 판정이
+이미 과금한 클래스보다 표가 많거나 같은 클래스"를 전부 걷어냈다
+(`votes[cid] >= billed_votes`). 그런데 실제로는 판정이 그 클래스를 이겼다는
+근거 없이, 우연히 과금 클래스와 **표가 같을 뿐**인 정당한 대체 후보까지
+같이 제거되는 사례가 나왔다.
+
+실사고(`ses-1-1788399283`): zone3가 cross-zone 재판정으로 class 71(표 8)을
+COMPLETE 과금한 뒤, 실제 두 번째 상품인 class 72도 표가 똑같이 8이라는
+이유만으로 `rejected_by_judgment`에 걸려 조합 후보에서 빠졌다. 그 결과
+class 72가 누락되고 71×2로 확정됐다(정답은 71×1+72×1).
+
+### 수정
+
+`votes[cid] >= billed_votes` 조건을 `votes[cid] > billed_votes`로 좁혔다.
+이제 과금 클래스보다 **더 많은** 표를 받은 클래스만 판정 기각으로 간주해
+제외하고, 동률인 클래스는 나머지 자격 검사(ghost 제외, 다른 존 무게 뒷받침
+제외, 최소 증거 하한, 무게 게이트)를 그대로 통과해야 콤보 후보로 남는다.
+기존에 진짜로 판정이 이긴 클래스를 걸러내던 보호(`더 많은 표` 케이스)는
+그대로 유지된다.
+
+- 검증: 동률 표 후보가 다른 존 뒷받침 제외 이후에도 살아남아 정답 조합을
+  구성하는 회귀 테스트를 추가했다(`test_combo_keeps_equal_vote_candidate_after_other_zone_exclusion`).
+  `ses-1-1788399283`의 71/72 동률 표 실사고도 이 수정으로 해결된다.
+
+## 검증
+
+```text
+tests/test_ledger.py: 36 passed
+전체: 460 passed, 24 skipped
+```
+
+정적 검사(`get_errors`, `git diff --check`) 통과.
+
+## 변경 파일
+
+- [crk_model/ingest/bocpd.py](crk_model/ingest/bocpd.py) — 종료 안정성 판단에서 시작 span 조건 제거
+- [crk_model/ledger/settler.py](crk_model/ledger/settler.py) — `_strong_combo_override()` 추가, `rejected_by_judgment` 동률 표 예외
+- [crk_model/core/config.py](crk_model/core/config.py) — `combo_override_max_conf` 기본값 0.95 -> 0.92
+- `freezer.env.example`, `refrg.env.example` — `MODEL__CLOSE__COMBO_OVERRIDE_MAX_CONF` 0.92로 변경
+- [tests/test_ingest.py](tests/test_ingest.py), [tests/test_ledger.py](tests/test_ledger.py) — 회귀 테스트 추가
+- [docs/04-configuration.md](docs/04-configuration.md), [crk_model/ledger/README.md](crk_model/ledger/README.md) — 새 문턱·예외 문서화
+
+브랜치: `freeze-yoona` (커밋 전 로컬 변경 포함)

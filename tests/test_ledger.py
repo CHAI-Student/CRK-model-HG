@@ -393,6 +393,35 @@ class TestVisionComboResolve:
             for n in result.notes
         )
 
+    def test_combo_keeps_equal_vote_candidate_after_other_zone_exclusion(self):
+        """ses-10: equal-vote 71 remains after zone2-backed 70 is removed."""
+        p70 = ActiveProduct("P70", "제로바", 70, 70.0, 2500, 10)
+        p71 = ActiveProduct("P71", "브라보콘", 71, 105.0, 2000, 10)
+        p72 = ActiveProduct("P72", "주먹밥", 72, 115.0, 2500, 10)
+        s = self.settler(p70, p71, p72)
+        source = self.removal_with_cands(
+            "ses-10-1788361257", 2, 1.0, p70, 1, -70.0,
+            [cand(70, conf=1.0, votes=17), cand(71, conf=0.85, votes=4),
+             cand(72, conf=0.92, votes=4)],
+            conf=1.0,
+        )
+        target = self.removal_with_cands(
+            "ses-10-1788361257", 3, 2.0, p72, 2, -220.0,
+            [cand(70, conf=1.0, votes=17), cand(71, conf=0.85, votes=4),
+             cand(72, conf=0.9, votes=4)],
+            conf=0.9,
+        )
+
+        result = s.settle("ses-10-1788361257", [source, target], {2: FREEZER, 3: FREEZER})
+
+        billed = {
+            (zone.zone, product_count.product.class_id): product_count.count
+            for zone in result.zones
+            for product_count in zone.products
+        }
+        assert billed == {(2, 70): 1, (3, 71): 1, (3, 72): 1}
+        assert not any("class71(rejected_by_judgment)" in note for note in result.notes)
+
     def test_combo_cannot_override_confident_snap(self):
         # 14차 ses-2 재구성(⑤): 판정이 conf 1.0으로 13x4를 확정(우도 일치),
         # 스냅 잔차 13.5g로 게이트 안. c24(18표, conf .84)가 실존 하한의
@@ -452,6 +481,22 @@ class TestVisionComboResolve:
         assert billed == {"P13": 3, "P24": 1}
         assert any("freezer_close_resolve_combo:zone9" in n for n in result.notes)
         assert not any("freezer_combo_rejected_confident_snap" in n for n in result.notes)
+
+    def test_combo_overrides_confident_snap_with_strong_lower_confidence_evidence(self):
+        """ses-8: 76x2(5g) yields to 76+75(0g) with a 7/19, 0.878 challenger."""
+        p76 = ActiveProduct("P76", "월드콘", 76, 100.0, 1400, 10)
+        p75 = ActiveProduct("P75", "요맘때", 75, 95.0, 1500, 10)
+        s = self.settler(p76, p75)
+        e = self.removal_with_cands(
+            "ses-8-1788361122", 9, 1.0, p76, 2, -195.0,
+            [cand(76, conf=1.0, votes=19), cand(75, conf=0.877514237165451, votes=7)],
+            conf=1.0,
+        )
+        result = s.settle("ses-8-1788361122", [e], PROFILES)
+        billed = {pc.product.product_id: pc.count for z in result.zones for pc in z.products}
+        assert billed == {"P76": 1, "P75": 1}
+        assert any("freezer_combo_override_strong_evidence:zone9:P76=1,P75=1" in n
+                   for n in result.notes)
 
     def test_combo_split_prefers_residual_when_snap_already_gate_passed(self):
         # 0826 2차 재테스트(ses-2 재구성): 71→69 순차 취출이 69x3+71x1(잔차
