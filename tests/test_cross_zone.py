@@ -963,3 +963,59 @@ class TestFingerprintDuplicateSuppression:
             )
             for note in notes
         )
+
+    def test_ambiguous_residual_keeps_the_zone_without_a_valid_alternative(self):
+        """ses-3 zone1/zone5 66 실사고 재구성: 잔차가 근소(5g vs 0g)하게
+        갈릴 때 무게만으로 승자를 정하면, 실제로 맞았던 zone3의 66이
+        지워지고 zone4의 가짜 66(진짜는 77)이 남는다. 제거 후 대체 판정을
+        해보면 zone3은 억지 스케일(70×2, 잔차20 > base gate15)만 나오고
+        zone4은 77×1(잔차5 <= base gate15)로 딱 맞는다 — 대체가 안 되는
+        zone3을 남기고 zone4만 77로 교체해야 한다."""
+        p66 = ActiveProduct("P66", "class66", 66, 165.0, 8000, 10)
+        p70 = ActiveProduct("P70", "class70", 70, 70.0, 2500, 10)
+        p72 = ActiveProduct("P72", "class72", 72, 115.0, 2500, 10)
+        p77 = ActiveProduct("P77", "class77", 77, 160.0, 2500, 10)
+        zone3 = event(
+            "ses-3", 3, 100.0,
+            JudgmentResult(
+                JudgmentStatus.COMPLETE, (ProductCount(p66, 1),), 1.0,
+                "freezer_vision_first_single",
+            ),
+            -160.0,
+            candidates=[
+                cand(66, conf=1.0, votes=32), cand(70, conf=1.0, votes=15),
+                cand(72, conf=1.0, votes=13),
+            ],
+        )
+        zone4 = event(
+            "ses-3", 4, 200.0,
+            JudgmentResult(
+                JudgmentStatus.COMPLETE, (ProductCount(p66, 1),), 1.0,
+                "freezer_vision_first_single",
+            ),
+            -165.0,
+            candidates=[
+                cand(66, conf=1.0, votes=32), cand(70, conf=1.0, votes=31),
+                cand(77, conf=1.0, votes=19), cand(72, conf=1.0, votes=16),
+            ],
+        )
+        notes: list[str] = []
+
+        out = apply_cross_zone_penalty(
+            [zone3, zone4], self.PROFILES_34, (p66, p70, p72, p77), CFG, notes
+        )
+
+        by_zone = {event.zone: event for event in out}
+        assert [(pc.product.class_id, pc.count) for pc in by_zone[3].judgment.products] == [
+            (66, 1)
+        ]
+        assert [(pc.product.class_id, pc.count) for pc in by_zone[4].judgment.products] == [
+            (77, 1)
+        ]
+        assert any(
+            note == (
+                "zone4:cross_zone_fingerprint_duplicate_replaced:"
+                "removed=class66:adopted=P77x1"
+            )
+            for note in notes
+        )

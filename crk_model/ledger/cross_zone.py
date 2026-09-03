@@ -241,6 +241,42 @@ def _same_fingerprint(a: VisionCandidate, b: VisionCandidate) -> bool:
     return abs(a.vote_count - b.vote_count) <= vote_tolerance
 
 
+def _trial_replacement_valid(
+    e: TriggerEvent,
+    cid: int,
+    active_products: Sequence[ActiveProduct],
+    profile: SensorProfile,
+    router: JudgmentRouter,
+) -> bool:
+    """cid를 뺀 후보로 재판정했을 때, 개수 슬랙 없이도(base count_gate) 딱
+    맞는 COMPLETE 대체가 있는가 — ses-3 zone1/zone5 66 실사고: 진짜 66을
+    가진 zone도 66을 빼면 남은 후보로 억지로 스케일된 조합(70×2, 잔차가
+    n-스케일 게이트 경계에 겨우 걸침)을 만들어낼 수 있어, "대체가 되는지
+    여부"만으로는 진짜/가짜를 못 가른다. base gate(개수 슬랙 미적용)로
+    엄격히 걸러 억지 적합을 배제해야 진짜 대체(자기 상품이 따로 있다는
+    독립 증거)만 남는다."""
+    trial = router.judge(
+        JudgmentContext(
+            zone=e.zone,
+            profile=profile,
+            delta_weight=e.delta_weight,
+            segments=e.segments,
+            vision_candidates=tuple(
+                c for c in e.vision_candidates if c.class_id != cid
+            ),
+            active_products=tuple(active_products),
+            vision_only=False,
+        )
+    )
+    if trial.status is not JudgmentStatus.COMPLETE or not trial.products:
+        return False
+    residual = abs(
+        abs(e.delta_weight)
+        - sum(pc.count * pc.product.unit_weight for pc in trial.products)
+    )
+    return residual <= profile.count_gate
+
+
 def _fingerprint_duplicate_suppression(
     events: Sequence[TriggerEvent],
     profiles: Mapping[int, SensorProfile],
@@ -298,12 +334,31 @@ def _fingerprint_duplicate_suppression(
         if len(matched) < 2:
             continue
         survivors = [per_zone[z] for z in matched]
-        best = min(
-            survivors,
-            key=lambda e: (
-                r if (r := _judgment_residual(e)) is not None else float("inf")
-            ),
-        )
+        residuals = {
+            id(e): (r if (r := _judgment_residual(e)) is not None else float("inf"))
+            for e in survivors
+        }
+        ranked = sorted(survivors, key=lambda e: residuals[id(e)])
+        best = ranked[0]
+        # 잔차 근소(≤ 5g, 센서 분해능 마진) 시엔 무게만으로 진짜를 못 가른다
+        # (ses-3 zone1=5g vs zone5=0g 66 실사고: 잔차가 더 작은 zone5를
+        # "진짜"로 보고 실제로 맞았던 zone1을 지워버렸다). 이때만 제거 후
+        # 대체 판정을 시도해, 대체가 안 되는(=자기 상품일 개연성이 큰) 쪽을
+        # 남긴다. 잔차가 뚜렷이 갈리는 대다수 케이스는 추가 판정 없이 기존
+        # 그대로 — 계산량 증가는 이 근소 동률 구간에만 국한된다.
+        if (
+            len(ranked) >= 2
+            and residuals[id(ranked[1])] - residuals[id(best)] <= _SELF_FIT_MARGIN_G
+        ):
+            non_replaceable = [
+                e for e in survivors
+                if not _trial_replacement_valid(
+                    e, cid, active_products,
+                    profiles.get(e.zone, default_profile), router,
+                )
+            ]
+            if len(non_replaceable) == 1:
+                best = non_replaceable[0]
         for e in survivors:
             if e is not best:
                 to_strip[id(e)].add(cid)
