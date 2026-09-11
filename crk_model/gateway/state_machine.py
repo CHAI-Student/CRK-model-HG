@@ -119,13 +119,16 @@ class MultiZoneGateway:
         clock: Callable[[], float] = time.monotonic,
         close_timeout_s: float = 10.0,  # I17: 상한 타임아웃 (정상 경로 아님)
         worker_stall_timeout_s: float = 120.0,  # queue_pending 전용 상한 (처리 지연 ≠ 유실)
-        close_grace_s: float = 3.0,
+        close_grace_s: float = 5.0,
         # CLOSE 유예 창 (issue #8, 원본 close_initial_wait_seconds=3.0 복원).
         # 인과 배리어(I17)는 "도착한" 트리거만 셀 수 있다 — 문 닫힘 시점에
         # 카메라가 아직 AVI를 쓰고 있으면(실측: CLOSE 0.66s 후 /trigger 도착)
         # 배리어가 자명하게 충족되어 0원 확정 + late trigger rejected = 매출
-        # 누락. 카메라 seq 워터마크(D2/I17 ③)가 배포되기 전까지(P5)는 이
-        # 시간 유예가 유일한 방어다. seq_watermark가 오면 그쪽이 우선한다.
+        # 누락. 이 유예는 seq_watermark/expected_triggers가 있어도 생략하지
+        # 않는다 — 워터마크는 Node가 아는 만큼만 정확하고, 아직 도착하지 않은
+        # 트리거의 존재는 시간만이 알 수 있다 (2026-09-03 ses-63 재발: Node가
+        # 인코딩 중인 2번째 트리거를 못 세어 expected_triggers={1:1}로 보낸 뒤
+        # 즉시 확정되어 매출 누락 발생).
         on_finalize: Callable[[str, DoorState, FinalizedSettlement], None] | None = None,
         default_profile: SensorProfile = REFRIGERATOR,
         # zone이 profiles dict에 없을 때의 폴백 프로파일 (cabinet_type 이식) —
@@ -150,7 +153,6 @@ class MultiZoneGateway:
         self._close_ts: float | None = None
         self._progress_ts: float | None = None  # 마지막 트리거 처리 완료 시각
         self._last_enqueue_ts: float | None = None  # CLOSE 유예 기준점 (issue #8)
-        self._watermark_set = False  # D2 seq 워터마크 수신 여부 — 있으면 유예 생략
 
     # -- OPEN --
     def handle_open(self, session_id: str) -> GatewayResponse:
@@ -182,10 +184,12 @@ class MultiZoneGateway:
     ) -> GatewayResponse:
         self.state = DoorState.PENDING_CLOSE
         self._close_ts = self._clock()
-        # 워터마크(카메라 seq ③ 또는 엣지 기대 수 ③')가 오면 인과 신호가
-        # 완결이므로 시간 유예(close_grace)는 생략된다 — 유예는 워터마크
-        # 부재 시의 heuristic 방어일 뿐이다 (issue #8).
-        self._watermark_set = bool(seq_watermark) or bool(expected_triggers)
+        # 워터마크(카메라 seq ③ 또는 엣지 기대 수 ③')는 배리어의 "도착
+        # 대기" 조건만 좁힌다 — CLOSE 유예(close_grace)는 더 이상 생략하지
+        # 않는다. 2026-09-03 ses-63 재발: Node가 아직 인코딩 중인 2번째 트리거를
+        # 세지 못해 expected_triggers={1:1}로 보내도, 배리어가 그 숫자만으로
+        # 즉시 충족되면 안 된다 — 워터마크는 배리어(도착 카운트)만 좁히고,
+        # 유예는 워터마크 유무와 무관하게 항상 별도로 적용한다.
         if seq_watermark:  # D2: 카메라 seq 도입 시에만 (I17 ③)
             self.barrier.set_close_watermark(seq_watermark)
         if expected_triggers:  # 엣지 워터마크 (I17 ③', issue #8)
@@ -207,14 +211,15 @@ class MultiZoneGateway:
 
         status = self.barrier.status()
         if status.satisfied:
-            # issue #8: 배리어 충족이 "카메라가 더 보낼 게 없다"를 뜻하진 않는다 —
-            # 문 닫힘 시점에 카메라가 아직 AVI를 쓰고 있으면 그 트리거는 배리어에
-            # 보이지 않는다 (실측: CLOSE 0.66s 후 /trigger 도착 → 0원 확정 +
-            # rejected = 매출 누락). seq 워터마크(D2)가 없는 배포에서는 CLOSE·
-            # 마지막 트리거 도착 이후 close_grace_s 동안 확정을 보류해 late
-            # trigger에게 도착할 시간을 준다 (원본 close_initial_wait 3.0s 복원).
-            # 워터마크가 있으면 인과 신호가 완결이므로 유예 없이 즉시 확정.
-            if not self._watermark_set and self._close_grace > 0:
+            # issue #8 (2026-09-03 ses-63 재발): 배리어 충족은 "도착한" 트리거
+            # 기준일 뿐, 워터마크(expected_triggers)가 있어도 "카메라가 더 보낼
+            # 게 없다"를 보장하지 않는다 — Node가 아직 인코딩 중인 트리거를
+            # 못 세면 배리어가 자명하게 충족돼 0원 확정 + late trigger rejected
+            # (매출 누락)로 재발했다. 그래서 워터마크는 배리어(도착 대기)만
+            # 좁히고, CLOSE·마지막 트리거 도착 이후 close_grace_s 동안 확정을
+            # 보류해 late trigger에게 도착할 시간을 주는 이 유예는 워터마크
+            # 유무와 무관하게 항상 적용한다 (원본 close_initial_wait 3.0s).
+            if self._close_grace > 0:
                 assert self._close_ts is not None
                 anchor = self._close_ts
                 if self._last_enqueue_ts is not None:
@@ -357,6 +362,7 @@ def build_payment_payload(settlement: FinalizedSettlement) -> dict:
                 "productCount": sum(p["count"] for p in products),
                 "weightDelta": round(z.weight_delta, 1),
                 "confidence": z.confidence,
+                "status": z.status,  # judgment 기준 완전/불완전결제 ("complete"/"partial") — confidence threshold 미사용
             }
         )
         all_products.extend(products)

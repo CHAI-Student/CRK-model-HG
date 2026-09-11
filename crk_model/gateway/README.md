@@ -78,7 +78,7 @@ stateDiagram-v2
 
 | 상황 | 응답 |
 |---|---|
-| 배리어 충족 + (워터마크 없고 유예 창 안) | `PENDING_CLOSE`, detail `close_grace_pending` |
+| 배리어 충족 + 유예 창 안 | `PENDING_CLOSE`, detail `close_grace_pending` |
 | 배리어 충족 + 유예 경과 | 정산 실행 → `FINALIZED`(정산 객체 실림) 또는 `ERROR`(blocked) |
 | 배리어 미충족, 타임아웃 전 | `PENDING_CLOSE`, detail `barrier_pending:<사유 코드들>` |
 | 배리어 미충족, 타임아웃 경과 | `ERROR`, payload `None`, detail `barrier_timeout:<사유 코드들>` |
@@ -88,16 +88,18 @@ Jetson의 디코드+추론은 `close_timeout_s`(10s)보다 길 수 있어, 큐�
 훨씬 넉넉한 `worker_stall_timeout_s`(120s)를 쓰고 기준점도 마지막 처리 완료 시각으로
 갱신한다(진행 = 살아있음). 이 상한까지 넘으면 워커 사망/행으로 보고 에러 세션이다.
 
-**CLOSE 유예 창**(`close_grace_s`, 기본 3s): 배리어는 **"도착한" 트리거만** 셀 수 있다.
+**CLOSE 유예 창**(`close_grace_s`, 기본 5s): 배리어는 **"도착한" 트리거만** 셀 수 있다.
 문 닫힘 시점에 카메라가 아직 AVI를 쓰고 있으면(실측: CLOSE 0.66s 후 `/trigger` 도착) 배리어가
 자명하게 충족되어 0원 확정 + late trigger `rejected` = 매출 누락이 된다. 그래서 CLOSE·마지막
 트리거 도착 시각 중 늦은 쪽을 기준으로 유예 동안 확정을 보류한다. **워터마크(카메라 seq 또는
-엣지 `expected_triggers`)가 오면 인과 신호가 완결이므로 유예를 생략**한다 — 유예는 워터마크
-부재 시의 heuristic 방어일 뿐이다.
+엣지 `expected_triggers`)는 배리어(도착 대기)만 좁힐 뿐, 유예를 생략하지 않는다** — 2026-09-03
+ses-63 재발(Node가 아직 인코딩 중인 트리거를 못 세어 `expected_triggers`가 실제보다 적은
+수치로 도착 → 그 수치만으로 배리어가 충족돼 유예 없이 즉시 0원 확정 + 진짜 트리거 rejected =
+매출 누락) 이후 이 유예는 워터마크 유무와 무관하게 항상 적용한다.
 
 **`expected_triggers` 수용**: `handle_close(expected_triggers={zone: n})`은 존별 기대 트리거
-수를 배리어에 심는다(I17 ③'). 빈 dict는 "정보 없음"이라 워터마크로 취급하지 않고 유예를
-적용한다(안전측). 기대한 트리거가 끝내 오지 않으면 `close_timeout_s`에서 에러 세션이다.
+수를 배리어에 심는다(I17 ③'). 빈 dict는 "정보 없음"이라 워터마크로 취급하지 않는다(어차피
+유예는 항상 적용된다). 기대한 트리거가 끝내 오지 않으면 `close_timeout_s`에서 에러 세션이다.
 
 #### 확정 1회 전달 후 즉시 idle (실기 사고 대응)
 
@@ -173,7 +175,7 @@ wire 형식은 레거시 `multi_zone.py`의 finalize 응답과 동형이다 — 
 | 환경변수 | 기본값 | 영향 |
 |---|---|---|
 | `MODEL__CLOSE__BARRIER_TIMEOUT_S` | `10.0` | 배리어 상한 타임아웃(정상 경로가 아님) — 만료 시 에러 세션 |
-| `MODEL__CLOSE__GRACE_S` | `3.0` | CLOSE 유예 창. `0`이면 비활성. 워터마크가 오면 무시된다 |
+| `MODEL__CLOSE__GRACE_S` | `5.0` | CLOSE 유예 창. `0`이면 비활성. 워터마크 유무와 무관하게 항상 적용된다 |
 | `MODEL__CLOSE__WORKER_STALL_TIMEOUT_S` | `120.0` | `queue_pending` 전용 상한(처리 지연 ≠ 유실). `close_timeout_s` 미만 값을 줘도 그 값으로 하한 보정된다 |
 | `MODEL__SESSION__ERROR_POLICY` | `block_payment` | `ledger/`의 정산 결과 `blocked` 여부를 통해 간접 작용(I13) |
 | `MODEL__MACHINE__CABINET_TYPE` | `refrigerated` | `default_profile` — 잠정 집계 tolerance를 판정·정산과 같은 값으로 유지 |
@@ -184,7 +186,7 @@ wire 형식은 레거시 `multi_zone.py`의 finalize 응답과 동형이다 — 
 
 | 테스트 파일 | 무엇을 고정하는가 |
 |---|---|
-| `tests/test_gateway.py` (15건) | **배리어 구동 확정** — 큐가 비면 즉시 확정, 큐 미정합 중에는 시간이 지나도 확정 금지, late trigger 처리 완료 후 정상 확정(매출 유실 없음), Jetson 추론이 `close_timeout`을 넘겨도(30s) 살아남고 stall 상한(120s)에서만 에러, seq 워터마크가 도착 전까지 보류. **결제 계약** — ACTIVE 잠정치는 `TypeError`, 확정 결과는 정산기 캐시와 동일 객체(I11), **확정 1회 전달 후 즉시 IDLE**(600s 재폴링에도 반복 없음, 새 OPEN은 정상 시작), 새 세션이 배리어를 리셋. **유예 창** — 트리거 0건 CLOSE는 유예 대기, 유예 내 late trigger 수용 후 도착 기준 재대기, 유예 경과·late 없음이면 0상품 확정, 워터마크는 유예를 생략. **엣지 워터마크** — `expected_triggers` 도착까지 보류 후 유예 없이 즉시 확정, 빈 dict는 워터마크로 인정하지 않음(유예 적용), 기대 트리거 미도착은 `close_timeout`에서 fail-closed 에러 |
+| `tests/test_gateway.py` (18건) | **배리어 구동 확정** — 큐가 비면 즉시 확정, 큐 미정합 중에는 시간이 지나도 확정 금지, late trigger 처리 완료 후 정상 확정(매출 유실 없음), Jetson 추론이 `close_timeout`을 넘겨도(30s) 살아남고 stall 상한(120s)에서만 에러. **결제 계약** — ACTIVE 잠정치는 `TypeError`, 확정 결과는 정산기 캐시와 동일 객체(I11), **확정 1회 전달 후 즉시 IDLE**(600s 재폴링에도 반복 없음, 새 OPEN은 정상 시작), 새 세션이 배리어를 리셋. **유예 창** — 트리거 0건 CLOSE는 유예 대기, 유예 내 late trigger 수용 후 도착 기준 재대기, 유예 경과·late 없음이면 0상품 확정, 워터마크(seq/expected_triggers)가 있어도 유예는 별도로 적용된다. **엣지 워터마크** — `expected_triggers` 도착까지 보류, 도착 후에도 유예가 남아있으면 그 안에서 확정 보류, 빈 dict는 워터마크로 인정하지 않음(유예 적용), 기대 트리거 미도착은 `close_timeout`에서 fail-closed 에러, **기대 카운트가 실제보다 적어도(Node 미완료 인코딩 undercount) 유예 안에 도착한 추가 트리거가 매출 누락 없이 포함**(2026-09-03 ses-63 회귀) |
 | `tests/test_ledger.py` (28건 중 I10 경로) | `interim_summary()` 결과가 `build_payment_payload()`에서 `TypeError`, blocked 정산이 `ValueError`로 거부되는지 |
 | `tests/test_lifecycle.py` (33건 중 세션 경로) | 새 OPEN마다 원장 prune 후에도 직전 세션 CLOSE 재폴링이 같은 금액을 내는지(I11), 동시 폴링·워커 drain 락 스모크 |
 | `tests/test_session_archive.py` (18건 중 훅 경로) | FINALIZED/ERROR 최초 전이에서만 아카이브가 저장되는지(재폴링 3회에도 1파일) |
@@ -197,8 +199,9 @@ wire 형식은 레거시 `multi_zone.py`의 finalize 응답과 동형이다 — 
    사고의 직접 원인이다. 확정 결과는 1회 전달, 상태는 즉시 `IDLE`.
 2. **정상 확정 조건은 배리어뿐이다.** "시간이 지나서 확정"은 매출 누락 또는 이중 과금의
    경로이므로, 타임아웃 분기에서 부분 확정을 만들지 말 것(payload `None` 유지).
-3. **유예 창은 워터마크의 대체물이지 추가물이 아니다.** `expected_triggers`나 seq 워터마크가
-   있으면 유예를 건너뛰는 현재 동작을 유지해야 확정 지연이 다시 늘지 않는다.
+3. **유예 창은 워터마크와 독립적으로 항상 적용된다(2026-09-03 ses-63 이후).** `expected_triggers`나
+   seq 워터마크는 Node/카메라가 아는 만큼만 정확하고, 아직 인코딩 중인 트리거의 존재는 알 수
+   없다 — 워터마크 충족만으로 유예를 생략하면 undercount 상황에서 매출이 누락된다.
 4. **`queue_pending`과 다른 pending을 같은 타임아웃으로 묶지 말 것.** 처리 지연(정상)과
    유실(사고)을 구분하는 것이 두 타임아웃의 존재 이유다.
 5. **결제 wire 형식은 Node와의 계약이다.** 평탄화된 `products` 배열과 `productIdx`/`productId`

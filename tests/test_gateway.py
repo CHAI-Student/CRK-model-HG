@@ -223,33 +223,41 @@ class TestCloseGrace:
         assert resp.payload.product_count == 0
 
     def test_seq_watermark_skips_grace(self, cola):
-        # D2 워터마크가 있으면 인과 신호가 완결 — 시간 유예 불필요, 즉시 확정
-        gw, _ = self.make_grace_gateway()
+        # 2026-09-03 ses-63 재발 이후: seq 워터마크가 있어도 유예는 더 이상
+        # 생략되지 않는다 — 워터마크는 배리어(도착 대기)만 좁힌다.
+        gw, clock = self.make_grace_gateway()
         gw.handle_open("s1")
         gw.notify_enqueued(1)
         gw.record_trigger(removal("s1", 1, 0.5, cola))
         gw.notify_processed(1)
         gw.barrier.note_seq(1, 2)
         resp = gw.handle_close(seq_watermark={1: 2})
-        assert resp.state is DoorState.FINALIZED  # 유예 없이 즉시
+        assert resp.state is DoorState.PENDING_CLOSE
+        assert resp.detail == "close_grace_pending"  # 배리어 충족돼도 유예는 남는다
+        clock.t = 3.0
+        resp = gw.poll()
+        assert resp.state is DoorState.FINALIZED
+        assert resp.payload.total_price == 1500
 
 
 class TestEdgeWatermark:
     """I17 ③' (issue #8): 카메라 seq 펌웨어(P5) 없이 엣지(Node)가 close 시점에
-    존별 녹화 수를 세어 보내는 개수 기반 워터마크 — 인과 신호가 완결되므로
-    시간 유예(close_grace) 없이 정확한 대기·즉시 확정이 가능하다."""
+    존별 녹화 수를 세어 보내는 개수 기반 워터마크 — 배리어(도착 대기)를 좁힌다.
+    2026-09-03 ses-63 재발(Node가 인코딩 중인 트리거를 못 세어 있는 수치로
+    즉시 확정돼 매출이 누락된 사고) 이후, 워터마크 충족은 CLOSE 유예를 더
+    이상 생략하지 않는다."""
 
     def make_wm_gateway(self):
         clock = FakeClock()
         gw = MultiZoneGateway(
             CloseSettler(), EventLog(), {1: REFRIGERATOR}, clock=clock,
-            close_timeout_s=10.0, close_grace_s=3.0,  # 유예가 있어도 워터마크가 우선
+            close_timeout_s=10.0, close_grace_s=3.0,
         )
         return gw, clock
 
     def test_expected_triggers_holds_until_arrival_then_finalizes(self, cola):
         # issue #8 재현: CLOSE가 트리거보다 먼저 도착 — 워터마크(1건 기대)가
-        # 배리어를 열어두고, 도착 즉시(유예 없이) 확정한다.
+        # 배리어를 열어두고, 도착 후에도 CLOSE 유예는 별도로 적용된다.
         gw, clock = self.make_wm_gateway()
         gw.handle_open("s1")
         resp = gw.handle_close(expected_triggers={1: 1})
@@ -260,9 +268,48 @@ class TestEdgeWatermark:
         gw.notify_enqueued(1)
         gw.record_trigger(removal("s1", 1, 0.7, cola))
         gw.notify_processed(1)
-        resp = gw.poll()  # 유예 3s를 기다리지 않고 즉시 확정 (인과 완결)
+        resp = gw.poll()
+        assert resp.state is DoorState.PENDING_CLOSE
+        assert resp.detail == "close_grace_pending"  # 기대 카운트 충족돼도 유예는 남는다
+
+        clock.t = 0.66 + 3.0
+        resp = gw.poll()
         assert resp.state is DoorState.FINALIZED
         assert resp.payload.total_price == 1500
+
+    def test_expected_triggers_undercount_second_trigger_still_finalizes_with_it(
+        self, cola
+    ):
+        # 2026-09-03 ses-63 재현: Node가 아직 인코딩 중인 2번째 트리거를 못
+        # 세어 expected_triggers={1: 1}로 보내는 바람에 1번째(no_detection)
+        # 만으로 배리어가 즉시 충족된다. 이전에는 이 시점에 즉시 확정되어 2번째
+        # (진짜 상품) 트리거가 rejected됐다 — 이제는 유예가 별도로 남아 있어
+        # 그 안에 도착하면 매출 누락 없이 포함된다.
+        gw, clock = self.make_wm_gateway()
+        gw.handle_open("s1")
+        gw.notify_enqueued(1)
+        no_detection = TriggerEvent(
+            "s1", 1, 0.0, 0.0, (),
+            JudgmentResult(JudgmentStatus.NO_DETECTION, (), 0.0, "low_weight_skip", "gate"),
+        )
+        gw.record_trigger(no_detection)
+        gw.notify_processed(1)
+
+        clock.t = 2.0
+        resp = gw.handle_close(expected_triggers={1: 1})
+        assert resp.state is DoorState.PENDING_CLOSE
+        assert resp.detail == "close_grace_pending"  # 워터마크 충족돼도 확정 안 됨
+
+        clock.t = 2.5  # 진짜 2번째 트리거(인코딩 늦었던 것)가 유예 안에 도착
+        gw.notify_enqueued(1)
+        gw.record_trigger(removal("s1", 1, 2.5, cola))
+        gw.notify_processed(1)
+        assert gw.poll().state is DoorState.PENDING_CLOSE  # 새 도착으로 유예 재연장
+
+        clock.t = 2.5 + 3.0
+        resp = gw.poll()
+        assert resp.state is DoorState.FINALIZED
+        assert resp.payload.total_price == 1500  # 2번째 트리거 매출 누락 없음
 
     def test_expected_triggers_zero_finalizes_immediately(self):
         # Node가 "녹화 0건"을 보증하면 빈 세션도 유예 없이 즉시 0상품 확정

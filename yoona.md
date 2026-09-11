@@ -748,3 +748,160 @@ eligible(cand): cand.vote_count >= single_share(0.5) * top_c.vote_count
 동시에 나올 때, 표 수 차이가 크면(이번 8 vs 49) 약한 쪽이 무게와 무관하게
 누락될 수 있다는 아키텍처 한계로 기록한다. 트레이별 후보 분리 기능을
 설계할 여유가 생기면 다시 다룬다.
+
+---
+
+# 2026-09-11 결제 완전/불완전 판정을 confidence threshold 대신 judgment 상태로 전환
+
+## 뭘 했나
+
+edge-environment로 보내는 결제 페이로드가 지금까지는 zone별 `confidence`
+평균값에 별도의 threshold를 걸어 완전/불완전 결제를 판단해야 했다. 이 값은
+전략마다 스케일이 달라(`vision_only`는 confidence×0.7 상한, `freezer_vision_first`는
+conf_override/margin 등 별도 로직) 임계값을 하나로 정하기 어려웠다.
+
+이미 판정 단계에서 나오는 `JudgmentStatus`(`COMPLETE`/`PARTIAL`)가 각 전략이
+튜닝한 기준(conf_override=0.9, partial_min_confidence=0.18 등)을 통과해 나온
+결론이므로, confidence 재임계값 대신 이 상태를 그대로 zone 단위로 집계해
+전달하도록 바꿨다.
+
+## 판정 기준
+
+zone 안에 결제 확정(COMPLETE/PARTIAL) 상태로 남은 이벤트 중 **하나라도
+PARTIAL이면 그 zone 전체를 불완전결제(`partial`)로, 전부 COMPLETE(또는
+무판정)면 완전결제(`complete`)로 처리한다.** 기존 confidence 평균 계산과
+동일한 이벤트 집합(같은 zone·상품 있음·COMPLETE/PARTIAL)을 그대로 재사용해서
+집계 기준이 흩어지지 않게 했다.
+
+## 바뀐 내용
+
+- [crk_model/core/types.py](crk_model/core/types.py) — `ZoneBasket`에
+  `status: str`(기본값 `"complete"`) 필드 추가.
+- [crk_model/ledger/settler.py](crk_model/ledger/settler.py) — zone별
+  confidence 평균을 내던 이벤트 목록에서 상태도 함께 뽑아, PARTIAL이 하나라도
+  있으면 `"partial"`을 zone status로 정한다. `_Basket.to_zone()`에 `status`
+  파라미터 추가.
+- [crk_model/gateway/state_machine.py](crk_model/gateway/state_machine.py) —
+  `build_payment_payload()`의 zone별 딕셔너리에 `"status"` 필드 추가
+  (기존 top-level `"status"`(`success`/`complete_no_products`)와는 별개 키라
+  충돌 없음). 기존 `confidence` 필드는 그대로 유지 — edge가 점진적으로
+  전환할 수 있게 했다.
+
+## 냉장/냉동 공통 반영
+
+`CloseSettler.solve()`와 `build_payment_payload()`는 냉동/냉장 전용 분기가
+없고 `profiles`(FREEZER/REFRIGERATOR)만 주입받는 단일 경로라, 코드 한 곳만
+고쳐도 두 프로파일 모두에 자동 적용된다.
+
+## 검증
+
+```text
+461 passed, 24 skipped
+```
+
+기존 테스트 전부 통과(회귀 없음). zone 딕셔너리에 새 키를 추가하는 방식이라
+기존 필드를 읽는 테스트/consumer는 영향받지 않는다.
+
+---
+
+# 2026-09-11 (2차) 냉장 CLOSE 조기 확정 — 워터마크가 유예를 생략해 매출 누락 (ses-63)
+
+## 증상
+
+냉장(cold) 실기 테스트 중, 추론은 전부 정상이었는데 **final close 시점에
+product 정보가 비어 확정되고, 그 직후에야 추론 결과가 도착**하는 상황이
+있었다. 사용자가 제공한 실제 서버 로그(2026-09-03)로 원인을 특정했다.
+
+## 로그로 확인한 타임라인 (session ses-63-1788419901, zone 1)
+
+```text
+16:18:36.529  trg-92 수신 (트리거 1) — 무게 변화 미미
+16:18:36.555  trg-92 처리 완료: judgment=no_detection (low_weight_skip), products=[]
+16:18:38.710  CLOSE 도착 → queue_pending=0
+16:18:38.712  FINALIZED: totalPrice=0 products=0   ← CLOSE로부터 단 2ms 만에 확정
+16:18:41.785  trg-93 수신 (트리거 2, 진짜 상품)
+16:18:46.698  trg-93 처리 완료: judgment=partial, products=[('BOX_LOTTE_PEPERO_ORIGINAL_46G', 3)]
+16:18:46.698  "event rejected (session ses-63-1788419901 already finalized)"
+```
+
+CLOSE와 실제 확정 사이에 유예(grace) 없이 2ms 만에 끝났다는 것이 첫 단서였다.
+설정상 `close_grace_s` 기본값은 3.0초인데 전혀 적용되지 않았다.
+
+## 원인
+
+[crk_model/gateway/state_machine.py](crk_model/gateway/state_machine.py)의
+`MultiZoneGateway`는 CLOSE에 `expected_triggers`(엣지 워터마크 — Node가 존별
+녹화 파일 수를 세어 보내는 값)가 오면, 그 값이 있다는 사실만으로 **CLOSE
+유예 창(`close_grace_s`) 전체를 세션 단위로 생략**하도록 되어 있었다
+(`if not self._watermark_set and self._close_grace > 0: ...`).
+
+이 세션에서는 zone 1에 트리거가 1건(`trg-92`, no_detection)만 도착한
+상태에서 Node가 CLOSE에 `expected_triggers={1: 1}`을 실어 보낸 것으로 보인다.
+당시 트리거 2(`trg-93`, 진짜 상품)는 아직 인코딩 중이라 Node의 녹화 디렉터리
+카운트에 잡히지 않았다. 배리어 입장에서는 "기대한 1건이 이미 다 도착했다"로
+보여 그 즉시 워터마크가 유예를 생략시켰고, 인코딩이 끝나 3.075초 뒤 도착한
+진짜 트리거는 "이미 확정된 세션"으로 rejected됐다 — products가 있는 상품이
+결제에서 통째로 빠졌다(이슈 #8의 재발, 원인은 카메라 업로드 지연이 아니라
+**Node의 워터마크 자체가 인코딩 중인 트리거를 셀 수 없다는 점**).
+
+## 고친 내용
+
+**워터마크는 이제 "도착 대기"만 좁히고, CLOSE 유예는 워터마크 유무와 무관하게
+항상 별도로 적용한다.** 워터마크는 Node가 아는 만큼만 정확하고, 아직 도착하지
+않은 트리거의 존재는 시간만이 알 수 있다는 원칙으로 되돌렸다.
+
+- [crk_model/gateway/state_machine.py](crk_model/gateway/state_machine.py)
+  - `poll()`의 유예 판단에서 `not self._watermark_set` 조건을 제거 —
+    `close_grace_s > 0`이면 워터마크 유무와 무관하게 항상 유예를 거친다.
+  - 더 이상 쓰이지 않는 `_watermark_set` 필드와 그 대입 코드를 제거.
+  - `handle_close()`/`poll()` 주석을 이 사고(2026-09-03 ses-63) 기준으로 갱신.
+- [crk_model/core/config.py](crk_model/core/config.py) — `close_grace_s`
+  기본값을 `3.0` → **`5.0`**으로 상향. 실측 갭이 3.075초였는데 기존 3.0초
+  기본값으로는(설령 유예가 정상 작동했더라도) 약 75ms 차이로 아슬아슬하게
+  놓쳤을 상황이라 여유를 더 뒀다.
+- `.env.example`, `refrg.env.example`, `freezer.env.example` —
+  `MODEL__CLOSE__GRACE_S`를 동일하게 `5.0`으로 반영.
+- [crk_model/gateway/README.md](crk_model/gateway/README.md),
+  [docs/04-configuration.md](docs/04-configuration.md),
+  [docs/05-operations.md](docs/05-operations.md) — "워터마크가 오면 유예
+  생략" 서술을 "유예는 워터마크와 무관하게 항상 적용" 으로 갱신.
+
+## 냉장/냉동 공통 반영
+
+`MultiZoneGateway`는 냉동/냉장 전용 분기가 없는 단일 게이트웨이 코드 경로라
+이번 수정도 코드 변경 없이 두 프로파일 모두에 자동 적용된다.
+
+## 테스트
+
+[tests/test_gateway.py](tests/test_gateway.py)에서:
+
+- `test_seq_watermark_skips_grace` → 워터마크가 있어도 `close_grace_pending`을
+  거친 뒤에야 확정되도록 수정.
+- `test_expected_triggers_holds_until_arrival_then_finalizes` → 기대 트리거
+  도착 후에도 유예가 남아 있음을 확인하도록 수정.
+- 신규: `test_expected_triggers_undercount_second_trigger_still_finalizes_with_it`
+  — ses-63 로그를 그대로 재현(1번째 no_detection만으로 워터마크 충족 →
+  2번째 진짜 트리거가 유예 안에 도착 → 매출 누락 없이 포함).
+
+```text
+tests/test_gateway.py: 18 passed
+전체: 462 passed, 24 skipped
+```
+
+정적 검사(`compileall`, `git diff --check`) 통과.
+
+## 변경 파일
+
+- [crk_model/gateway/state_machine.py](crk_model/gateway/state_machine.py) — 워터마크의 유예 생략 제거
+- [crk_model/core/config.py](crk_model/core/config.py) — `close_grace_s` 기본값 3.0 → 5.0
+- `.env.example`, `refrg.env.example`, `freezer.env.example` — `MODEL__CLOSE__GRACE_S=5.0`
+- [tests/test_gateway.py](tests/test_gateway.py) — 워터마크/유예 관련 테스트 2건 수정 + 회귀 테스트 1건 추가
+- [crk_model/gateway/README.md](crk_model/gateway/README.md), [docs/04-configuration.md](docs/04-configuration.md), [docs/05-operations.md](docs/05-operations.md) — 문서 갱신
+
+## 참고: 근본 해결은 Node 쪽에도 남아 있음
+
+`docs/08-handover.md`의 P2 항목("엣지 워터마크 Node 측 구현")이 이 사고와
+직결된다 — Node가 CLOSE 시점에 "아직 인코딩 중인 파일"까지 포함해서 셀 수
+있어야 `expected_triggers`가 진짜로 신뢰 가능한 신호가 된다. 이번 수정은
+모델 쪽에서 워터마크를 과신하지 않도록 만든 방어이고, Node 쪽 카운팅 정확도
+개선은 별도 협의가 필요하다.
