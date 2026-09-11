@@ -70,6 +70,7 @@ class _Basket:
         trigger_count: int = 0,
         notes: tuple[str, ...] = (),
         confidence: float = 0.0,
+        status: str = JudgmentStatus.COMPLETE.value,
     ) -> ZoneBasket:
         return ZoneBasket(
             zone=zone,
@@ -81,6 +82,7 @@ class _Basket:
             trigger_count=trigger_count,
             notes=notes,
             confidence=confidence,
+            status=status,
         )
 
 
@@ -286,8 +288,8 @@ class CloseSettler:
             # 결제 confidence는 최종 정산 입력(ok)에 남은 실제 상품 판정만
             # 대상으로 zone별 산술평균을 낸다. NO_DETECTION/반품 이벤트의 0.0이
             # 결제 상품 신뢰도를 희석하지 않게 COMPLETE/PARTIAL + products로 제한.
-            concluded_confidences = [
-                e.judgment.confidence
+            concluded_judgments = [
+                e.judgment
                 for e in ok
                 if e.zone == zone
                 and e.judgment.products
@@ -295,16 +297,23 @@ class CloseSettler:
                 in (JudgmentStatus.COMPLETE, JudgmentStatus.PARTIAL)
             ]
             zone_confidence = round(
-                sum(concluded_confidences) / len(concluded_confidences), 4
-            ) if concluded_confidences else 0.0
+                sum(j.confidence for j in concluded_judgments) / len(concluded_judgments), 4
+            ) if concluded_judgments else 0.0
+            # 완전/불완전 결제는 confidence threshold가 아닌 judgment 상태로 판단:
+            # 위와 같은 결론난 판정 중 하나라도 PARTIAL이면 zone 전체를 불완전결제로 전달.
+            zone_status = (
+                JudgmentStatus.PARTIAL.value
+                if any(j.status is JudgmentStatus.PARTIAL for j in concluded_judgments)
+                else JudgmentStatus.COMPLETE.value
+            )
             basket = baskets.get(zone)
             zb = (
                 basket.to_zone(
-                    zone, weight_delta, trigger_count, zone_notes, zone_confidence
+                    zone, weight_delta, trigger_count, zone_notes, zone_confidence, zone_status
                 )
                 if basket is not None
                 else _Basket().to_zone(
-                    zone, weight_delta, trigger_count, zone_notes, zone_confidence
+                    zone, weight_delta, trigger_count, zone_notes, zone_confidence, zone_status
                 )
             )
             for pc in zb.products:

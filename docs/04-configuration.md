@@ -179,7 +179,7 @@ dataclass 기본값과 `from_env()` 기본값이 일치함을 확인한 값입�
 | 환경변수 | 기본값 | 의미 / 언제 만지나 |
 | --- | --- | --- |
 | `MODEL__CLOSE__BARRIER_TIMEOUT_S` | `10.0` | 인과 배리어 상한 타임아웃 (I17). **정상 경로가 아닙니다** — 이 값에 걸리면 유실이 있었다는 뜻. debounce 3s보다 길게 유지 |
-| `MODEL__CLOSE__GRACE_S` | `3.0` | CLOSE 유예 창 (이슈 #8). 배리어 충족 후에도 이 시간 동안 확정을 보류 — 카메라가 아직 쓰고 있는 AVI의 late trigger 유실(0원 확정 + event rejected) 방지. `0`=비활성(권장 안 함) |
+| `MODEL__CLOSE__GRACE_S` | `5.0` | CLOSE 유예 창 (이슈 #8, 2026-09-03 ses-63 재발 후 3.0→5.0 상향). 배리어 충족 후에도 이 시간 동안 확정을 보류 — 카메라가 아직 쓰고 있는 AVI의 late trigger 유실(0원 확정 + event rejected) 방지. `expected_triggers`/seq 워터마크가 있어도 생략되지 않음(Node의 인코딩 중 트리거 undercount 보호). `0`=비활성(권장 안 함) |
 | `MODEL__CLOSE__WORKER_STALL_TIMEOUT_S` | `120.0` | 워커 처리 중(`queue_pending`) 전용 상한. Jetson 디코드+TRT 추론이 배리어 타임아웃보다 길 수 있어 분리. 이 값 초과 = 워커 사망/행 |
 | `MODEL__SESSION__ERROR_POLICY` | `block_payment` | 에러 트리거 포함 세션의 결제 정책 (D9/I13). `block_payment`(fail-closed) \| `finalize_error_free_zones`. **변경은 Node 합의 필요** |
 | `MODEL__TRIGGER__IDEMPOTENCY_TTL_S` | `5.0` | 트리거 멱등성 TTL (I7) — 같은 트리거 재전송의 중복 처리 차단 창 |
