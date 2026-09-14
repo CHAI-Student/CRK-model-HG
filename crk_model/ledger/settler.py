@@ -15,6 +15,7 @@ from __future__ import annotations
 import re
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Mapping, Sequence
+from dataclasses import replace
 
 from crk_model.core.policy import ErrorSessionPolicy
 from crk_model.core.profiles import REFRIGERATOR, SensorProfile
@@ -22,6 +23,7 @@ from crk_model.core.types import (
     ActiveProduct,
     FinalizedSettlement,
     InterimSummary,
+    JudgmentResult,
     JudgmentStatus,
     ProductCount,
     ZoneBasket,
@@ -265,6 +267,10 @@ class CloseSettler:
             }
         )
 
+        ok = self._reconcile_take_return_identity(
+            ok, profiles, notes, self.default_profile
+        )
+
         baskets, unmatched = pass_same_zone(ok, profiles, self.default_profile)
         self._pass_net_delta(baskets, ok, profiles, unmatched, notes, self.default_profile)
         self._pass_cross_zone(baskets, unmatched, profiles, notes, self.default_profile)
@@ -340,6 +346,122 @@ class CloseSettler:
         if event_log is not None:
             event_log.mark_finalized(session_id)
         return settlement
+
+    def _reconcile_take_return_identity(
+        self,
+        events: Sequence[TriggerEvent],
+        profiles: Mapping[int, SensorProfile],
+        notes: list[str],
+        default_profile: SensorProfile = REFRIGERATOR,
+    ) -> list[TriggerEvent]:
+        """정확한 반품이 유일한 이전 removal 오판정을 지목할 때만 재구성.
+
+        일반 반품 매칭보다 앞에서 removal의 정체성만 교정하고, 실제 차감은
+        기존 pass_same_zone이 담당한다. 결과는 PARTIAL로만 낮춰 불확실한
+        endpoint delta를 COMPLETE 근거로 승격하지 않는다.
+        """
+        out = list(events)
+        if self._products_provider is None:
+            return out
+        products = tuple(self._products_provider())
+        used_removals: set[int] = set()
+        for _ret_idx, ret in sorted(enumerate(out), key=lambda pair: pair[1].ts):
+            prof = _profile(profiles, ret.zone, default_profile)
+            if not prof.weight_is_discriminative or ret.delta_weight <= 0:
+                continue
+            if not ret.vision_candidates:
+                continue
+            ret_top = max(
+                ret.vision_candidates, key=lambda c: (c.vote_count, c.confidence)
+            )
+            product = next(
+                (
+                    p
+                    for p in products
+                    if p.class_id == ret_top.class_id
+                    and p.stock_qty > 0
+                    and p.unit_weight > 0
+                    and abs(ret.delta_weight - p.unit_weight) <= prof.tolerance_grams
+                ),
+                None,
+            )
+            if product is None:
+                continue
+
+            matches: list[tuple[int, TriggerEvent, int]] = []
+            review_limit = min(25.0, product.unit_weight * 0.05)
+            for rem_idx, rem in enumerate(out):
+                if (
+                    rem_idx in used_removals
+                    or rem.zone != ret.zone
+                    or rem.ts >= ret.ts
+                    or rem.delta_weight >= 0
+                    or len(rem.judgment.products) != 1
+                    or rem.judgment.products[0].count < 3
+                    or rem.judgment.products[0].product.class_id == product.class_id
+                    or sum(1 for s in rem.segments if s.delta_grams < 0) != 1
+                    or not rem.vision_candidates
+                ):
+                    continue
+                rem_top = max(
+                    rem.vision_candidates, key=lambda c: (c.vote_count, c.confidence)
+                )
+                billed = next(
+                    (
+                        c
+                        for c in rem.vision_candidates
+                        if c.class_id == rem.judgment.products[0].product.class_id
+                    ),
+                    None,
+                )
+                if (
+                    rem_top.class_id != product.class_id
+                    or billed is None
+                    or rem_top.vote_count < max(3, billed.vote_count * 3)
+                ):
+                    continue
+                lifted = round(abs(rem.delta_weight) / product.unit_weight)
+                if lifted < 2 or lifted > product.stock_qty:
+                    continue
+                if abs(abs(rem.delta_weight) - lifted * product.unit_weight) > review_limit:
+                    continue
+                remaining = lifted - 1
+                if remaining < 0:
+                    continue
+                remaining_error = abs(
+                    abs(rem.delta_weight + ret.delta_weight)
+                    - remaining * product.unit_weight
+                )
+                if remaining_error > review_limit:
+                    continue
+                matches.append((rem_idx, rem, lifted))
+
+            if len(matches) != 1:
+                continue
+            rem_idx, rem, lifted = matches[0]
+            out[rem_idx] = replace(
+                rem,
+                judgment=JudgmentResult(
+                    JudgmentStatus.PARTIAL,
+                    (ProductCount(product, lifted),),
+                    confidence=min(
+                        max(
+                            c.confidence
+                            for c in rem.vision_candidates
+                            if c.class_id == product.class_id
+                        ),
+                        ret_top.confidence,
+                    ) * 0.5,
+                    reason="take_return_identity_reconciled",
+                    strategy="take_return_identity_reconcile",
+                ),
+            )
+            used_removals.add(rem_idx)
+            notes.append(
+                f"take_return_identity_reconciled:zone{ret.zone}:"
+                f"class{product.class_id}:lifted{lifted}-returned1"
+            )
+        return out
 
     def prune(self, keep_session_ids: set[str]) -> None:
         """무한 성장 방지 (24h+ soak): _finalized 멱등 캐시(I11)를 최근

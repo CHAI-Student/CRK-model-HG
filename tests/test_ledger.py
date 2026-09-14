@@ -10,6 +10,7 @@ from crk_model.core.types import (
     JudgmentResult,
     JudgmentStatus,
     ProductCount,
+    WeightSegment,
 )
 from crk_model.gateway import build_payment_payload
 from crk_model.ledger import (
@@ -125,6 +126,62 @@ class TestCloseSettler:
         result = s.settle("s1", events, PROFILES)
         assert result.total_price == 0
         assert any("net_delta_correction" in n for n in result.notes)
+
+    def test_ses47_take_return_identity_reconciles_to_one_partial(self):
+        toreta = ActiveProduct("P59", "토레타", 59, 535.0, 2000, 10)
+        milk = ActiveProduct("P45", "매일우유", 45, 219.0, 800, 10)
+        rem = TriggerEvent(
+            "s47", 1, 1.0, -1091.6666666667,
+            (WeightSegment(1.0, 2.0, -1091.6666666667),),
+            JudgmentResult(
+                JudgmentStatus.COMPLETE, (ProductCount(milk, 5),),
+                0.3617, "strict", "strict",
+            ),
+            vision_candidates=(cand(59, 0.885, 35, 0.2349), cand(45, 0.2056, 4, 0.0268)),
+        )
+        returned = TriggerEvent(
+            "s47", 1, 2.0, 535.0,
+            (WeightSegment(2.0, 3.0, 535.0),),
+            JudgmentResult(
+                JudgmentStatus.COMPLETE, (ProductCount(toreta, 1),),
+                0.9655, "strict", "strict",
+            ),
+            vision_candidates=(cand(59, 0.885, 23, 0.2421),),
+        )
+        settler = CloseSettler(active_products_provider=lambda: (toreta, milk))
+
+        result = settler.settle("s47", [rem, returned], PROFILES)
+
+        zone = result.zones[0]
+        assert [(pc.product.class_id, pc.count) for pc in zone.products] == [(59, 1)]
+        assert zone.status == JudgmentStatus.PARTIAL.value
+        assert any("take_return_identity_reconciled" in n for n in result.notes)
+
+    def test_ambiguous_take_return_keeps_existing_settlement(self):
+        toreta = ActiveProduct("P59", "토레타", 59, 535.0, 2000, 10)
+        milk = ActiveProduct("P45", "매일우유", 45, 219.0, 800, 10)
+
+        def suspect(ts):
+            return TriggerEvent(
+                "s", 1, ts, -1070.0,
+                (WeightSegment(ts, ts + 0.5, -1070.0),),
+                JudgmentResult(
+                    JudgmentStatus.COMPLETE, (ProductCount(milk, 5),),
+                    0.3, "strict", "strict",
+                ),
+                vision_candidates=(cand(59, 0.9, 30, 0.3), cand(45, 0.2, 3, 0.03)),
+            )
+
+        returned = TriggerEvent(
+            "s", 1, 3.0, 535.0, (WeightSegment(3.0, 3.5, 535.0),),
+            JudgmentResult(JudgmentStatus.COMPLETE, (ProductCount(toreta, 1),), 0.9, "strict"),
+            vision_candidates=(cand(59, 0.9, 20, 0.2),),
+        )
+        settler = CloseSettler(active_products_provider=lambda: (toreta, milk))
+
+        result = settler.settle("s", [suspect(1.0), suspect(2.0), returned], PROFILES)
+
+        assert not any("take_return_identity_reconciled" in n for n in result.notes)
 
     def test_error_blocks_payment_fail_closed(self, cola):
         # I13 + D9 기본: 에러 trigger 존재 → blocked, 결제 빌더 거부

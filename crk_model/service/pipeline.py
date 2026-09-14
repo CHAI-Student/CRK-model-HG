@@ -191,6 +191,64 @@ def _dominant_top_single_retry(
     )
 
 
+def _weak_multi_count_conflict_guard(
+    ctx: JudgmentContext, judgment: JudgmentResult
+) -> JudgmentResult:
+    """약한 비전 후보의 동일상품 다량 확대를 단품 PARTIAL로 제한한다.
+
+    냉장 same_product_count가 1~2표짜리 배경 후보를 무게 filler로 사용해
+    x3 이상 과금하는 좁은 실패만 다룬다. 비전 1위 단품이 strict 밖이지만
+    relaxed(2*tolerance) 안이고 득표가 청구 후보의 3배 이상일 때만 발동한다.
+    정상 다량(청구 class가 비전 1위), strict/멀티트레이, 복수 removal segment는
+    기존 경로를 그대로 보존한다.
+    """
+    if (
+        not ctx.profile.weight_is_discriminative
+        or judgment.status is not JudgmentStatus.COMPLETE
+        or judgment.strategy != "same_product_count"
+        or len(judgment.products) != 1
+        or judgment.products[0].count < 3
+        or sum(1 for segment in ctx.segments if segment.delta_grams < 0) != 1
+        or not ctx.vision_candidates
+    ):
+        return judgment
+
+    billed = judgment.products[0]
+    top = max(ctx.vision_candidates, key=lambda c: (c.vote_count, c.confidence))
+    if top.class_id == billed.product.class_id or top.vote_count < 3:
+        return judgment
+    billed_candidate = next(
+        (c for c in ctx.vision_candidates if c.class_id == billed.product.class_id),
+        None,
+    )
+    if (
+        billed_candidate is None
+        or billed_candidate.vote_count > 2
+        or top.vote_count < billed_candidate.vote_count * 3
+    ):
+        return judgment
+    product = next(
+        (
+            p
+            for p in ctx.active_products
+            if p.class_id == top.class_id and p.stock_qty > 0 and p.unit_weight > 0
+        ),
+        None,
+    )
+    if product is None:
+        return judgment
+    error = abs(abs(ctx.delta_weight) - product.unit_weight)
+    if not (ctx.profile.tolerance_grams < error <= ctx.profile.tolerance_grams * 2):
+        return judgment
+    return JudgmentResult(
+        JudgmentStatus.PARTIAL,
+        (ProductCount(product, 1),),
+        confidence=top.confidence * 0.5,
+        reason="weak_multi_count_conflict_partial",
+        strategy="weak_multi_count_conflict_guard",
+    )
+
+
 def _with_tubes(tube_summary: dict | None, evidence) -> dict | None:
     """tube_diag에 튜브 구성 진단(tube_detail)을 동봉 — 의류 산탄의
     "한 궤적, 여러 클래스" 실측 근거. summary가 None이면 그대로."""
@@ -430,6 +488,10 @@ class TriggerPipeline:
             if dominant is not judgment:
                 trace.reason_codes.append("dominant_top_single_retry")
                 judgment = dominant
+            guarded = _weak_multi_count_conflict_guard(ctx, judgment)
+            if guarded is not judgment:
+                trace.reason_codes.append("weak_multi_count_conflict_guard")
+                judgment = guarded
             judgment = self._segment_target_retry(ctx, judgment, analysis, trace)
         top_code = _vision_top_not_billed(candidates, judgment)
         if top_code:

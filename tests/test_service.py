@@ -949,6 +949,55 @@ class TestDominantTopSingleRetry:
 
         assert _dominant_top_single_retry(ctx, original) is original
 
+
+class TestWeakMultiCountConflictGuard:
+    def test_ses60_weak_pepero_x8_becomes_toreta_single_partial(self):
+        from crk_model.judgment.router import JudgmentRouter
+        from crk_model.service.pipeline import _weak_multi_count_conflict_guard
+
+        toreta = ActiveProduct("P59", "토레타", 59, 535.0, 2000, 10)
+        pepero = ActiveProduct("P18", "빼빼로", 18, 66.0, 2500, 10)
+        ctx = JudgmentContext(
+            1,
+            REFRIGERATOR,
+            -525.0,
+            (WeightSegment(1.0, 2.0, -525.0),),
+            (
+                VisionCandidate(59, 0.3672, 6, 0.1463),
+                VisionCandidate(18, 0.3036, 1, 0.0244),
+            ),
+            (toreta, pepero),
+        )
+        original = JudgmentRouter().judge(ctx)
+        assert original.status is JudgmentStatus.COMPLETE
+        assert original.strategy == "same_product_count"
+        assert [(pc.product.class_id, pc.count) for pc in original.products] == [(18, 8)]
+
+        out = _weak_multi_count_conflict_guard(ctx, original)
+
+        assert out.status is JudgmentStatus.PARTIAL
+        assert [(pc.product.class_id, pc.count) for pc in out.products] == [(59, 1)]
+
+    def test_normal_multi_count_and_freezer_are_untouched(self):
+        from crk_model.service.pipeline import _weak_multi_count_conflict_guard
+
+        pepero = ActiveProduct("P18", "빼빼로", 18, 66.0, 2500, 10)
+        other = ActiveProduct("P59", "토레타", 59, 535.0, 2000, 10)
+        original = JudgmentResult(
+            JudgmentStatus.COMPLETE, (ProductCount(pepero, 8),),
+            0.8, "same_product_count", "same_product_count",
+        )
+        for profile, candidates in (
+            (REFRIGERATOR, (VisionCandidate(18, 0.8, 12, 0.5),)),
+            (FREEZER, (VisionCandidate(59, 0.8, 12, 0.5), VisionCandidate(18, 0.2, 1, 0.05))),
+        ):
+            ctx = JudgmentContext(
+                1, profile, -528.0,
+                (WeightSegment(1.0, 2.0, -528.0),),
+                candidates, (pepero, other),
+            )
+            assert _weak_multi_count_conflict_guard(ctx, original) is original
+
     def test_requires_point_95_top_confidence(self):
         from crk_model.service.pipeline import _dominant_top_single_retry
 

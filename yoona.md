@@ -580,3 +580,187 @@ tests/test_gateway.py: 18 passed
 있어야 `expected_triggers`가 진짜로 신뢰 가능한 신호가 된다. 이번 수정은
 모델 쪽에서 워터마크를 과신하지 않도록 만든 방어이고, Node 쪽 카운팅 정확도
 개선은 별도 협의가 필요하다.
+
+---
+
+# 2026-09-12 냉장 ses-47·ses-60 비전 1위 누락과 저증거 다량 과금 방어
+
+## 현상
+
+두 세션 모두 비전은 토레타(class 59)를 가장 유력하게 관측했지만, 냉장
+무게 우선 판정이 더 작은 무게 오차를 만드는 다른 상품의 다량 조합을
+선택했다.
+
+### ses-60 — 반품 없는 단일 취출
+
+```text
+관측 delta:       -525g
+비전 1위:         토레타(class 59), 6표, confidence 0.3672
+약한 경쟁 후보:   빼빼로(class 18), 1표, confidence 0.3036
+토레타 x1:        535g, 오차 10g -> 냉장 strict ±5g 밖
+빼빼로 x8:        528g, 오차 3g  -> same_product_count COMPLETE
+기존 결과:        빼빼로 x8
+```
+
+`same_product_count`는 후보별 무게 오차가 tolerance 안에 들어오면 동일 상품
+수량을 역산한다. 이때 1표짜리 배경 후보도 후보 풀에 남아 있으면 무게가 더
+잘 맞는다는 이유로 8개 과금까지 확대될 수 있었다.
+
+### ses-47 — 취출 후 일부 반품
+
+```text
+첫 removal:  -1091.7g
+비전 1위:    토레타(class 59) 35표
+기존 판정:   매일우유(class 45) x5 = 1095g, 오차 약 3.3g
+
+후속 return: +535g
+비전 1위:    토레타(class 59) 23표
+반품 무게:   토레타 DB 무게 535g과 일치
+```
+
+기존 동존 반품 정산은 장바구니에 있는 상품의 무게와 return 무게를 비교한다.
+첫 removal이 우유 x5로 잘못 기록됐기 때문에 토레타 반품을 차감하지 못했고,
+`net_delta_correction`으로 우유 두 개만 제거한 뒤 다음 결과가 남았다.
+
+```text
+기존 최종 결과: 매일우유 x3
+notes:
+- net_delta_correction x2
+- unmatched_return:zone1:+535.0g
+```
+
+## 수정 원칙
+
+냉장 전체를 냉동의 vision-first 방식으로 바꾸거나 냉장 strict tolerance를
+전역으로 넓히지 않았다. 기존에 정상 동작하는 strict, 실제 다량 취출,
+multi-tray, 냉동 판정과 반품 정산을 보호하기 위해 두 실패 형태에 각각 좁은
+후처리 분기를 추가했다.
+
+```text
+일반 판정 tolerance: 기존 ±5g 유지
+신규 분기 결과:      COMPLETE로 승격하지 않고 PARTIAL
+냉동 프로파일:       신규 냉장 분기 미적용
+모호한 대응 관계:    기존 결과 유지
+```
+
+## 1. ses-60 저증거 동일상품 다량 확대 방어
+
+[crk_model/service/pipeline.py](crk_model/service/pipeline.py)에
+`_weak_multi_count_conflict_guard()`를 추가했다.
+
+다음 조건을 모두 만족할 때만 기존 `same_product_count` 결과를 비전 1위
+단품 PARTIAL로 제한한다.
+
+- 냉장(`weight_is_discriminative=True`)
+- 원 판정이 `same_product_count` COMPLETE
+- 원 판정이 한 상품 3개 이상
+- removal segment가 정확히 1개
+- 비전 1위와 과금 class가 다름
+- 비전 1위가 최소 3표
+- 과금 후보는 최대 2표
+- 비전 1위 득표가 과금 후보의 3배 이상
+- 비전 1위 상품이 판매 중이고 재고·무게 정보가 유효
+- 비전 1위 단품 오차가 strict ±5g 밖이면서 검토 범위 ±10g 안
+
+ses-60은 위 조건을 전부 만족하므로 다음처럼 바뀐다.
+
+```text
+기존: 빼빼로(class 18) x8 COMPLETE
+보정: 토레타(class 59) x1 PARTIAL
+strategy: weak_multi_count_conflict_guard
+reason: weak_multi_count_conflict_partial
+trace: weak_multi_count_conflict_guard
+```
+
+±10g은 새로운 COMPLETE tolerance가 아니다. 약한 후보의 다량 증폭을 막고
+비전 1위 단품을 PARTIAL로 보존할지를 판단하는 이 분기 전용 검토 범위다.
+
+정상적인 동일 상품 다량 취출처럼 과금 class 자체가 비전 1위인 경우와
+냉동 프로파일에는 개입하지 않는다.
+
+## 2. ses-47 취출–반품 정체성 재정산
+
+[crk_model/ledger/settler.py](crk_model/ledger/settler.py)에
+`_reconcile_take_return_identity()`를 추가했다. 실행 위치는 기존
+`pass_same_zone()` 앞이다.
+
+신규 분기는 return을 직접 장바구니에서 차감하지 않는다. 강한 증거로 잘못
+판정된 이전 removal의 정체성만 PARTIAL로 재구성하고, 실제 반품 차감은 기존
+`pass_same_zone()`이 그대로 담당한다.
+
+다음 조건을 모두 만족할 때만 removal을 재구성한다.
+
+- 냉장 프로파일의 같은 존
+- return보다 앞선 음수 removal
+- return 비전 1위 상품의 단품 무게와 return delta가 기존 ±5g 안에서 일치
+- removal과 return의 비전 1위 class가 동일
+- 기존 removal은 다른 한 상품을 3개 이상 과금
+- removal 비전 1위 득표가 기존 과금 후보의 3배 이상
+- removal segment가 정확히 1개
+- 비전 1위 상품으로 계산한 취출 수량이 2개 이상이고 재고 이하
+- 최초 removal 무게와 반품 후 잔여 무게가 모두 제한된 검토 범위 안
+- 해당 return에 대응 가능한 이전 removal이 정확히 하나
+
+취출–반품 검토 범위는 상품별로 다음처럼 제한한다.
+
+```text
+review_limit = min(25g, unit_weight의 5%)
+```
+
+이 범위도 일반 상품 판정 tolerance를 바꾸지 않으며, 정확한 후속 반품과
+동일 비전 정체성이 함께 있는 CLOSE 재검토에서만 사용한다.
+
+ses-47은 다음처럼 처리된다.
+
+```text
+removal 재구성: 토레타 x2 PARTIAL
+기존 same-zone return: 토레타 x1 차감
+최종 결과: 토레타 x1 PARTIAL
+note: take_return_identity_reconciled:zone1:class59:lifted2-returned1
+```
+
+같은 class를 가리키는 이전 removal이 여러 개라 어느 취출에 대한 반품인지
+모호하면 재구성하지 않는다. `CloseSettler`의 멱등성, 음수 수량 방지,
+교차존 반품과 net-delta 후속 정산은 기존 경로를 유지한다.
+
+## 회귀 테스트
+
+추가한 테스트:
+
+- ses-60 실제 수치로 기존 router의 빼빼로 x8 COMPLETE 재현
+- 같은 입력에 신규 가드를 적용해 토레타 x1 PARTIAL 확인
+- 정상 다량 취출에서 과금 class가 비전 1위이면 기존 결과 유지
+- 냉동 프로파일에서 신규 가드 미발동
+- ses-47 실제 수치로 우유 x5 removal과 토레타 +535g return 재현
+- CLOSE 재정산 후 토레타 x1 PARTIAL 확인
+- 대응 가능한 removal이 둘 이상이면 재구성하지 않는 모호성 보호
+
+전체 테스트 결과:
+
+```text
+444 passed, 24 skipped
+```
+
+추가 검증:
+
+```text
+수정 파일 대상 ruff check 통과
+git diff --check 통과
+```
+
+전체 `ruff check .`에서는 이번 변경과 무관한 기존 파일
+`crk_model/core/types.py`, `crk_model/gateway/state_machine.py`의 긴 주석 두
+곳(E501)이 남아 있다.
+
+## 변경 파일
+
+- [crk_model/service/pipeline.py](crk_model/service/pipeline.py)
+  - `_weak_multi_count_conflict_guard()` 추가
+- [crk_model/ledger/settler.py](crk_model/ledger/settler.py)
+  - `_reconcile_take_return_identity()` 추가
+- [tests/test_service.py](tests/test_service.py)
+  - ses-60 및 정상 다량·냉동 보호 테스트 추가
+- [tests/test_ledger.py](tests/test_ledger.py)
+  - ses-47 및 모호한 removal 보호 테스트 추가
+- [yoona.md](yoona.md)
+  - 원인, 안전 분기 조건, 검증 결과 기록
