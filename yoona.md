@@ -905,3 +905,117 @@ tests/test_gateway.py: 18 passed
 있어야 `expected_triggers`가 진짜로 신뢰 가능한 신호가 된다. 이번 수정은
 모델 쪽에서 워터마크를 과신하지 않도록 만든 방어이고, Node 쪽 카운팅 정확도
 개선은 별도 협의가 필요하다.
+
+---
+
+# 2026-10-02 냉동 교차존 — 잔차 동률/열세 시 오염 후보가 조용히 살아남던 문제
+
+## 뭘 확인했나
+
+`ses-2`, `ses-4` 재테스트 로그를 다시 분석한 결과, 두 세션 모두 같은 계열의
+문제였다 — 인접 zone의 실제 취출 장면이 카메라에 섞여 한 zone의 비전 후보
+득표를 오염시켰고, 공교롭게 무게까지 맞아떨어져 기존 교차존 안전장치
+(`_mutual_exemptions`, ④ 무게 모호성 게이트)가 둘 다 개입하지 않았다.
+
+- **ses-2 zone2**: zone1·zone2가 같은 클래스(주먹밥)를 각각 -115g/-230g로
+  청구했는데 둘 다 잔차가 정확히 0g(동률)이었다. `_mutual_exemptions`의
+  동률 분기는 "무게로 못 가르면 둘 다 면제"라 zone2도 그대로 보호됐다.
+  실제로는 zone2의 진짜 상품(청양만두, class74)이 20표로 자체 후보 풀에
+  남아 있었는데도 손대지 않았다.
+- **ses-4 zone5**: zone4(잔차 5g)·zone5(잔차 20g)가 같은 클래스(하겐다즈)를
+  청구했다. zone5는 잔차 비교에서 이미 "면제 안 됨"으로 정확히 판별됐지만,
+  진짜 상품(치즈버거, class74)이 모션 증거 부족으로 투표 자체에서 탈락해
+  zone5의 vision_candidates에 아예 없었다. 그래서 ④ 무게 모호성 게이트가
+  "경쟁 후보 없음 → 무게가 유일 해"로 보고 조용히 KEEP했다(관측 note도 없음).
+
+## 이전 수정이 원인이었는지
+
+`yoona.md` 전체 이력을 검토했다. 2026-08-28/2026-09-02에 추가된
+`_fingerprint_duplicate_suppression()`(동일 지문·동일 개수 전용)과
+2026-09-02 "대체 재판정" 기능은 이번 두 사례의 원인이 아니다 — 둘 다 개수가
+다르거나(zone5 count2 vs zone4 count1) 지문이 정확히 일치하지 않아 애초에
+그 경로가 작동 범위 밖이었다. 두 사례는 `_mutual_exemptions`/④ 게이트의
+원래 설계("무게로 못 가르면 개입하지 않는다")가 의도한 보수적 동작의
+연장선에서 드러난, 기존부터 있던 사각지대였다 — 2026-09-03(2차)에 기록한
+"공유 표 풀 구조적 배제"와 같은 계열의 한계다.
+
+## 고친 내용
+
+[crk_model/ledger/cross_zone.py](crk_model/ledger/cross_zone.py)에 두 가지를
+좁게 추가했다. 기존 `_mutual_exemptions`·`_repass_event`·
+`_fingerprint_duplicate_suppression` 경로는 전혀 건드리지 않았다.
+
+### 1. 잔차 동률 판별에 "자기 후보로 대체 가능한가" 추가
+
+`_mutual_exemptions()`의 동률(`r1 == r2`, 또는 비교 불가) 분기에
+`_tie_break_by_replaceability()`를 추가했다. cid를 뺀 자기 후보만으로 신뢰
+가능한(confidence ≥ `source_conf_min`) COMPLETE 대체가 나오는 쪽은 "그
+클래스가 자기 것이 아닐 수 있다"는 독립 증거를 가진 쪽이다. 정확히 한쪽만
+대체되면 반대쪽(대체 불가)을 진짜 소스로 면제하고, 대체되는 쪽은 면제하지
+않는다 — 둘 다 대체되거나 둘 다 안 되면 기존처럼 양쪽 다 면제(동작 무변경).
+
+### 2. 마지막 안전망 `_residual_loser_resolution()`
+
+`apply_cross_zone_penalty()`의 마지막 단계(기존 fingerprint 중복 제거 뒤)에
+추가했다. 상호 강등 가드에서 면제받지 못한 zone이 모든 기존 패스를 거친
+뒤에도 여전히 공유 클래스를 청구 중이면:
+
+- cid를 뺀 자기 후보로 직접 재판정 — 신뢰 가능한 COMPLETE 대체가 있으면
+  채택(ses-2 zone2 패턴: 대체 후보가 자기 풀에 살아있는 경우).
+- 대체가 없으면, 자기 잔차가 base `count_gate`(n-scale 슬랙 미적용)를
+  초과할 때만 그 청구를 제거한다 — 슬랙 없이는 원래 통과 못했을 약한
+  적합만 제거 대상으로 삼는다(ses-4 zone5 패턴: 대체 후보 자체가 투표에서
+  탈락해 없는 경우 — 새 상품을 추정하지 않고 오청구만 제거).
+
+두 경로 모두 "대체 후보"를 `_credible_trial_replacement()`로 검증한다 —
+라우터 COMPLETE 통과 + `source_conf_min` 이상 confidence + base count_gate
+이내 잔차를 모두 요구해, 저confidence 노이즈 후보 하나가 합법적인 양쪽
+판매(인접 zone이 실제로 같은 상품을 파는 경우)를 갈라놓지 않게 했다.
+
+## 왜 안전한가
+
+- 새 함수는 기존 `_trial_replacement_valid`/`windows_mutually_overlap`/
+  `_judgment_residual`을 재사용한다 — 새 임계값은 `source_conf_min`(기존
+  파라미터) 재사용뿐, 신규 파라미터는 추가하지 않았다.
+- 1차 구현에서 `test_penalized_winner_still_wins`(합법적 양쪽 판매 보호)와
+  `test_ses8_mutual_topology_field_fixture`(대체 불가 사례 무변경)가 모두
+  실패했다 — 저confidence 단일 후보가 "대체 가능"으로 오판되던 게 원인이라,
+  `_credible_trial_replacement()`에 `source_conf_min` 이상 요구 조건을
+  추가해 두 테스트 모두 원래 동작대로 복구했다(ses8 사례는 흥미롭게도 원래
+  GT가 class40이었는데도, conf 0.31이 기준 미달이라 여전히 "구제 경로
+  없음"으로 보수적으로 남는다 — 과도한 교정보다 안전을 우선).
+- 제거만 하고 새 상품을 추정하지 않는 기존 철학(R1 "하드 제외 금지",
+  "미청구가 과청구보다 낫다")을 그대로 따른다.
+
+## 검증
+
+```text
+tests/test_cross_zone.py: 40 passed
+전체: 464 passed, 24 skipped (기존 462 passed 대비 신규 2건만 추가, 회귀 없음)
+```
+
+신규 회귀 테스트:
+
+- `test_tie_break_exposes_zone_with_credible_own_alternative` — ses-2 zone2
+  패턴 재구성, 청양만두로 올바르게 보정되는지 확인
+- `test_residual_loser_without_credible_alternative_is_suppressed` — ses-4
+  zone5 패턴 재구성, 대체 불가 시 오청구만 제거되는지 확인
+
+정적 검사(`compileall`, `git diff --check`) 통과.
+
+## 남은 한계
+
+ses-4 zone5의 진짜 정답(치즈버거)은 이번 수정으로도 복구되지 않는다 — 모션
+증거 부족으로 투표 자체에서 탈락한 상품은 판정/정산 계층에서 안전하게
+추정해 끼워 넣을 근거가 없다(기존 "안 잡힌 상품을 억지로 끼워넣지 않는다"
+원칙 유지). 이번 수정은 **잘못된 상품(하겐다즈)이 과청구되는 것만** 막는다
+— 진짜 원인 해결은 perception 계층(모션 변위 증거/투표 집계)의 별도 점검이
+필요하다.
+
+## 바뀐 파일
+
+- [crk_model/ledger/cross_zone.py](crk_model/ledger/cross_zone.py) —
+  `_tie_break_by_replaceability()`, `_credible_trial_replacement()`,
+  `_residual_loser_resolution()` 추가, `_mutual_exemptions()`/
+  `apply_cross_zone_penalty()` 시그니처에 이들을 배선
+- [tests/test_cross_zone.py](tests/test_cross_zone.py) — 회귀 테스트 2건 추가

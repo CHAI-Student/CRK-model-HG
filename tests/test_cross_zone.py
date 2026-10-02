@@ -356,6 +356,67 @@ class TestCrossZonePenalty:
         )
         assert out[0] is za and out[1] is zb  # 둘 다 원 판정 유지
 
+    def test_tie_break_exposes_zone_with_credible_own_alternative(
+        self, hanmaek115
+    ):
+        # ses-2 재테스트 재구성: zone1(주먹밥 1개, -115g)과 zone2(-230g)가
+        # 잔차 동률(둘 다 0g)로 같은 클래스를 청구한다. zone2 자신의 후보
+        # 풀에는 또 다른 상품(청양만두, 230g 정확히 일치, conf 0.85 — 신뢰
+        # 가능한 수준)이 있어 "자기 것이 아닐 수 있다"는 독립 증거를 가진다.
+        # zone1은 그런 대안이 아예 없다 — 동률이지만 zone2만 재검토 대상이
+        # 되어야 하고, 기존 soft 페널티 경로가 청양만두로 보정해야 한다.
+        mandu = ActiveProduct(
+            "P74", "청양만두", class_id=74, unit_weight=230.0,
+            unit_price=3000, stock_qty=10,
+        )
+        z1 = event(
+            "s", 1, 100.0, judged(hanmaek115, conf=1.0), -115.0,
+            candidates=[cand(71, conf=1.0, votes=25)],
+            change_ts=(100.0,),
+        )
+        z2 = event(
+            "s", 2, 101.5, judged(hanmaek115, count=2, conf=0.9), -230.0,
+            candidates=[cand(71, conf=0.9, votes=25), cand(74, conf=0.85, votes=20)],
+            change_ts=(101.5,),
+        )
+        notes: list[str] = []
+        out = apply_cross_zone_penalty(
+            [z1, z2], PROFILES, (hanmaek115, mandu), CFG, notes,
+        )
+        assert out[0] is z1  # zone1은 그대로(대안 없음 — 진짜 소스)
+        assert [(pc.product.product_id, pc.count) for pc in out[1].judgment.products] == [
+            ("P74", 1)
+        ]
+        assert any("zone1:cross_zone_mutual_exempt:class71" in n for n in notes)
+
+    def test_residual_loser_without_credible_alternative_is_suppressed(
+        self, hagendaz95
+    ):
+        # ses-4 zone5 재테스트 재구성: zone4(-90g, 잔차 5g)가 진짜 소스로
+        # 면제되고 zone5(-170g, 잔차 20g > freezer count_gate 15g)는 면제받지
+        # 못한다. 하지만 zone5의 진짜 상품(치즈버거)은 투표에서 탈락해
+        # vision_candidates에 전혀 없다 — 대체 후보가 없으니 ④ 무게 모호성
+        # 게이트는 조용히 KEEP했을 상황. 대체가 안 되면, 슬랙 없이는 못
+        # 맞았을 약한 적합(잔차가 base gate 초과)만 제거해 오청구를 막는다.
+        z4 = event(
+            "s", 4, 100.0, judged(hagendaz95, conf=1.0), -90.0,
+            candidates=[cand(68, conf=1.0, votes=22)],
+            change_ts=(100.0,),
+        )
+        z5 = event(
+            "s", 5, 101.0, judged(hagendaz95, count=2, conf=1.0), -170.0,
+            candidates=[cand(68, conf=1.0, votes=22)],
+            change_ts=(101.0,),
+        )
+        notes: list[str] = []
+        out = apply_cross_zone_penalty(
+            [z4, z5], {4: FREEZER, 5: FREEZER}, (hagendaz95,), CFG, notes,
+        )
+        assert out[0] is z4  # zone4는 그대로(잔차 5g — 진짜 소스)
+        assert out[1].judgment.status is JudgmentStatus.NO_DETECTION
+        assert out[1].judgment.products == ()
+        assert any("zone5:cross_zone_residual_loser_suppressed:class68" in n for n in notes)
+
     def test_disabled_is_noop(self, bar170, bar178):
         z1, z2 = self.zone_events(bar170, bar178)
         notes: list[str] = []

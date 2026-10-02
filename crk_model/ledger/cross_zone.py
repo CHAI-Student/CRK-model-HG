@@ -277,6 +277,46 @@ def _trial_replacement_valid(
     return residual <= profile.count_gate
 
 
+def _credible_trial_replacement(
+    e: TriggerEvent,
+    cid: int,
+    active_products: Sequence[ActiveProduct],
+    profile: SensorProfile,
+    router: JudgmentRouter,
+    min_confidence: float,
+) -> JudgmentResult | None:
+    """`_trial_replacement_valid`와 같은 재판정이지만 결과를 그대로 반환하고,
+    신뢰도까지 `min_confidence`(기존 `source_conf_min` 재사용) 이상을 요구한다
+    — 잔차 동률/열세 판별은 결과적으로 원 상품을 지워버릴 수 있으므로,
+    약한(저confidence) 노이즈 후보 하나가 남아서 우연히 COMPLETE가 되는
+    것만으로 "독립적인 진짜 대안"이라 보지 않는다(합법적인 양쪽 판매를
+    노이즈 때문에 갈라놓는 사고 방지, test_penalized_winner_still_wins 류)."""
+    trial = router.judge(
+        JudgmentContext(
+            zone=e.zone,
+            profile=profile,
+            delta_weight=e.delta_weight,
+            segments=e.segments,
+            vision_candidates=tuple(
+                c for c in e.vision_candidates if c.class_id != cid
+            ),
+            active_products=tuple(active_products),
+            vision_only=False,
+        )
+    )
+    if trial.status is not JudgmentStatus.COMPLETE or not trial.products:
+        return None
+    if trial.confidence < min_confidence:
+        return None
+    residual = abs(
+        abs(e.delta_weight)
+        - sum(pc.count * pc.product.unit_weight for pc in trial.products)
+    )
+    if residual > profile.count_gate:
+        return None
+    return trial
+
+
 def _fingerprint_duplicate_suppression(
     events: Sequence[TriggerEvent],
     profiles: Mapping[int, SensorProfile],
@@ -429,10 +469,80 @@ def _fingerprint_duplicate_suppression(
     return out
 
 
+def _tie_break_by_replaceability(
+    e1: TriggerEvent,
+    e2: TriggerEvent,
+    cid: int,
+    active_products: Sequence[ActiveProduct],
+    profiles: Mapping[int, SensorProfile],
+    default_profile: SensorProfile,
+    router: JudgmentRouter,
+) -> TriggerEvent | None:
+    """잔차 동률 전용 보조 판별 (2026-10 ses-2/ses-4 후속): 잔차만으로는
+    못 가르는 동률에서, cid를 뺀 자기 후보만으로 COMPLETE 대체가 되는 쪽은
+    X가 자기 것이 아닐 수 있다는 독립 증거를 가진 쪽이다 — 10차 ses-1
+    self-fit과 같은 원칙을 잔차-동률 케이스에 적용한 것. 정확히 한쪽만
+    대체되면 반대쪽(대체 불가)을 진짜 소스로 반환한다. 둘 다 대체되거나
+    둘 다 안 되면 구분 불가 — None(기존처럼 양쪽 면제로 폴백, 회귀 없음)."""
+    replaceable1 = _trial_replacement_valid(
+        e1, cid, active_products, profiles.get(e1.zone, default_profile), router
+    )
+    replaceable2 = _trial_replacement_valid(
+        e2, cid, active_products, profiles.get(e2.zone, default_profile), router
+    )
+    if replaceable1 and not replaceable2:
+        return e2
+    if replaceable2 and not replaceable1:
+        return e1
+    return None
+
+
+def _tie_break_by_replaceability(
+    e1: TriggerEvent,
+    e2: TriggerEvent,
+    cid: int,
+    active_products: Sequence[ActiveProduct],
+    profiles: Mapping[int, SensorProfile],
+    default_profile: SensorProfile,
+    router: JudgmentRouter,
+    cfg: CrossZonePenaltyConfig,
+) -> TriggerEvent | None:
+    """잔차 동률 전용 보조 판별 (2026-10 ses-2/ses-4 후속): 잔차만으로는
+    못 가르는 동률에서, cid를 뺀 자기 후보만으로 신뢰할 만한(≥source_conf_min)
+    COMPLETE 대체가 나오는 쪽은 X가 자기 것이 아닐 수 있다는 독립 증거를 가진
+    쪽이다 — 10차 ses-1 self-fit과 같은 원칙을 잔차-동률 케이스에 적용한 것.
+    정확히 한쪽만 대체되면 반대쪽(대체 불가)을 진짜 소스로 반환한다. 둘 다
+    대체되거나 둘 다 안 되면 구분 불가 — None(기존처럼 양쪽 면제로 폴백,
+    회귀 없음). confidence 하한은 노이즈성 단일 후보(예: conf 0.3짜리 크로스
+    클래스)가 합법적인 양쪽 판매를 갈라놓지 않게 막는다."""
+    replaceable1 = (
+        _credible_trial_replacement(
+            e1, cid, active_products, profiles.get(e1.zone, default_profile),
+            router, cfg.source_conf_min,
+        )
+        is not None
+    )
+    replaceable2 = (
+        _credible_trial_replacement(
+            e2, cid, active_products, profiles.get(e2.zone, default_profile),
+            router, cfg.source_conf_min,
+        )
+        is not None
+    )
+    if replaceable1 and not replaceable2:
+        return e2
+    if replaceable2 and not replaceable1:
+        return e1
+    return None
+
+
 def _mutual_exemptions(
     events: Sequence[TriggerEvent],
     cfg: CrossZonePenaltyConfig,
     active_products: Sequence[ActiveProduct] = (),
+    profiles: Mapping[int, SensorProfile] | None = None,
+    default_profile: SensorProfile = REFRIGERATOR,
+    router: JudgmentRouter | None = None,
 ) -> set[tuple[int, int]]:
     """상호 강등 가드 (8차 ses-3): 두 존이 같은 정체성 X를 판정했고 오염
     창이 **양방향**으로 겹치면, 각자가 상대를 소스로 X를 강등해 X가 정산에서
@@ -476,8 +586,15 @@ def _mutual_exemptions(
                 if unfit1 != unfit2:
                     exempt.add(((e2 if unfit1 else e1).zone, cid))
                 elif r1 is None or r2 is None or r1 == r2:
-                    exempt.add((e1.zone, cid))
-                    exempt.add((e2.zone, cid))
+                    tie_winner = _tie_break_by_replaceability(
+                        e1, e2, cid, active_products,
+                        profiles or {}, default_profile, router or JudgmentRouter(), cfg,
+                    )
+                    if tie_winner is not None:
+                        exempt.add((tie_winner.zone, cid))
+                    else:
+                        exempt.add((e1.zone, cid))
+                        exempt.add((e2.zone, cid))
                 elif r1 < r2:
                     exempt.add((e1.zone, cid))
                 else:
@@ -551,7 +668,7 @@ def apply_cross_zone_penalty(
     if not cfg.enabled or not active_products:
         return list(events)
     router = router or JudgmentRouter()
-    exempt = _mutual_exemptions(events, cfg, active_products)
+    exempt = _mutual_exemptions(events, cfg, active_products, profiles, default_profile, router)
     captive = _captive_only_zones(events)
     out: list[TriggerEvent] = []
     for e in events:
@@ -560,8 +677,11 @@ def apply_cross_zone_penalty(
             router, exempt, captive,
         )
         out.append(replaced if replaced is not None else e)
-    return _fingerprint_duplicate_suppression(
+    out = _fingerprint_duplicate_suppression(
         out, profiles, active_products, notes, default_profile, router
+    )
+    return _residual_loser_resolution(
+        out, profiles, active_products, cfg, notes, default_profile, router, exempt,
     )
 
 
@@ -819,3 +939,101 @@ def _same_products(a, b) -> bool:
         return sorted((pc.product.product_id, pc.count) for pc in j.products)
 
     return key(a) == key(b)
+
+
+def _residual_loser_resolution(
+    events: Sequence[TriggerEvent],
+    profiles: Mapping[int, SensorProfile],
+    active_products: Sequence[ActiveProduct],
+    cfg: CrossZonePenaltyConfig,
+    notes: list[str],
+    default_profile: SensorProfile,
+    router: JudgmentRouter,
+    exempt: set[tuple[int, int]],
+) -> list[TriggerEvent]:
+    """마지막 안전망 (2026-10 ses-2/ses-4 재테스트): 상호 강등 가드에서 cid에
+    대해 면제받지 못한 — 즉 잔차 비교에서 지거나 동률 판별에서도 밀린 — zone이
+    그래도 공유 클래스를 그대로 청구 중인 경우를 한 번 더 직접 점검한다.
+
+    기존 soft 페널티(⑤)는 ④ 무게 모호성 게이트가 "경쟁 후보가 vision_candidates에
+    아예 없거나 무게만으로 다른 상품이 안 보인다"고 판단하면 조용히 KEEP한다 —
+    cid가 실제로는 오염이어도 대체 후보가 없으면(ses-4 zone5: 진짜 상품이
+    투표에서 탈락) 또는 자기 후보 풀 안에 있어도 ④가 못 찾으면(ses-2 zone2:
+    잔차 동률) 페널티 자체가 발동하지 않을 수 있다.
+
+    이 패스는 cid를 완전히 제외한 자기 후보로 라우터를 직접 재판정해 본다:
+    - COMPLETE + 다른 상품이면 채택 (새 상품을 추정하지 않는다 — 이미 관측된
+      자기 후보 중 라우터의 재고·무게·냉동 count gate를 모두 통과한 것만).
+    - 대체가 없으면, 자기 잔차가 base count_gate(n-scale 슬랙 미적용)를
+      초과할 때만 그 품목 청구를 제거한다 — 슬랙 없이는 원래 통과 못했을
+      약한 적합만 제거 대상으로 삼아, 정상적인 자기 완결 판매(잔차가
+      base gate 이내)는 그대로 둔다 (R1 "하드 제외 금지"와 동일한 보수성).
+    """
+    if not cfg.enabled or not active_products:
+        return list(events)
+    billing: dict[int, dict[int, TriggerEvent]] = defaultdict(dict)
+    for e in events:
+        if e.status != "ok" or e.judgment.status is not JudgmentStatus.COMPLETE:
+            continue
+        if e.judgment.confidence < cfg.source_conf_min:
+            continue
+        for pc in e.judgment.products:
+            if pc.product.class_id > 0:
+                billing[pc.product.class_id].setdefault(e.zone, e)
+
+    replacements: dict[int, TriggerEvent] = {}  # id(event) -> 교체 결과
+    for cid, per_zone in billing.items():
+        if len(per_zone) < 2:
+            continue
+        for zone, e in per_zone.items():
+            if (zone, cid) in exempt:
+                continue  # 상호 강등 가드가 이미 진짜 소스로 보호함
+            overlapping_sources = [
+                other for other_zone, other in per_zone.items()
+                if other_zone != zone and windows_mutually_overlap(e, other, cfg)
+            ]
+            if not overlapping_sources:
+                continue  # 오염 창이 안 겹치면 공유만으로 손대지 않는다
+            profile = profiles.get(zone, default_profile)
+            trial = _credible_trial_replacement(
+                e, cid, active_products, profile, router, cfg.source_conf_min
+            )
+            if trial is not None and not _same_products(trial, e.judgment):
+                adopted = ",".join(
+                    f"{pc.product.product_id}x{pc.count}" for pc in trial.products
+                )
+                notes.append(
+                    f"zone{zone}:cross_zone_residual_loser_replaced:"
+                    f"removed=class{cid}:adopted={adopted}"
+                )
+                replacements[id(e)] = replace(
+                    e,
+                    judgment=replace(
+                        trial, reason=trial.reason + "+cross_zone_residual_loser"
+                    ),
+                )
+                continue
+            residual = _judgment_residual(e)
+            if residual is None or residual <= profile.count_gate:
+                continue  # 자기 무게로도 base gate 이내 — 정상 판매일 수 있어 보존
+            remaining = tuple(
+                pc for pc in e.judgment.products if pc.product.class_id != cid
+            )
+            notes.append(f"zone{zone}:cross_zone_residual_loser_suppressed:class{cid}")
+            if remaining:
+                judgment = replace(
+                    e.judgment,
+                    products=remaining,
+                    reason=e.judgment.reason + "+cross_zone_residual_loser_suppressed",
+                )
+            else:
+                judgment = JudgmentResult(
+                    JudgmentStatus.NO_DETECTION,
+                    confidence=0.0,
+                    reason="cross_zone_residual_loser_suppressed",
+                )
+            replacements[id(e)] = replace(e, judgment=judgment)
+
+    if not replacements:
+        return list(events)
+    return [replacements.get(id(e), e) for e in events]
