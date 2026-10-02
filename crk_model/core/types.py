@@ -96,8 +96,10 @@ class ZoneBasket:
     trigger_count: int = 0  # OPS 로그: 해당 zone에 도달한 트리거(이벤트) 수
     notes: tuple[str, ...] = ()  # OPS 로그: 해당 zone에 귀속되는 정산 사유(I8)
     confidence: float = 0.0  # 해당 zone에서 상품 결론이 난 판정 confidence 평균
-    # 완전/불완전 결제 판단: confidence threshold 대신 judgment 상태 기준.
-    # zone 내 결론난 판정 중 하나라도 PARTIAL이면 "partial", 전부 COMPLETE(또는 무판정)면 "complete".
+    # 결제 status 3단계(2026-10, settler.PAYMENT_STATUS_REVIEW 참조):
+    # "partial"(판정이 PARTIAL) > "review"(COMPLETE지만 경쟁 후보와 거의 동률)
+    # > "complete"(그 외 — 비전·무게가 처음부터 명확히 일치). confidence threshold가
+    # 아니라 judgment 상태 기준으로 결정한다.
     status: str = JudgmentStatus.COMPLETE.value
 
     @property

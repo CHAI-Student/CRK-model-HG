@@ -115,6 +115,69 @@ class TestCloseSettler:
         assert result.total_price == 0
         assert any("cross_zone_return" in n for n in result.notes)  # I8
 
+    def test_confident_complete_reports_complete_status(self, cola):
+        # 채택 후보(conf 0.9)와 경쟁 후보(conf 0.3)의 차이가 margin(0.03)보다
+        # 훨씬 커서 "1단계부터 명확히 일치" — zone status는 complete 그대로.
+        j = JudgmentResult(
+            JudgmentStatus.COMPLETE, (ProductCount(cola, 1),), 0.9, "strict",
+        )
+        e = TriggerEvent(
+            "s1", 1, 1.0, -100.0, (), j,
+            vision_candidates=(cand(cola.class_id, conf=0.9, votes=30), cand(2, conf=0.3, votes=5)),
+        )
+        s = CloseSettler()
+        result = s.settle("s1", [e], PROFILES)
+        by_zone = {z.zone: z for z in result.zones}
+        assert by_zone[1].status == "complete"
+        assert not any("ambiguous_runner_up_complete" in n for n in result.notes)
+
+    def test_near_tie_complete_reports_review_status(self, cola, water):
+        # ses-24 zone1 재구성: COMPLETE 채택(conf 0.72)인데 경쟁 후보도
+        # confidence가 거의 동일(0.72) — 판정 상품/개수는 그대로 유지하되
+        # Node로 나가는 zone status는 "review"(완전/불완전 중간 등급)로
+        # 내려야 한다. 진짜 PARTIAL(개수/무게 미검증)과는 구분된다.
+        j = JudgmentResult(
+            JudgmentStatus.COMPLETE, (ProductCount(cola, 1),), 0.72, "freezer_vision_first",
+        )
+        e = TriggerEvent(
+            "s1", 1, 1.0, -100.0, (), j,
+            vision_candidates=(
+                cand(cola.class_id, conf=0.72, votes=5),
+                cand(water.class_id, conf=0.72, votes=2),
+            ),
+        )
+        s = CloseSettler()
+        result = s.settle("s1", [e], PROFILES)
+        by_zone = {z.zone: z for z in result.zones}
+        assert by_zone[1].status == "review"
+        # 판정 자체(상품/개수)는 바뀌지 않는다 — 결제 status만 내려간다.
+        assert [(pc.product.product_id, pc.count) for pc in by_zone[1].products] == [
+            (cola.product_id, 1)
+        ]
+        assert any("zone1:ambiguous_runner_up_complete" in n for n in result.notes)
+
+    def test_partial_judgment_outranks_review_in_same_zone(self, cola, water):
+        # 같은 zone에 애매한 COMPLETE(review 대상)와 진짜 PARTIAL(개수/무게
+        # 미검증)이 함께 있으면, 더 근본적인 문제인 partial이 우선해야 한다.
+        ambiguous_complete = JudgmentResult(
+            JudgmentStatus.COMPLETE, (ProductCount(cola, 1),), 0.72, "freezer_vision_first",
+        )
+        e1 = TriggerEvent(
+            "s1", 1, 1.0, -100.0, (), ambiguous_complete,
+            vision_candidates=(
+                cand(cola.class_id, conf=0.72, votes=5),
+                cand(water.class_id, conf=0.72, votes=2),
+            ),
+        )
+        e2 = TriggerEvent(
+            "s1", 1, 2.0, -200.0, (),
+            JudgmentResult(JudgmentStatus.PARTIAL, (ProductCount(water, 1),), 0.5, "relaxed"),
+        )
+        s = CloseSettler()
+        result = s.settle("s1", [e1, e2], PROFILES)
+        by_zone = {z.zone: z for z in result.zones}
+        assert by_zone[1].status == "partial"
+
     def test_net_delta_correction(self, cola, water):
         # 판정은 water(200g)로 청구했지만 net=0 (반품이 무게 미매칭) → 교정
         s = CloseSettler()

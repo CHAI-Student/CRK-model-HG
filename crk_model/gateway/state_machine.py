@@ -362,7 +362,7 @@ def build_payment_payload(settlement: FinalizedSettlement) -> dict:
                 "productCount": sum(p["count"] for p in products),
                 "weightDelta": round(z.weight_delta, 1),
                 "confidence": z.confidence,
-                "status": z.status,  # judgment 기준 완전/불완전결제 ("complete"/"partial") — confidence threshold 미사용
+                "status": z.status,  # judgment 기준 결제 status ("complete"/"review"/"partial") — confidence threshold 미사용
             }
         )
         all_products.extend(products)
