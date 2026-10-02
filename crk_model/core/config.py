@@ -103,6 +103,10 @@ class Settings:
     # 14차: 게이트 안 스냅을 콤보가 뒤집으려면 존 판정 conf가 이 값 미만
     # (확신 스냅 존중 — 오버라이드 오답 6건 전부 conf 0.96~1.0). >1로 비활성.
     close_combo_override_max_conf: float = 0.95
+    # 결제 status 모호성 판별: COMPLETE 채택 후보와 다음 경쟁 후보의 confidence
+    # 차이가 이 값 미만(사실상 동률)이면 zone status만 불완전결제(partial)로
+    # 내린다(판정 자체는 COMPLETE 유지). settler._is_ambiguous_complete 참조.
+    close_ambiguous_runner_up_margin: float = 0.03
     # D8/T2-2: 게이트 통과 프레임 마이크로배치 크기. 기본 OFF(1) — >1은
     # 정적 batch 엔진 재수출(scripts/convert_engine.sh BATCH=N) 전제.
     batch_size: int = 1
@@ -349,6 +353,9 @@ class Settings:
             ),
             close_combo_override_max_conf=_env_float(
                 "MODEL__CLOSE__COMBO_OVERRIDE_MAX_CONF", 0.95
+            ),
+            close_ambiguous_runner_up_margin=_env_float(
+                "MODEL__CLOSE__AMBIGUOUS_RUNNER_UP_MARGIN", 0.03
             ),
             batch_size=_env_int("MODEL__VISION__BATCH_SIZE", 1),
             prefetch_depth=_env_int("MODEL__VIDEO__PREFETCH", 0),

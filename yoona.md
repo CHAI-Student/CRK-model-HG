@@ -764,3 +764,109 @@ git diff --check 통과
   - ses-47 및 모호한 removal 보호 테스트 추가
 - [yoona.md](yoona.md)
   - 원인, 안전 분기 조건, 검증 결과 기록
+
+---
+
+# 2026-10-02 (2차) Node 결제 status — "애매한 COMPLETE"도 불완전결제로 보고
+
+## 요청 배경
+
+2026-09-11에 zone 결제 status를 confidence threshold 대신 judgment 상태
+(COMPLETE/PARTIAL)로 집계하도록 바꿨는데, COMPLETE 전략이 채택했더라도 근거가
+애매했던 경우(예: ses-24 zone1 `freezer_vision_first_single(conf=0.72)
+runner_up=class66(conf=0.72,votes=2)` — 채택 후보와 경쟁 후보의 confidence가
+사실상 동률)까지 그대로 `"complete"`로 Node에 보고되고 있었다. "비전·무게가
+1단계부터 모두 명확히 일치한 경우에만 complete, 조금이라도 애매하면 다른
+값으로" 요청에 따라 보완했다.
+
+## 고친 내용
+
+[crk_model/ledger/settler.py](crk_model/ledger/settler.py)에 `_is_ambiguous_complete()`를
+추가하고, `CloseSettler.settle()`의 zone status 집계에 연결했다.
+
+- COMPLETE로 채택된 상품의 vision_candidates confidence와, 채택되지 않은
+  최상위 경쟁 후보(runner-up)의 confidence 차이가 `ambiguous_runner_up_margin`
+  (기본 0.03) 미만이면 "애매한 COMPLETE"로 본다.
+- 판정 자체(상품/개수, `judgment.status`)는 전혀 바꾸지 않는다 — Node로 나가는
+  `zones[].status`만 내려보낸다(결제 보고 전용 신호. 이후 2차 수정으로
+  `"partial"`이 아니라 `"review"`라는 별도 중간 등급으로 분리됐다 — 아래
+  2026-10-02(3차) 참조).
+- 경쟁 후보가 아예 없으면(vision_candidates에 대안 자체가 없음) 동률을 판단할
+  근거가 없으므로 애매함으로 보지 않는다 — 기존 "complete" 유지.
+- 발동 시 `zoneN:ambiguous_runner_up_complete:trigger_ts=...` note를 남겨
+  아카이브에서 왜 불완전결제로 내려갔는지 추적 가능하게 했다.
+- 새 파라미터 `ambiguous_runner_up_margin`(`CloseSettler` 생성자) +
+  `MODEL__CLOSE__AMBIGUOUS_RUNNER_UP_MARGIN`(기본 0.03) — 기존
+  `combo_override_max_conf` 등과 같은 배선 방식.
+
+## 검증
+
+```text
+tests/test_ledger.py: 신규 2건(확신 COMPLETE는 complete 유지 / 동률 COMPLETE는
+partial로 보고 + 상품·개수 불변) 추가
+전체: 466 passed, 24 skipped (기존 464 대비 신규 2건만 추가, 회귀 없음)
+```
+
+정적 검사(`compileall`, `git diff --check`) 통과.
+
+## 바뀐 파일
+
+- [crk_model/ledger/settler.py](crk_model/ledger/settler.py) — `_is_ambiguous_complete()`
+  추가, `CloseSettler` 생성자에 `ambiguous_runner_up_margin` 파라미터 추가,
+  zone status 집계에 연결
+- [crk_model/core/config.py](crk_model/core/config.py) — `close_ambiguous_runner_up_margin`
+  설정 + `MODEL__CLOSE__AMBIGUOUS_RUNNER_UP_MARGIN` env 배선
+- [crk_model/service/model_service.py](crk_model/service/model_service.py) —
+  `CloseSettler` 생성 시 새 설정 전달
+- [tests/test_ledger.py](tests/test_ledger.py) — 회귀 테스트 2건 추가
+
+---
+
+# 2026-10-02 (3차) 결제 status 3단계 세분화 — complete/review/partial
+
+## 요청 배경
+
+"애매하면 partial이나 다른 값으로" 요청에 이어, "status를 더 다양하게 해도
+좋을 거 같다 — 정도에 따라 구분"이라는 후속 요청이 왔다. 2차 수정에서는
+애매한 COMPLETE를 그냥 `"partial"`로 합쳐 보냈는데, 이러면 "개수/무게 자체가
+미검증인 진짜 PARTIAL"과 "판정은 COMPLETE인데 비전만 근소하게 애매했던
+경우"가 Node 입장에서 구분이 안 됐다. 둘은 운영상 심각도가 다르므로 등급을
+나눴다.
+
+## 고친 내용
+
+[crk_model/ledger/settler.py](crk_model/ledger/settler.py)에 결제 보고 전용
+상수 `PAYMENT_STATUS_REVIEW = "review"`를 추가하고, zone status를 3단계
+우선순위로 재집계했다(심각한 쪽이 우선):
+
+1. **`"partial"`** — zone 내 결론난 판정 중 하나라도 실제 `JudgmentStatus.PARTIAL`
+   (개수/무게 자체가 미검증)
+2. **`"review"`**(신규) — 전부 COMPLETE지만, 그중 하나 이상이 애매한 COMPLETE
+   (`_is_ambiguous_complete`로 판별 — 채택 후보와 runner-up의 confidence 차이가
+   `ambiguous_runner_up_margin` 미만)
+3. **`"complete"`** — 그 외(비전·무게가 1단계부터 명확히 일치)
+
+같은 zone에 1)과 2)가 동시에 있으면 더 근본적인 문제인 `"partial"`이 우선한다.
+`PAYMENT_STATUS_REVIEW`는 `JudgmentStatus` enum 멤버가 아니라 결제 보고
+전용 문자열 상수로 분리했다 — 내부 판정 로직 어디에서도 이 값으로 분기하지
+않는다(순수 Node 보고용).
+
+## 검증
+
+```text
+tests/test_ledger.py: 기존 "동률 COMPLETE → partial" 테스트를 "→ review"로
+갱신 + 우선순위 테스트(PARTIAL과 review가 같은 zone에 있으면 partial 승리) 신규 추가
+전체: 467 passed, 24 skipped (기존 466 대비 신규 1건, 회귀 없음)
+```
+
+정적 검사(`compileall`, `git diff --check`) 통과.
+
+## 바뀐 파일
+
+- [crk_model/ledger/settler.py](crk_model/ledger/settler.py) — `PAYMENT_STATUS_REVIEW`
+  상수 추가, zone status 3단계 우선순위 재집계
+- [crk_model/core/types.py](crk_model/core/types.py) — `ZoneBasket.status` 문서화 갱신
+- [crk_model/gateway/state_machine.py](crk_model/gateway/state_machine.py) —
+  결제 payload 주석 갱신
+- [tests/test_ledger.py](tests/test_ledger.py) — 기존 테스트 1건 갱신(review
+  기대값) + 우선순위 회귀 테스트 1건 추가

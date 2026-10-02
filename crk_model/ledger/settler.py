@@ -153,6 +153,34 @@ def _match_return(b: _Basket, ret_weight: float, tol: float) -> bool:
     return False
 
 
+# 결제 status 3단계(2026-10) 중 "완전"과 "불완전(PARTIAL)" 사이의 중간 등급 —
+# 판정은 COMPLETE지만 근거가 애매했던 경우. JudgmentStatus 멤버가 아니라
+# 결제 보고 전용 값이라 별도 상수로 둔다(판정 로직 어디에서도 이 문자열로
+# 분기하지 않는다 — Node로 나가는 zones[].status 표기 전용).
+PAYMENT_STATUS_REVIEW = "review"
+
+
+def _is_ambiguous_complete(e: TriggerEvent, margin: float) -> bool:
+    """COMPLETE로 채택되었어도 채택 후보와 다음 경쟁 후보의 confidence 차이가
+    margin 미만(사실상 동률)이면 "1단계부터 명확히 일치"한 것이 아니다 — 결제
+    status를 complete로 내보내기엔 근거가 약하다는 신호(zone_status가 이 정보를
+    반영한다). 판정(judgment.products/개수)은 그대로 두고 보고만 내린다."""
+    adopted_ids = {pc.product.class_id for pc in e.judgment.products}
+    if not adopted_ids:
+        return False
+    adopted_conf = max(
+        (c.confidence for c in e.vision_candidates if c.class_id in adopted_ids),
+        default=None,
+    )
+    runner_up_conf = max(
+        (c.confidence for c in e.vision_candidates if c.class_id not in adopted_ids),
+        default=None,
+    )
+    if adopted_conf is None or runner_up_conf is None:
+        return False  # 경쟁 후보 자체가 없으면 동률을 판단할 근거가 없다
+    return adopted_conf - runner_up_conf < margin
+
+
 class CloseSettler:
     def __init__(
         self,
@@ -204,6 +232,13 @@ class CloseSettler:
         # (COMPLETE) conf가 이 값 미만이어야 한다. 실측 오버라이드 오답
         # 6건은 전부 conf 0.96~1.0, 보호 케이스는 0.9/0.72. >1로 설정하면
         # 규칙 비활성. MODEL__CLOSE__COMBO_OVERRIDE_MAX_CONF.
+        # 결제 status 모호성 판별 (2026-10): COMPLETE로 채택된 후보와
+        # 다음 경쟁 후보의 confidence 차이가 이 값 미만(사실상 동률)이면,
+        # 판정은 COMPLETE로 유지하되 Node로 나가는 zone status만 불완전
+        # 결제(partial)로 내린다 (ses-24 zone1 freezer_vision_first_single
+        # conf=0.72 vs runner_up class66 conf=0.72 사실상 동률이 "complete"로
+        # 나가던 문제). MODEL__CLOSE__AMBIGUOUS_RUNNER_UP_MARGIN.
+        ambiguous_runner_up_margin: float = 0.03,
     ):
         self.error_policy = error_policy
         # zone이 profiles dict에 없을 때의 폴백 프로파일 (cabinet_type 이식) —
@@ -219,6 +254,7 @@ class CloseSettler:
         self.combo_min_conf = combo_min_conf
         self.combo_session_guard = combo_session_guard
         self.combo_override_max_conf = combo_override_max_conf
+        self.ambiguous_runner_up_margin = ambiguous_runner_up_margin
         self._finalized: dict[str, FinalizedSettlement] = {}
 
     def settle(
@@ -294,24 +330,44 @@ class CloseSettler:
             # 결제 confidence는 최종 정산 입력(ok)에 남은 실제 상품 판정만
             # 대상으로 zone별 산술평균을 낸다. NO_DETECTION/반품 이벤트의 0.0이
             # 결제 상품 신뢰도를 희석하지 않게 COMPLETE/PARTIAL + products로 제한.
-            concluded_judgments = [
-                e.judgment
+            concluded_events = [
+                e
                 for e in ok
                 if e.zone == zone
                 and e.judgment.products
                 and e.judgment.status
                 in (JudgmentStatus.COMPLETE, JudgmentStatus.PARTIAL)
             ]
+            concluded_judgments = [e.judgment for e in concluded_events]
             zone_confidence = round(
                 sum(j.confidence for j in concluded_judgments) / len(concluded_judgments), 4
             ) if concluded_judgments else 0.0
-            # 완전/불완전 결제는 confidence threshold가 아닌 judgment 상태로 판단:
-            # 위와 같은 결론난 판정 중 하나라도 PARTIAL이면 zone 전체를 불완전결제로 전달.
-            zone_status = (
-                JudgmentStatus.PARTIAL.value
-                if any(j.status is JudgmentStatus.PARTIAL for j in concluded_judgments)
-                else JudgmentStatus.COMPLETE.value
-            )
+            # 완전/불완전/검토필요 결제는 confidence threshold가 아닌 judgment
+            # 상태로 판단하되, 정도에 따라 3단계로 나눈다(2026-10 payment status
+            # 세분화):
+            #   partial — 판정 자체가 PARTIAL(개수/무게 미검증)
+            #   review  — 판정은 COMPLETE지만 채택 후보와 다음 경쟁 후보의
+            #             confidence 차이가 ambiguous_runner_up_margin 미만
+            #             (사실상 동률) — "1단계부터 명확히 일치"가 아니었다
+            #             (ses-24 zone1 freezer_vision_first_single(conf=0.72)
+            #             runner_up=class66(conf=0.72) 사례)
+            #   complete — 그 외 (비전·무게가 처음부터 명확히 일치)
+            # 셋 다 해당 가능하면 더 근본적인 문제인 partial을 우선한다.
+            ambiguous_events = [
+                e for e in concluded_events
+                if e.judgment.status is JudgmentStatus.COMPLETE
+                and _is_ambiguous_complete(e, self.ambiguous_runner_up_margin)
+            ]
+            for e in ambiguous_events:
+                notes.append(
+                    f"zone{zone}:ambiguous_runner_up_complete:trigger_ts={e.ts:.3f}"
+                )
+            if any(j.status is JudgmentStatus.PARTIAL for j in concluded_judgments):
+                zone_status = JudgmentStatus.PARTIAL.value
+            elif ambiguous_events:
+                zone_status = PAYMENT_STATUS_REVIEW
+            else:
+                zone_status = JudgmentStatus.COMPLETE.value
             basket = baskets.get(zone)
             zb = (
                 basket.to_zone(
