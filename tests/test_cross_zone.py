@@ -1080,3 +1080,97 @@ class TestFingerprintDuplicateSuppression:
             )
             for note in notes
         )
+
+
+class TestSes7Zone1MultiItemPreservedAfterPenalty:
+    """실기 ses-7-1791346368 zone1 재구성: 한맥불벅(66)+주먹밥(72) 동시 취출을
+    multi_tray가 PARTIAL(66×1+70×2, conf0.6)로 1차 판정했는데, 70은 사실
+    zone3가 거의 동시에 꺼낸 상품의 카메라 유출(class70 99표)이었다. soft
+    페널티(α=0.5)로도 70의 득표 우위(99→49.5)가 72(21표)를 못 넘어서자
+    재판정이 "70×4"로 수량만 바꿔 재확정했고, 이게 원 판정의 66을 통째로
+    덮어쓴 뒤 잔차 안전망이 (zone3가 진짜 출처인) 70마저 걷어내 zone1이
+    0건으로 떨어졌었다 (버그). 수정 후에는 재판정이 여전히 오염 클래스(70)에
+    의존하면 그 결과를 통째로 채택하지 않고, 원 판정에서 오염 멤버만 제거해
+    비오염 상품(66)을 보존해야 한다."""
+
+    HANMAEK = ActiveProduct(
+        "P17854812388987783", "한맥불벅", class_id=66,
+        unit_weight=165.0, unit_price=8000, stock_qty=10,
+    )
+    ZERO70 = ActiveProduct(
+        "P17355176394022221", "제로아이스", class_id=70,
+        unit_weight=70.0, unit_price=2500, stock_qty=10,
+    )
+    JUMEOKBAP = ActiveProduct(
+        "P72", "주먹밥", class_id=72, unit_weight=115.0, unit_price=2500, stock_qty=10,
+    )
+    HAGENDAZ = ActiveProduct(
+        "P17854812077466827", "하겐다즈", class_id=69,
+        unit_weight=95.0, unit_price=5000, stock_qty=10,
+    )
+    MANDU = ActiveProduct(
+        "P17514184380842082", "청양만두", class_id=74,
+        unit_weight=235.0, unit_price=3700, stock_qty=10,
+    )
+    PROFILES = {1: FREEZER, 2: FREEZER, 3: FREEZER, 4: FREEZER}
+    CANDIDATES = [
+        cand(70, conf=1.0, votes=99, ratio=0.23741007194244604),
+        cand(66, conf=1.0, votes=32, ratio=0.07673860911270983),
+        cand(72, conf=0.912844842672348, votes=21, ratio=0.050359712230215826),
+        cand(69, conf=1.0, votes=18, ratio=0.04316546762589928),
+        cand(74, conf=1.0, votes=14, ratio=0.03357314148681055),
+    ]
+
+    def _events(self):
+        zone1 = event(
+            "ses-7-1791346368", 1, 1791346369.332611,
+            JudgmentResult(
+                JudgmentStatus.PARTIAL,
+                (ProductCount(self.HANMAEK, 1), ProductCount(self.ZERO70, 2)),
+                0.6,
+                "multi_tray[ch0:freezer_vision_first_near_gate+"
+                "ch1:freezer_vision_first_single;partial_billed:ch0]",
+            ),
+            -263.33333333333337,
+            candidates=self.CANDIDATES,
+            change_ts=(1791346372.497511, 1791346374.097523, 1791346375.697913),
+        )
+        zone3 = event(
+            "ses-7-1791346368", 3, 1791346372.498,
+            judged(self.ZERO70, count=1, conf=1.0), -70.0,
+            candidates=self.CANDIDATES, change_ts=(1791346375.698,),
+        )
+        zone4 = event(
+            "ses-7-1791346368", 4, 1791346375.0,
+            judged(self.MANDU, count=1, conf=1.0), -230.0,
+            candidates=self.CANDIDATES, change_ts=(1791346378.898,),
+        )
+        zone2 = event(
+            "ses-7-1791346368", 2, 1791346377.0,
+            judged(self.HAGENDAZ, count=1, conf=1.0), -90.0,
+            candidates=self.CANDIDATES, change_ts=(1791346380.498,),
+        )
+        return [zone1, zone3, zone4, zone2]
+
+    def test_zone1_keeps_hanmaek_instead_of_dropping_to_zero(self):
+        notes: list[str] = []
+        out = apply_cross_zone_penalty(
+            [*self._events()], self.PROFILES,
+            (self.HANMAEK, self.ZERO70, self.JUMEOKBAP, self.HAGENDAZ, self.MANDU),
+            CFG, notes,
+        )
+        by_zone = {e.zone: e for e in out}
+        zone1 = by_zone[1]
+        # 핵심 회귀 방지: zone1이 0건(NO_DETECTION)으로 떨어지면 안 된다 —
+        # 최소한 오염과 무관한 한맥불벅(66)은 보존되어야 한다.
+        assert zone1.judgment.status is not JudgmentStatus.NO_DETECTION
+        assert [
+            (pc.product.product_id, pc.count) for pc in zone1.judgment.products
+        ] == [("P17854812388987783", 1)]
+        # zone3는 영향받지 않아야 한다 (진짜 출처 보호).
+        assert [
+            (pc.product.product_id, pc.count) for pc in by_zone[3].judgment.products
+        ] == [("P17355176394022221", 1)]
+        assert any(
+            "zone1:cross_zone_vision_penalty_still_contaminated" in n for n in notes
+        )

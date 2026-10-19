@@ -1125,3 +1125,89 @@ tests/test_ledger.py: 기존 "동률 COMPLETE → partial" 테스트를 "→ rev
   결제 payload 주석 갱신
 - [tests/test_ledger.py](tests/test_ledger.py) — 기존 테스트 1건 갱신(review
   기대값) + 우선순위 회귀 테스트 1건 추가
+
+---
+
+# 2026-10-19 냉동 교차존 — 멀티아이템 오염 재판정이 비오염 상품까지 소거하던 문제
+
+## 뭘 확인했나
+
+실기 세션 `ses-7-1791346368` 분석 요청(오라클: 1층 주먹밥(72)+한맥불벅(66),
+2층 하겐다즈(69), 3층 제로아이스(70), 4층 청양만두(74))에서, 1층(zone1)만
+최종 0건(`products: []`, `confidence: 0.0`)으로 내려갔다. vision은 72를
+conf 0.91·21표로 정상 탐지했는데도 결과가 비었다 — 교차존 보정 단계의
+연쇄 작용이 원인이었다.
+
+1. zone1 1차 판정(multi_tray, PARTIAL)은 66×1 + 70×2로 확정됐다. 70은 사실
+   zone3가 거의 동시에 취출한 제로아이스의 카메라 유출표(99표, conf 1.0)였고,
+   `FreezerVisionFirstStrategy`는 설계상 "무게로 정체성을 선택하지 않고
+   득표 서열을 신뢰"하므로 72(21표)가 70(99표)에 밀려 처음부터 후보에서
+   빠졌다.
+2. `_repass_event()`의 soft 페널티(α=0.5)가 70의 득표를 99→49.5로 깎았지만
+   여전히 72(21)·66(32)보다 높아 서열이 안 바뀌었다. 재판정은 "같은 70
+   클래스, 수량만 2→4"로 재확정했는데, 이 결과를 그대로 채택하면서 원
+   판정에 같이 있던 66까지 통째로 덮어써 사라졌다.
+3. 마지막 안전망 `_residual_loser_resolution()`이 "zone1의 70 청구는
+   zone3가 진짜 출처"라고 정확히 판별해 제거했지만, 이 시점엔 70 하나만
+   남아 있어 제거 후 아무것도 남지 않았다 — 최종 0건.
+
+## 고친 내용
+
+[crk_model/ledger/cross_zone.py](crk_model/ledger/cross_zone.py)의
+`_repass_event()` 한 곳에만 분기를 추가했다. `FreezerVisionFirstStrategy`
+(투표·조합 선정 로직), 실시간 멀티트레이 파이프라인, 다른 교차존 안전장치
+(`_mutual_exemptions`, `_fingerprint_duplicate_suppression`,
+`_residual_loser_resolution`)는 전혀 건드리지 않았다.
+
+soft 페널티 재판정(`rejudged`)이 COMPLETE로 성공해도, 결과가 **여전히
+페널티 대상 클래스(`penalized`)를 포함**하면("오염 클래스가 득표 우위를
+유지한 채 수량만 바뀐 것") 그 결과를 통째로 채택하지 않는다. 대신 기존에
+있던 "재판정 실패 시" 경로와 동일한 방식으로, 원 판정(`e.judgment`)에서
+`penalized`에 속한 멤버만 제거하고 나머지(66)는 보존한다
+(`+cross_zone_contamination_pruned`, 남는 게 없으면
+`cross_zone_contaminated_partial_suppressed`로 기존처럼 NO_DETECTION).
+
+## 왜 안전한가
+
+- 신원을 "다시 선택"하는 로직이 아니라 "이미 다른 zone의 확정 판정과 겹친
+  것으로 검증된 특정 class_id만 소거"하는, 기존에 이미 쓰이던 패턴을 한
+  분기 더 적용한 것뿐이다. top 투표자가 아닌 후보를 conf만으로 조합에
+  새로 들이는 로직은 추가하지 않았다 — 그런 방식은 오염 후보도 흔히
+  conf 1.0으로 나오기 때문에(카메라 유출이어도 YOLO 인식 자체는 정확하다)
+  오히려 이번 사고와 같은 유형의 오탐을 재도입할 위험이 있어 의도적으로
+  배제했다.
+- `demoted=X:adopted=Y` 패턴을 쓰는 기존 테스트 3건(`test_doc_scenario_
+  rejudges_zone2`, `test_ses_36_...`, `test_partial_original_is_rejudged_
+  to_weight_fit`)은 모두 Y가 X와 다른 클래스라 새 분기(`still_contaminated`)
+  조건에 걸리지 않아 영향이 없다 — 개별 확인함.
+- 새 분기는 실기 수치(zone1 PARTIAL 66×1+70×2, zone3/4/2 COMPLETE)로
+  재구성한 회귀 테스트로 먼저 "수정 전 → 동일하게 0건 재현"을 확인한 뒤,
+  수정을 적용해 "66 보존"으로 바뀌는 것까지 검증했다.
+
+## 검증
+
+```text
+tests/test_cross_zone.py: 신규 1건(TestSes7Zone1MultiItemPreservedAfterPenalty) 추가,
+수정 되돌리면 동일 테스트가 실기와 같은 0건(NO_DETECTION)으로 재현되는 것 확인
+전체: 468 passed, 24 skipped (기존 467 대비 신규 1건만 추가, 회귀 없음)
+```
+
+정적 검사(ruff) 통과 — 신규 코드에서 추가된 lint 오류 없음(기존부터 있던
+무관 항목 2건 제외).
+
+## 남은 한계
+
+이번 수정은 "0건 → 66만 과금"까지만 복구한다. 72(주먹밥)까지 완전히
+되살리려면 CLOSE 시점 교차존 보정이 실시간 트리거의 멀티트레이 세그먼트
+분할(`crk_model/service/pipeline.py`의 `TriggerPipeline`, 채널별 재시도·풀
+상태와 강하게 결합)을 재구성해야 하는데, 범위가 크고 리스크가 높아 이번
+"기존 동작 최대한 유지" 요청 범위에서는 보류했다. 사용자 확인 후 이번
+안전한 수정 선에서 마무리하기로 함.
+
+## 바뀐 파일
+
+- [crk_model/ledger/cross_zone.py](crk_model/ledger/cross_zone.py) —
+  `_repass_event()`에 `still_contaminated` 분기 추가(오염 멤버만 소거,
+  비오염 상품 보존)
+- [tests/test_cross_zone.py](tests/test_cross_zone.py) —
+  `TestSes7Zone1MultiItemPreservedAfterPenalty` 회귀 테스트 1건 추가

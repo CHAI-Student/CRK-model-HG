@@ -860,6 +860,45 @@ def _repass_event(
         )
         return replace(e, judgment=robust_alternative)
 
+    still_contaminated = penalized & {
+        pc.product.class_id for pc in rejudged.products
+    }
+    if still_contaminated:
+        # 재판정이 COMPLETE로 성공했어도 오염 클래스 자체가 (개수만 바뀌어)
+        # 여전히 승자로 남을 수 있다 — soft 페널티(⑤)로는 득표 우위를 못
+        # 깬 것. 이 결과를 그대로 채택하면 원 판정에 같이 잡혀 있던 비오염
+        # 상품(예: 66)까지 통째로 사라진다 (실기 zone1: 66×1+70×2 →
+        # 70×4로 덮어써서 66 소실 → 후속 잔차 안전망이 70마저 걷어내며
+        # 영(0)건으로 추락). 위 "rejudge 실패" 경로와 동일하게 원 판정에서
+        # 오염 멤버만 제거해 비오염 상품을 보존한다 — 원 판정이 COMPLETE인
+        # 경우에도 동일하게 적용(①: 비오염 멤버를 지킬 이유는 상태와 무관).
+        remaining = tuple(
+            pc for pc in e.judgment.products
+            if pc.product.class_id not in penalized
+        )
+        pruned = ",".join(
+            pc.product.product_id
+            for pc in e.judgment.products
+            if pc.product.class_id in penalized
+        )
+        notes.append(
+            f"zone{e.zone}:cross_zone_vision_penalty_still_contaminated:"
+            f"pruned={pruned or '-'}:source={src_part}"
+        )
+        if remaining:
+            judgment = replace(
+                e.judgment,
+                products=remaining,
+                reason=e.judgment.reason + "+cross_zone_contamination_pruned",
+            )
+        else:
+            judgment = JudgmentResult(
+                JudgmentStatus.NO_DETECTION,
+                confidence=0.0,
+                reason="cross_zone_contaminated_partial_suppressed",
+            )
+        return replace(e, judgment=judgment)
+
     demoted = sorted(
         pc.product.product_id
         for pc in e.judgment.products
