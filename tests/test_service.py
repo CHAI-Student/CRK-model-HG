@@ -2,6 +2,7 @@
 멱등성(I7), 기동 fail-fast(리뷰 #1), 저널 replay(G2.5 훅), 필터 체인."""
 from dataclasses import asdict
 from dataclasses import replace as dc_replace
+from types import SimpleNamespace
 
 import pytest
 
@@ -17,6 +18,7 @@ from crk_model.core.types import (
 )
 from crk_model.ingest.loadcell import ChannelWeightEvent, LoadcellAnalyzer, LoadcellSample
 from crk_model.judgment.interfaces import JudgmentContext
+from crk_model.judgment.router import JudgmentRouter
 from crk_model.ledger.journal import EventJournal
 from crk_model.ledger.settler import CloseSettler
 from crk_model.perception.detector import Detection
@@ -122,6 +124,242 @@ def dual_tray_samples(ch0_step, ch1_step, n=10, dt=0.1):
 
 
 class TestMultiTrayEvents:
+    def test_ses1_motion_supported_distinct_candidate_replaces_false_duplicate(self):
+        from crk_model.service.pipeline import (
+            _motion_supported_weight_candidate_resolution,
+        )
+
+        almond_unsweetened = ActiveProduct(
+            "P69", "아몬드브리즈 언스위트", 69, 200.0, 5, 10
+        )
+        coke_zero = ActiveProduct("P65", "코카콜라 제로", 65, 200.0, 5, 10)
+        ctx = JudgmentContext(
+            4,
+            REFRIGERATOR,
+            -395.0,
+            (WeightSegment(1.0, 2.0, -395.0),),
+            (
+                VisionCandidate(69, 1.0, 20, 0.198),
+                VisionCandidate(65, 0.7888, 4, 0.0396),
+            ),
+            (almond_unsweetened, coke_zero),
+        )
+        original = JudgmentRouter().judge(ctx)
+        assert [(pc.product.class_id, pc.count) for pc in original.products] == [(69, 2)]
+
+        resolved = _motion_supported_weight_candidate_resolution(
+            ctx,
+            original,
+            {
+                "top": {
+                    "69": {"passed": True, "best_path": 292.9},
+                    "65": {"passed": True, "best_path": 269.3},
+                }
+            },
+        )
+
+        assert resolved.status is JudgmentStatus.COMPLETE
+        assert {(pc.product.class_id, pc.count) for pc in resolved.products} == {
+            (69, 1),
+            (65, 1),
+        }
+        assert "motion_weight_candidate_resolution" in resolved.reason
+
+    def test_ses2_motion_support_resolves_competing_equal_weight_candidate(self):
+        unsweetened = ActiveProduct("P69", "아몬드브리즈 언스위트", 69, 200.0, 5, 10)
+        original = ActiveProduct("P68", "아몬드브리즈 오리지널", 68, 205.0, 5, 10)
+        coca_cola = ActiveProduct("P64", "코카콜라", 64, 205.0, 5, 10)
+        store = ActiveProductStore()
+        store.update((unsweetened, original, coca_cola))
+        pipe = TriggerPipeline(FakeDetector(), {4: REFRIGERATOR}, store)
+
+        ctx = JudgmentContext(
+            4,
+            REFRIGERATOR,
+            -405.0,
+            (),
+            (
+                VisionCandidate(69, 0.9432, 20, 0.1379),
+                VisionCandidate(66, 0.4172, 17, 0.1172),
+                VisionCandidate(65, 0.3404, 9, 0.0621),
+                VisionCandidate(68, 0.8804, 6, 0.0414),
+                VisionCandidate(64, 0.6280, 6, 0.0414),
+            ),
+            (unsweetened, original, coca_cola),
+        )
+        analysis = SimpleNamespace(
+            events=(
+                ChannelWeightEvent(0, -205.0, ()),
+                ChannelWeightEvent(1, -200.0, ()),
+            )
+        )
+
+        trace = TriggerTrace(
+            vote_summary={
+                "motion_evidence": {
+                    "top": {
+                        "69": {"passed": True, "best_path": 245.3},
+                        "68": {"passed": True, "best_path": 40.4},
+                        "64": {"passed": True, "best_path": 245.2},
+                    }
+                }
+            }
+        )
+        resolved = pipe._judge_tray_events(ctx, analysis, trace)
+
+        assert resolved.status is JudgmentStatus.COMPLETE
+        assert {(pc.product.class_id, pc.count) for pc in resolved.products} == {
+            (69, 1),
+            (64, 1),
+        }
+        assert "motion_weight_candidate_resolution" in resolved.reason
+
+    def test_rejected_low_vote_candidates_are_not_reintroduced(self):
+        from crk_model.service.pipeline import (
+            _motion_supported_weight_candidate_resolution,
+        )
+
+        jerky = ActiveProduct("P72", "육포", 72, 20.0, 5, 40)
+        excluded_70 = ActiveProduct("P70", "상품 70", 70, 20.0, 5, 40)
+        excluded_71 = ActiveProduct("P71", "상품 71", 71, 20.0, 5, 40)
+        ctx = JudgmentContext(
+            1,
+            REFRIGERATOR,
+            -60.0,
+            (WeightSegment(1.0, 2.0, -60.0),),
+            (VisionCandidate(72, 1.0, 68, 0.35),),
+            (jerky, excluded_70, excluded_71),
+        )
+        judgment = JudgmentResult(
+            JudgmentStatus.COMPLETE,
+            (ProductCount(jerky, 3),),
+            1.0,
+            "strict",
+            "strict",
+        )
+
+        resolved = _motion_supported_weight_candidate_resolution(
+            ctx,
+            judgment,
+            {"top": {"72": {"passed": True, "best_path": 100.0}}},
+        )
+
+        assert resolved is judgment
+
+    def test_bulk_lower_rank_candidate_is_replaced_by_top_partial(self):
+        jerky = ActiveProduct("P72", "육포", 72, 20.0, 500, 40)
+        moon_pie = ActiveProduct("P63", "보름달", 63, 100.0, 800, 10)
+        store = ActiveProductStore()
+        store.update([jerky, moon_pie])
+        pipe = TriggerPipeline(FakeDetector(), {2: REFRIGERATOR}, store)
+
+        class WeightFirstRouter:
+            def judge(self, ctx):
+                count = 1 if abs(ctx.delta_weight) == 20.0 else 5
+                return JudgmentResult(
+                    JudgmentStatus.COMPLETE,
+                    (ProductCount(jerky, count),),
+                    0.87,
+                    "strict",
+                    "strict",
+                )
+
+        pipe._router = WeightFirstRouter()
+        ctx = JudgmentContext(
+            2,
+            REFRIGERATOR,
+            -120.0,
+            (),
+            (
+                VisionCandidate(63, 1.0, 68, 0.29),
+                VisionCandidate(72, 0.5747, 59, 0.25),
+            ),
+            (jerky, moon_pie),
+        )
+        analysis = SimpleNamespace(
+            events=(
+                ChannelWeightEvent(0, -20.0, ()),
+                ChannelWeightEvent(1, -100.0, ()),
+            )
+        )
+        trace = TriggerTrace()
+
+        judgment = pipe._judge_tray_events(ctx, analysis, trace)
+
+        assert judgment.status is JudgmentStatus.PARTIAL
+        assert [(pc.product.class_id, pc.count) for pc in judgment.products] == [
+            (72, 1),
+            (63, 1),
+        ]
+        assert "multi_tray_vision_top_conflict_guard:ch1" in trace.reason_codes
+
+    def test_lower_vision_rank_bulk_count_becomes_billable_top_partial(self):
+        from crk_model.service.pipeline import (
+            _multi_tray_multi_count_vision_conflict_guard,
+        )
+
+        jerky = ActiveProduct("P72", "육포", 72, 20.0, 500, 40)
+        moon_pie = ActiveProduct("P63", "보름달", 63, 100.0, 800, 10)
+        ctx = JudgmentContext(
+            2,
+            REFRIGERATOR,
+            -100.0,
+            (WeightSegment(1.0, 2.0, -100.0),),
+            (
+                VisionCandidate(63, 1.0, 68, 0.29),
+                VisionCandidate(72, 0.5747, 59, 0.25),
+            ),
+            (jerky, moon_pie),
+        )
+        weight_result = JudgmentResult(
+            JudgmentStatus.COMPLETE,
+            (ProductCount(jerky, 5),),
+            0.87,
+            "strict",
+            "strict",
+        )
+
+        guarded = _multi_tray_multi_count_vision_conflict_guard(ctx, weight_result)
+
+        assert guarded.status is JudgmentStatus.PARTIAL
+        assert guarded.reason == "multi_tray_vision_top_count_conflict"
+        assert [(pc.product.class_id, pc.count) for pc in guarded.products] == [(63, 1)]
+
+    def test_multi_count_guard_keeps_top_identity_and_single_item_judgments(self):
+        from crk_model.service.pipeline import (
+            _multi_tray_multi_count_vision_conflict_guard,
+        )
+
+        jerky = ActiveProduct("P72", "육포", 72, 20.0, 500, 40)
+        moon_pie = ActiveProduct("P63", "보름달", 63, 100.0, 800, 10)
+        ctx = JudgmentContext(
+            2,
+            REFRIGERATOR,
+            -100.0,
+            (WeightSegment(1.0, 2.0, -100.0),),
+            (
+                VisionCandidate(72, 1.0, 68, 0.35),
+                VisionCandidate(63, 0.9, 13, 0.07),
+            ),
+            (jerky, moon_pie),
+        )
+        bulk_jerky = JudgmentResult(
+            JudgmentStatus.COMPLETE,
+            (ProductCount(jerky, 5),),
+            1.0,
+            "strict",
+            "strict",
+        )
+        single_jerky = JudgmentResult(
+            JudgmentStatus.COMPLETE,
+            (ProductCount(jerky, 1),),
+            1.0,
+            "strict",
+            "strict",
+        )
+
+        assert _multi_tray_multi_count_vision_conflict_guard(ctx, bulk_jerky) is bulk_jerky
+        assert _multi_tray_multi_count_vision_conflict_guard(ctx, single_jerky) is single_jerky
     """2단계: 트레이별 동시 이벤트를 이벤트당 개별 판정 후 병합."""
 
     def _service(self, cola, second):

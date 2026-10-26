@@ -13,6 +13,7 @@ from crk_model.core.types import (
     JudgmentResult,
     JudgmentStatus,
     ProductCount,
+    VisionCandidate,
 )
 from crk_model.ledger import CloseSettler, CrossZonePenaltyConfig, TriggerEvent
 from crk_model.ledger.cross_zone import (
@@ -30,11 +31,17 @@ def judged(product, count=1, conf=0.9, status=JudgmentStatus.COMPLETE):
     return JudgmentResult(status, (ProductCount(product, count),), conf, "strict")
 
 
-def event(sid, zone, ts, judgment, delta, candidates=(), change_ts=()):
+def event(
+    sid, zone, ts, judgment, delta, candidates=(), change_ts=(),
+    held_votes=(), share_rejected=(), min_vote_share=0.1,
+):
     return TriggerEvent(
         sid, zone, ts, delta, (), judgment,
         vision_candidates=tuple(candidates),
         change_timestamps=tuple(change_ts),
+        held_vote_counts=tuple(held_votes),
+        share_rejected_candidates=tuple(share_rejected),
+        min_vote_share=min_vote_share,
     )
 
 
@@ -550,9 +557,27 @@ class TestChangeTimestampsPersistence:
         e = event("s", 1, 5.0, judged(cola), -100.0, change_ts=(10.0, 12.5))
         assert event_from_dict(event_to_dict(e)).change_timestamps == (10.0, 12.5)
 
+    def test_journal_roundtrips_held_recovery_evidence(self, cola):
+        rejected = VisionCandidate(67, 0.6872, 4, 0.0272)
+        e = event(
+            "s", 1, 5.0, judged(cola), -100.0,
+            held_votes=((72, 102),),
+            share_rejected=(rejected,),
+            min_vote_share=0.1,
+        )
+
+        restored = event_from_dict(event_to_dict(e))
+
+        assert restored.held_vote_counts == ((72, 102),)
+        assert restored.share_rejected_candidates == (rejected,)
+        assert restored.min_vote_share == 0.1
+
     def test_journal_backward_compat(self, cola):
         d = event_to_dict(event("s", 1, 5.0, judged(cola), -100.0))
-        d.pop("change_timestamps")  # 구버전 저널 라인
+        d.pop("change_timestamps")
+        d.pop("held_vote_counts")
+        d.pop("share_rejected_candidates")
+        d.pop("min_vote_share")  # 구버전 저널 라인
         assert event_from_dict(d).change_timestamps == ()
 
 
@@ -676,3 +701,75 @@ class TestNoOverlapDiagnosis:
         notes: list[str] = []
         apply_cross_zone_penalty([z1, z2], PROFILES, (bar170, bar178), CFG, notes)
         assert not any("cross_zone_no_overlap" in n for n in notes)
+
+
+class TestHeldCarryoverRecovery:
+    def test_recover_share_rejected_candidate_after_prior_product_is_held(self):
+        jerky = ActiveProduct(
+            "P72", "육포", 72, 20.0, 1000, 40
+        )
+        grape = ActiveProduct(
+            "P67", "스파클링 청포도", 67, 530.0, 1500, 10
+        )
+        prior = event(
+            "s", 2, 100.0, judged(jerky, count=2, conf=0.4), -45.0,
+            candidates=[cand(72, conf=1.0, votes=84)],
+            change_ts=(100.0,),
+        )
+        current = event(
+            "s", 4, 106.4,
+            JudgmentResult(
+                JudgmentStatus.PARTIAL, (ProductCount(jerky, 26),), 0.5,
+                "detected_single_item_fallback+full_delta_unexplained",
+                "detected_single_item_fallback",
+            ),
+            -530.0,
+            candidates=[cand(72, conf=1.0, votes=107)],
+            change_ts=(106.4,),
+            held_votes=((72, 102),),
+            share_rejected=(
+                VisionCandidate(67, 0.6872, 4, 0.0272),
+            ),
+            min_vote_share=0.1,
+        )
+        notes: list[str] = []
+
+        out = apply_cross_zone_penalty(
+            [prior, current],
+            {2: REFRIGERATOR, 4: REFRIGERATOR},
+            (jerky, grape),
+            CrossZonePenaltyConfig(enabled=True),
+            notes,
+        )
+
+        assert [(pc.product.class_id, pc.count) for pc in out[0].judgment.products] == [
+            (72, 2)
+        ]
+        assert [(pc.product.class_id, pc.count) for pc in out[1].judgment.products] == [
+            (67, 1)
+        ]
+        assert out[1].judgment.status is JudgmentStatus.COMPLETE
+        assert any(
+            note.startswith(
+                "zone4:held_carryover_recovery:suppressed=72:recovered=67"
+            )
+            for note in notes
+        )
+
+    def test_held_candidate_is_not_suppressed_without_prior_zone_sale(self, cola):
+        current = event(
+            "s", 4, 106.4, judged(cola), -100.0,
+            candidates=[cand(1, conf=0.9, votes=10)],
+            change_ts=(106.4,),
+            held_votes=((1, 9),),
+            min_vote_share=0.1,
+        )
+        notes: list[str] = []
+
+        out = apply_cross_zone_penalty(
+            [current], {4: REFRIGERATOR}, (cola,),
+            CrossZonePenaltyConfig(enabled=True), notes,
+        )
+
+        assert out[0] is current
+        assert not any("held_carryover_recovery" in note for note in notes)

@@ -1246,6 +1246,13 @@ class DetectedSingleItemFallbackStrategy:
         residual = abs(target - n * p.unit_weight)
         if residual > tol:
             return None
+        if residual > ctx.profile.tolerance_grams:
+            return JudgmentResult(
+                JudgmentStatus.PARTIAL,
+                (ProductCount(p, 1),),
+                confidence=top.confidence * 0.5,
+                reason="detected_single_item_weight_unverified",
+            )
         weight_score = max(0.0, 1.0 - residual / tol) if tol > 0 else 0.0
         confidence = min(0.65, max(0.05, 0.45 * weight_score + 0.25 * top.confidence + 0.10))
         return JudgmentResult(

@@ -32,6 +32,7 @@ from crk_model.ingest.loadcell import (
 )
 from crk_model.judgment.interfaces import JudgmentContext
 from crk_model.judgment.router import JudgmentRouter
+from crk_model.judgment.strict import StrictWeightMatcher
 from crk_model.ledger.events import TriggerEvent
 from crk_model.perception.detector import HAND_CLASS_ID, Detector
 from crk_model.perception.early_termination import EarlyTerminator
@@ -41,6 +42,140 @@ from crk_model.perception.voting import VotingEnsemble
 from crk_model.service.snapshot import ActiveProductStore, ProductSnapshot
 
 CAMERAS = ("top", "side")
+_MOTION_RESOLUTION_MIN_VOTES = 3
+_MOTION_RESOLUTION_MIN_CONFIDENCE = 0.5
+_MOTION_CANDIDATE_SCORE_WEIGHT = 0.1
+
+
+def _motion_supported_weight_candidate_resolution(
+    ctx: JudgmentContext,
+    judgment: JudgmentResult,
+    motion_summary: Mapping | None,
+    *,
+    count_occam: bool = True,
+    excluded_class_ids: frozenset[int] = frozenset(),
+) -> JudgmentResult:
+    """Resolve close weight matches using already-recorded object-motion evidence."""
+    if (
+        not ctx.profile.weight_is_discriminative
+        or ctx.vision_only
+        or judgment.status is not JudgmentStatus.COMPLETE
+        or not judgment.products
+        or not ctx.vision_candidates
+        or "segment_target_retry" in judgment.reason
+    ):
+        return judgment
+
+    selected = tuple(
+        sorted((pc.product.class_id, pc.count) for pc in judgment.products)
+    )
+    candidates_in_play = tuple(
+        candidate
+        for candidate in ctx.vision_candidates
+        if candidate.class_id not in excluded_class_ids
+    )
+    candidates = {candidate.class_id: candidate for candidate in candidates_in_play}
+    if not candidates:
+        return judgment
+
+    motion_paths: dict[int, float] = {}
+    for camera_summary in (motion_summary or {}).values():
+        if not isinstance(camera_summary, Mapping):
+            continue
+        for raw_class_id, evidence in camera_summary.items():
+            if not isinstance(evidence, Mapping) or not evidence.get("passed"):
+                continue
+            class_id = int(raw_class_id)
+            motion_paths[class_id] = max(
+                motion_paths.get(class_id, 0.0),
+                float(evidence.get("best_path", 0.0)),
+            )
+
+    matcher = StrictWeightMatcher(count_occam=count_occam)
+    combinations = matcher.find_valid_combinations(
+        candidates_in_play,
+        ctx.delta_weight,
+        ctx.active_products,
+        ctx.profile.tolerance_grams,
+    )
+    selected_match = next(
+        (
+            combo for combo in combinations
+            if tuple(sorted(
+                (pc.product.class_id, pc.count) for pc in combo.products
+            )) == selected
+        ),
+        None,
+    )
+    if selected_match is None or not motion_paths:
+        return judgment
+
+    eligible = []
+    selected_classes = {class_id for class_id, _ in selected}
+    for combo in combinations:
+        signature = tuple(
+            sorted((pc.product.class_id, pc.count) for pc in combo.products)
+        )
+        if signature != selected and not (set(dict(signature)) - selected_classes):
+            continue
+        changed_classes = set(dict(signature)) - selected_classes
+        if signature != selected and any(
+            class_id not in candidates
+            or candidates[class_id].vote_count < _MOTION_RESOLUTION_MIN_VOTES
+            or candidates[class_id].confidence
+            < _MOTION_RESOLUTION_MIN_CONFIDENCE
+            or class_id not in motion_paths
+            for class_id in changed_classes
+        ):
+            continue
+        unique_classes = {pc.product.class_id for pc in combo.products}
+        if any(class_id not in motion_paths for class_id in unique_classes):
+            continue
+        eligible.append((combo, signature))
+
+    if not eligible:
+        return judgment
+
+    max_path = max(
+        motion_paths[class_id]
+        for combo, _ in eligible
+        for class_id in {pc.product.class_id for pc in combo.products}
+    )
+    if max_path <= 0:
+        return judgment
+
+    def adjusted_score(combo) -> float:
+        supported_classes = {pc.product.class_id for pc in combo.products}
+        # Repeating one class is not extra independent motion evidence.
+        motion_score = sum(
+            min(motion_paths[class_id] / max_path, 1.0)
+            for class_id in supported_classes
+        )
+        return combo.match_score + _MOTION_CANDIDATE_SCORE_WEIGHT * motion_score
+
+    current = next(
+        (combo for combo, signature in eligible if signature == selected), None
+    )
+    if current is None:
+        return judgment
+    best, best_signature = max(
+        eligible, key=lambda item: (adjusted_score(item[0]), item[0].match_score)
+    )
+    if best_signature == selected or adjusted_score(best) <= adjusted_score(current) + 0.01:
+        return judgment
+
+    original_ids = ",".join(str(class_id) for class_id, _ in selected)
+    resolved_ids = ",".join(str(class_id) for class_id, _ in best_signature)
+    return replace(
+        judgment,
+        products=best.products,
+        confidence=best.match_score,
+        reason=(
+            f"{judgment.reason}+motion_weight_candidate_resolution:"
+            f"from={original_ids}:to={resolved_ids}"
+        ),
+        strategy=f"{judgment.strategy}+motion_candidate_resolution",
+    )
 
 
 def _vision_top_not_billed(candidates, judgment) -> str | None:
@@ -249,6 +384,59 @@ def _weak_multi_count_conflict_guard(
     )
 
 
+def _multi_tray_multi_count_vision_conflict_guard(
+    ctx: JudgmentContext, judgment: JudgmentResult
+) -> JudgmentResult:
+    """Do not let a lower-ranked vision identity win a bulk count by weight alone.
+
+    In multi-tray sessions the same aggregate vision pool is reused for each
+    load-cell event. If a weight strategy turns a lower-ranked candidate into a
+    count of three or more, preserve the stronger vision identity as one billable
+    partial item instead of confirming the bulk count.
+    """
+    if (
+        not ctx.profile.weight_is_discriminative
+        or judgment.status is not JudgmentStatus.COMPLETE
+        or len(judgment.products) != 1
+        or judgment.products[0].count < 3
+        or not ctx.vision_candidates
+    ):
+        return judgment
+
+    billed = judgment.products[0]
+    top = max(ctx.vision_candidates, key=lambda c: (c.vote_count, c.confidence))
+    billed_candidate = next(
+        (c for c in ctx.vision_candidates if c.class_id == billed.product.class_id),
+        None,
+    )
+    if (
+        top.class_id == billed.product.class_id
+        or billed_candidate is None
+        or (top.vote_count, top.confidence)
+        <= (billed_candidate.vote_count, billed_candidate.confidence)
+    ):
+        return judgment
+
+    product = next(
+        (
+            p
+            for p in ctx.active_products
+            if p.class_id == top.class_id and p.stock_qty > 0 and p.unit_weight > 0
+        ),
+        None,
+    )
+    if product is None:
+        return judgment
+
+    return JudgmentResult(
+        JudgmentStatus.PARTIAL,
+        (ProductCount(product, 1),),
+        confidence=top.confidence * 0.5,
+        reason="multi_tray_vision_top_count_conflict",
+        strategy="multi_tray_vision_top_conflict_guard",
+    )
+
+
 def _with_tubes(tube_summary: dict | None, evidence) -> dict | None:
     """tube_diag에 튜브 구성 진단(tube_detail)을 동봉 — 의류 산탄의
     "한 궤적, 여러 클래스" 실측 근거. summary가 None이면 그대로."""
@@ -315,6 +503,7 @@ class TriggerPipeline:
         snapshots: ActiveProductStore,
         *,
         router: JudgmentRouter | None = None,
+        strict_count_occam: bool = True,
         filters: DetectionFilterChain | None = None,
         early_termination_enabled: bool = False,
         # 기본 off (이슈 #22 0805) — Settings 기본값과 단일 방향 유지.
@@ -386,6 +575,7 @@ class TriggerPipeline:
         self._profiles = dict(profiles)
         self._snapshots = snapshots
         self._router = router or JudgmentRouter()
+        self._strict_count_occam = strict_count_occam
         self._filters = filters or DetectionFilterChain()
         self._et_enabled = early_termination_enabled
         self._side_hand_enabled = side_hand_enabled
@@ -493,6 +683,15 @@ class TriggerPipeline:
                 trace.reason_codes.append("weak_multi_count_conflict_guard")
                 judgment = guarded
             judgment = self._segment_target_retry(ctx, judgment, analysis, trace)
+            resolved = _motion_supported_weight_candidate_resolution(
+                ctx,
+                judgment,
+                trace.vote_summary.get("motion_evidence"),
+                count_occam=self._strict_count_occam,
+            )
+            if resolved is not judgment:
+                trace.reason_codes.append("motion_weight_candidate_resolution")
+                judgment = resolved
         top_code = _vision_top_not_billed(candidates, judgment)
         if top_code:
             trace.reason_codes.append(top_code)
@@ -527,6 +726,37 @@ class TriggerPipeline:
         results = self._pool_exhaustion_retry(ctx, results, trace)
         results = self._collision_complete_retry(ctx, results, trace)
         results = self._collision_partial_retry(ctx, results, trace)
+        guarded_results = []
+        for ev, judgment in results:
+            ectx = replace(ctx, delta_weight=ev.delta_grams, segments=ev.segments)
+            guarded = _multi_tray_multi_count_vision_conflict_guard(ectx, judgment)
+            if guarded is not judgment:
+                trace.reason_codes.append(
+                    f"multi_tray_vision_top_conflict_guard:ch{ev.channel}"
+                )
+            guarded_results.append((ev, guarded))
+
+        resolved_results = []
+        assigned_class_ids: set[int] = set()
+        for ev, judgment in guarded_results:
+            ectx = replace(ctx, delta_weight=ev.delta_grams, segments=ev.segments)
+            resolved = _motion_supported_weight_candidate_resolution(
+                ectx,
+                judgment,
+                trace.vote_summary.get("motion_evidence"),
+                count_occam=self._strict_count_occam,
+                excluded_class_ids=frozenset(assigned_class_ids),
+            )
+            if resolved is not judgment:
+                trace.reason_codes.append(
+                    f"motion_weight_candidate_resolution:ch{ev.channel}"
+                )
+            resolved_results.append((ev, resolved))
+            if resolved.status is JudgmentStatus.COMPLETE:
+                assigned_class_ids.update(
+                    pc.product.class_id for pc in resolved.products
+                )
+        results = resolved_results
 
         complete = [
             (ev, j) for ev, j in results
@@ -1044,6 +1274,9 @@ class TriggerPipeline:
             # 분모 의미가 바뀐 세션임을 아카이브에 명시 — 과거 세션과
             # vote_ratio를 섞어 비교할 때의 단일 정의(함정 #4) 보호.
             trace.vote_summary["ratio_denominator"] = voting.ratio_denominator
+        trace.vote_summary["min_vote_share"] = self._voting_params.get(
+            "min_vote_share", 0.0
+        )
         return voting.combine()
 
     def _record_frame_detections(
@@ -1085,6 +1318,21 @@ class TriggerPipeline:
     def _outcome(
         session_id, req, delta, segments, judgment, trace, candidates=()
     ) -> TriggerOutcome:
+        vote_classes = trace.vote_summary.get("classes", {})
+        share_rejected = tuple(
+            VisionCandidate(
+                class_id=int(class_id),
+                confidence=summary["weighted_conf"],
+                vote_count=summary["votes"],
+                vote_ratio=summary["ratio"],
+            )
+            for class_id, summary in vote_classes.items()
+            if summary["rejected_by"] == "share"
+        )
+        held_votes: dict[int, int] = {}
+        for camera_votes in (trace.vote_summary.get("held_shadow") or {}).values():
+            for class_id, counts in camera_votes.items():
+                held_votes[int(class_id)] = held_votes.get(int(class_id), 0) + counts[0]
         event = TriggerEvent(
             session_id,
             req.zone,
@@ -1096,5 +1344,8 @@ class TriggerPipeline:
             vision_candidates=tuple(candidates),
             video_paths=tuple(req.video_paths.items()),
             change_timestamps=tuple(req.change_timestamps),
+            held_vote_counts=tuple(sorted(held_votes.items())),
+            share_rejected_candidates=share_rejected,
+            min_vote_share=trace.vote_summary.get("min_vote_share", 0.0),
         )
         return TriggerOutcome(event, trace)

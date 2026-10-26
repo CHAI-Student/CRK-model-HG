@@ -111,6 +111,22 @@ class TestSameProductCountVisionRanking:
         assert [(pc.product.class_id, pc.count) for pc in result.products] == [(20, 10)]
 
 
+class TestDetectedSingleFallbackWeightGuard:
+    def test_large_unverified_multiplicity_is_reduced_to_one_partial(self):
+        jerky = ActiveProduct(
+            "P72", "육포", class_id=72, unit_weight=20.0,
+            unit_price=1000, stock_qty=40,
+        )
+
+        result = JudgmentRouter().judge(
+            ctx(-530.0, [jerky], [cand(72, conf=1.0, votes=107)])
+        )
+
+        assert result.status is JudgmentStatus.PARTIAL
+        assert result.reason == "detected_single_item_weight_unverified"
+        assert [(pc.product.class_id, pc.count) for pc in result.products] == [(72, 1)]
+
+
 class TestFullDeltaMatch:
     def test_downgrades_partial_explanation(self, cola):
         # I6: 부분 설명으로 과금 금지

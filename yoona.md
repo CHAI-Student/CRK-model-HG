@@ -922,3 +922,159 @@ tests/test_ledger.py: 기존 "동률 COMPLETE → partial" 테스트를 "→ rev
   `same_product_count` 정책 갱신
 - [tests/test_judgment.py](tests/test_judgment.py),
   [tests/test_service.py](tests/test_service.py) — 회귀 검증
+
+---
+
+# 2026-10-26 held carryover 득표 오염과 허용오차 밖 다량 fallback 보정
+
+## 재현 세션
+
+`ses-4-1792569819`에서 2층 육포(class 72, DB 20g) 두 개를 취출한 뒤
+4층에서 스파클링 청포도(class 67)를 취출했다. 4층 결과는 육포 26개
+`PARTIAL`이었다.
+
+YAML 근거:
+
+- zone2: 육포 20g ×2, delta −45g, `strict COMPLETE`
+- zone4: delta −530g, 육포 후보 107표(confidence 1.0)
+- zone4 held 진단: top 카메라 육포 표 102/102가 held로 표시됨
+- zone4 청포도 class 67: 후보 득표 4, weighted confidence 약 0.687, vote ratio 약
+  0.027이지만 `rejected_by: share`로 최종 후보에서 제외됨
+- zone4 정산 노트: 두 존의 change 시각 차이가 6.4초여서 기존 교차존 오염 창
+  (앵커 ±5초)이 겹치지 않음
+- 최상위 육포 후보를 20g 단위로 −530g에 나눠 `round(530/20)=26`을 계산한
+  `detected_single_item_fallback`이 선택됨. residual 10g은 기존 fallback
+  15g(3×tolerance) 범위 안이지만 냉장 기본 tolerance 5g 밖이어서 라우터는
+  COMPLETE를 PARTIAL로 강등했고, count 26은 그대로 남았음.
+
+## 수정
+
+1. **무게가 검증하지 않은 다량을 제한** — `detected_single_item_fallback`은
+   residual이 profile 기본 tolerance를 넘으면 계산된 다량을 반환하지 않고
+   count=1 `PARTIAL`만 반환한다. 기본 tolerance 안에 있는 다량 결과는 계속
+   허용한다. 이 재현처럼 육포 26개가 무게 허용오차 밖인 경우 대량 수량이
+   결제 바구니에 남지 않는다.
+2. **CLOSE에서 held carryover 후보를 재평가** — 같은 세션의 앞선 다른 존이
+   이미 해당 상품을 판정했고, 현재 후보 득표의 80% 이상(최소 5표)이 held로
+   표시된 경우에 한해 그 class를 현재 존의 후보 순위에서 제외한다. 기존
+   `share` 기준 때문에 탈락한 후보는 held 표를 제거한 기준으로 다시 검사하고
+   후보가 남으면 존 이벤트를 재판정한다. 타 존의 선행 판정이 없거나 held
+   득표 비중이 작으면 기존 결과를 보존한다. 재평가 후보가 없으면 held 후보로
+   계속 청구하지 않고 `NO_DETECTION` 처리한다.
+3. **이벤트 저널에 복구 입력 보존** — held 표 수, `share` 탈락 후보의
+   confidence/votes/ratio, 적용된 `min_vote_share`를 이벤트에 담고 저널 왕복
+   및 구버전 저널 파싱을 지원한다.
+
+## 검증
+
+- ses-4 수치 재현(육포 107표 중 102 held, 청포도 4표 `share` 탈락,
+  zone 간 6.4초): CLOSE 재판정이 육포 후보를 억제하고 청포도 1개를 선택
+- held 비중은 높아도 앞선 존의 같은 상품 판정이 없으면 기존 이벤트 보존
+- 20g 육포·−530g fallback은 26개 대신 1개 `PARTIAL`
+- 검증 명령: `pytest tests/test_judgment.py tests/test_cross_zone.py tests/test_service.py`
+
+변경 파일:
+
+- [crk_model/judgment/strategies.py](crk_model/judgment/strategies.py) —
+  허용오차 밖 fallback 다량 제한
+- [crk_model/service/pipeline.py](crk_model/service/pipeline.py) —
+  CLOSE 복구용 held/share 진단을 이벤트에 연결
+- [crk_model/ledger/events.py](crk_model/ledger/events.py),
+  [crk_model/ledger/journal.py](crk_model/ledger/journal.py) — 진단 증거 전달·저장
+- [crk_model/ledger/cross_zone.py](crk_model/ledger/cross_zone.py) —
+  held carryover 후보 회복 및 CLOSE 재판정
+- [tests/test_judgment.py](tests/test_judgment.py),
+  [tests/test_cross_zone.py](tests/test_cross_zone.py) — 회귀 테스트
+- [docs/03-judgment-and-settlement.md](docs/03-judgment-and-settlement.md) —
+  정책 문서
+
+---
+
+# 2026-10-26 다중 트레이 비전 상위 후보와 다량 판정 충돌 보호
+
+## 재현 세션
+
+`ses-3-1792996616`에서 zone1 육포 1개, zone2 보름달(class 63) 1개,
+zone4 코카콜라 제로(class 65) 1개를 취출했으나 zone2가 육포 5개로 판정됨.
+
+- zone2 무게 변화: −100g
+- 비전 후보: 보름달 63은 68표/confidence 1.0, 육포 72는 59표/confidence
+  약 0.575
+- 최종 판정: 육포 72 ×5 (`strict COMPLETE`)
+- 보름달 class 63은 최종 비전 후보에서 제거되지 않고 상위 후보로 남아 있었음
+- zone1의 −20g 육포 1개와 zone4의 −200g 코카콜라 제로 1개 판정은 별도 존
+  이벤트이며 이 보호 대상이 아님
+
+## 수정
+
+다중 트레이 각 이벤트를 기존 라우터로 판정하고 기존 소진·충돌 재시도를
+마친 뒤, 다음 조건이 모두 맞으면 해당 이벤트의 판정을 조정한다.
+
+- 냉장 프로파일
+- 한 상품만 `COMPLETE`이고 수량이 3개 이상
+- 그 상품보다 비전 순위가 높은 후보가 존재
+- 해당 비전 1위가 판매 중 재고 상품에 매핑됨
+
+조건 충족 시 무게만으로 선택된 낮은 순위 상품의 bulk COMPLETE 대신, 비전 1위
+상품 한 개를 `PARTIAL`로 남긴다. 다른 트레이의 기존 COMPLETE와 정체성이
+다르면 multi-tray 병합에서 이 PARTIAL도 결제에 포함된다. 비전 1위가 원래
+판정된 상품이면 기존 다량 결과를 보존한다. 따라서 육포가 비전 1위인
+`ses-10-1792990353` 같은 케이스는 이 규칙으로 바뀌지 않는다. 이 보호는
+취출별 비전을 분리해 실제 상품을 확정하는 로직이 아니라, 낮은 순위 상품의
+과도한 다량 과금을 줄이고 비전 상위 상품의 단품 검토 과금을 남기는 정책이다.
+
+## 검증
+
+- 재현 숫자(보름달 68표 > 육포 59표, 두 개의 트레이 이벤트)로 육포 첫 단품은
+  유지하고 bulk 육포×5는 보름달×1 `PARTIAL`로 대체되는지 검증
+- 비전 1위가 육포인 정상 다량, 단일 육포 판정은 기존 결과를 보존하는 회귀 테스트
+- 명령: `pytest tests/test_service.py tests/test_judgment.py tests/test_cross_zone.py`
+- 결과: 177 passed
+
+변경 파일:
+
+- [crk_model/service/pipeline.py](crk_model/service/pipeline.py) —
+  트레이 판정 최종 단계에 비전 상위 후보 다량 충돌 보호 추가
+- [tests/test_service.py](tests/test_service.py) — 충돌 재현 및 기존 동작 테스트
+- [docs/03-judgment-and-settlement.md](docs/03-judgment-and-settlement.md) —
+  판정 흐름 설명
+
+---
+
+# 2026-10-26 냉장 동률 후보 모션 기반 재판정
+
+## 사례와 범위
+
+- `ses-1-1792997280`: zone4 delta −395g, class 69 ×2로 판정. YAML 후보 class 65도
+  4표/confidence 약 0.789로 남아 있었고, class 69 ×2와 class 69+65는 모두
+  약 400g을 설명한다. class 65의 모션 변위는 269.3px, class 69는 292.9px로
+  둘 다 강한 독립 모션 증거가 있다.
+- `ses-2-1792997454`: zone4 총 delta −405g, 이벤트 delta는 −205g/−200g이며 기존
+  최종 결과는 class 69+68이었다. class 64는 6표/confidence 약 0.628 후보였고
+  class 68과 같은 205g 단위 중량이다. 모션 경로는 class 64가 245.2px, class 68이
+  40.4px로 class 64를 더 지지한다.
+- 두 YAML의 `ground_truth`는 비어 있다. 따라서 아래는 사용자 설명과 로그/YAML의
+  실제 후보·중량을 입력값으로 사용한 정책 회귀이며, 독립 라벨에 의한 모델 정확도
+  검증은 아니다.
+
+## 변경
+
+기존 strict 판정 후, 이미 통과한 후보로 만들 수 있는 무게 유효 조합을 후보별
+모션 변위(best_path)와 함께 다시 점수화한다. 비교 점수는 strict 점수에 고유 class별
+정규화된 모션 경로 합계의 0.1배를 더하며, 기존보다 0.01 이상 개선되는 조합만
+교체한다. 새 class는 기존 후보 목록에 있어야 하고 3표·confidence 0.5·모션 통과
+조건을 만족해야 한다. strict count-occam 설정을 유지하며, vision-only 및 세그먼트
+목표 재시도 판정은 건드리지 않는다. 다중 트레이는 이미 배정된 class를 다음 이벤트
+재판정에서 제외한다.
+
+이에 따라 ses-1은 class 69×2에서 **69+65**로, ses-2는 class 69+68에서
+**69+64**로 결과가 바뀌도록 구현했다. `ratio`/`share`에서 탈락한 class를
+부활시키지는 않는다.
+
+## 회귀 검증
+
+- ses-1 YAML 후보·무게·모션 수치 및 실제 `JudgmentRouter`로 69×2 → 69+65 확인.
+- ses-2 YAML 이벤트·후보·무게·모션 수치로 기존 69+68 → 69+64 확인.
+- 세션 10의 `ratio` 탈락 70/71 후보 복구 금지 경계 테스트 유지.
+- 기존 ses-3 다중 트레이 상위 비전 후보 가드 회귀도 계속 검증.
+- 최종 관련 회귀 실행 결과는 다음 검증 후 기록.

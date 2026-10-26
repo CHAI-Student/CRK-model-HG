@@ -181,6 +181,7 @@ class ModelService:
         )
         self.pipeline = TriggerPipeline(
             detector, self._profiles, self.snapshots, default_profile=self._default_profile,
+            strict_count_occam=self.settings.judgment_strict_count_occam,
             # I-V 판정 노브 (MODEL__JUDGMENT__*, 이슈 #15) — env로 주입된
             # FreezerVisionFirst 임계를 라우터에 배선.
             router=JudgmentRouter(default_pipeline(

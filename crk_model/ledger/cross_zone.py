@@ -143,6 +143,8 @@ _SELF_FIT_MARGIN_G = 5.0
 # 무겹침 침묵 진단(_near_miss_sources)의 보고 상한 — 이보다 먼 타 존
 # 이벤트는 명백한 별개 에피소드라 침묵이 정상이고, 노트는 노이즈다.
 _NO_OVERLAP_NOTE_HORIZON_S = 30.0
+_HELD_CARRYOVER_MIN_VOTES = 5
+_HELD_CARRYOVER_MIN_SHARE = 0.8
 
 
 def _near_miss_sources(
@@ -323,6 +325,9 @@ def apply_cross_zone_penalty(
     if not cfg.enabled or not active_products:
         return list(events)
     router = router or JudgmentRouter()
+    events = _recover_held_carryover_candidates(
+        events, profiles, active_products, cfg, notes, default_profile, router
+    )
     exempt = _mutual_exemptions(events, cfg, active_products)
     out: list[TriggerEvent] = []
     for e in events:
@@ -332,6 +337,123 @@ def apply_cross_zone_penalty(
         )
         out.append(replaced if replaced is not None else e)
     return out
+
+
+def _recover_held_carryover_candidates(
+    events: Sequence[TriggerEvent],
+    profiles: Mapping[int, SensorProfile],
+    active_products: Sequence[ActiveProduct],
+    cfg: CrossZonePenaltyConfig,
+    notes: list[str],
+    default_profile: SensorProfile,
+    router: JudgmentRouter,
+) -> list[TriggerEvent]:
+    """CLOSE 재판정에서 이전 존 상품의 held 표가 후보를 독점한 경우 복구한다.
+
+    같은 class가 앞선 존에서 이미 판정됐고, 현재 존 득표의 80% 이상이
+    held 트랙으로 표시되면 그 후보 표를 현재 취출 근거로 사용하지 않는다.
+    상대 share 기준 때문에 탈락한 나머지 후보는 held 표를 제외한 top 기준으로
+    share를 다시 검사한 뒤 재판정에 넣는다.
+    """
+    products_by_class = {
+        product.class_id: product
+        for product in active_products
+        if product.stock_qty > 0 and product.class_id > 0
+    }
+    replaced: list[TriggerEvent] = []
+    for event in events:
+        if (
+            event.status != "ok"
+            or event.delta_weight >= 0
+            or not event.vision_candidates
+            or not event.held_vote_counts
+        ):
+            replaced.append(event)
+            continue
+
+        held_counts = dict(event.held_vote_counts)
+        candidates_by_class = {
+            candidate.class_id: candidate for candidate in event.vision_candidates
+        }
+        carried_classes: set[int] = set()
+        for class_id, held_votes in held_counts.items():
+            candidate = candidates_by_class.get(class_id)
+            if (
+                candidate is None
+                or held_votes < _HELD_CARRYOVER_MIN_VOTES
+                or held_votes / max(candidate.vote_count, 1) < _HELD_CARRYOVER_MIN_SHARE
+            ):
+                continue
+            has_prior_zone_sale = any(
+                source.session_id == event.session_id
+                and source.zone != event.zone
+                and source.status == "ok"
+                and 0.0 < event.ts - source.ts <= _NO_OVERLAP_NOTE_HORIZON_S
+                and source.judgment.confidence >= cfg.source_conf_min
+                and any(pc.product.class_id == class_id for pc in source.judgment.products)
+                for source in events
+            )
+            if has_prior_zone_sale:
+                carried_classes.add(class_id)
+
+        if not carried_classes:
+            replaced.append(event)
+            continue
+
+        remaining = [
+            candidate
+            for candidate in event.vision_candidates
+            if candidate.class_id not in carried_classes
+        ]
+        recovered = [
+            candidate
+            for candidate in event.share_rejected_candidates
+            if candidate.class_id not in carried_classes
+            and candidate.class_id in products_by_class
+        ]
+        reference_votes = max(
+            (candidate.vote_count for candidate in (*remaining, *recovered)),
+            default=0,
+        )
+        recovered = [
+            candidate
+            for candidate in recovered
+            if candidate.vote_count >= reference_votes * event.min_vote_share
+        ]
+        updated_candidates = tuple(
+            sorted(
+                (*remaining, *recovered),
+                key=lambda candidate: (-candidate.vote_count, -candidate.confidence),
+            )
+        )
+        if updated_candidates:
+            profile = profiles.get(event.zone, default_profile)
+            judgment = router.judge(
+                JudgmentContext(
+                    zone=event.zone,
+                    profile=profile,
+                    delta_weight=event.delta_weight,
+                    segments=event.segments,
+                    vision_candidates=updated_candidates,
+                    active_products=tuple(active_products),
+                    vision_only=False,
+                )
+            )
+        else:
+            judgment = JudgmentResult(
+                JudgmentStatus.NO_DETECTION,
+                reason="held_carryover_candidate_suppressed",
+            )
+        notes.append(
+            f"zone{event.zone}:held_carryover_recovery:"
+            f"suppressed={','.join(map(str, sorted(carried_classes)))}:"
+            f"recovered={','.join(map(str, sorted(c.class_id for c in recovered)))}:"
+            f"result={judgment.status.value}"
+        )
+        replaced.append(
+            replace(event, judgment=judgment, vision_candidates=updated_candidates)
+        )
+    return replaced
 
 
 def _repass_event(

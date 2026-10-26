@@ -186,9 +186,18 @@ flowchart TD
 | 9 | `relaxed` | 냉장 & 후보 있음 | tolerance×2로 조합 재시도, conf×0.8 (I6이 다시 강등할 수 있음) | → 9.1 |
 | 9.1 | `relaxed_loadcell_only` | 냉장 & 후보 있음 & **모든 후보가 allowlist 불일치** | 전 재고 nearest-single, 5g 내만, count=1 PARTIAL | 5g 초과 → 9.2 |
 | 9.2 | `vision_first_identity_partial` | 냉동 & 후보 있음 & delta<0 | 무게 검증 통과 시 COMPLETE(`vision_identity_weight_validated`), 실패 시 정체성만 count=1 PARTIAL | 청구 conf < 하한이면 **폴스루 없이 None** |
-| 9.3 | `detected_single_item_fallback` | 후보 있음 & delta<0 (프로파일 무관) | vision 최상위 후보 1종만 확인, tolerance×3 내면 구제. conf 상한 0.65 | → 9.4 |
+| 9.3 | `detected_single_item_fallback` | 후보 있음 & delta<0 (프로파일 무관) | 최상위 후보의 무게가 기본 tolerance 안이면 계산 수량 COMPLETE. tolerance 초과~3배 이내면 count=1 PARTIAL만 허용(무게 미검증 다량 확정 금지) | → 9.4 |
 | 9.4 | `relaxed_partial` | 냉장 & 후보 있음 | **무게 반증 거부권**(단위무게 > 최대 removal 관측량 + tolerance×3인 후보 배제 — 이슈 #22) 후 최다 득표 count=1 PARTIAL, conf×0.5 | 생존 후보 없음 또는 청구 conf < 하한이면 **폴스루 없이 None** |
 | 10 | `forced_final` | 항상 True | `forced_final_no_match` NO_DETECTION | — |
+
+다중 트레이 판정에는 라우터가 각 트레이 무게에 대해 COMPLETE를 낸 뒤
+`multi_tray_vision_top_conflict_guard`를 한 번 더 적용합니다. 냉장 프로파일에서
+단일 class를 3개 이상으로 판정했는데 그 class보다 더 높은 비전 후보가 있으면,
+그 다량 COMPLETE를 유지하지 않고 비전 1위 상품 한 개를 PARTIAL로 남깁니다.
+이 PARTIAL은 서로 다른 상품 정체성으로 확정된 형제 트레이 결과와 함께 결제에
+포함됩니다. 비전 1위가 원래 다량 판정 상품이면 정상 다량 판정은 그대로 둡니다.
+이는 비전 상위 상품을 취출별로 분리해 증명하는 기능은 아니며, 다량 오청구를
+보수적으로 단품 검토 과금으로 바꾸는 보호입니다.
 
 두 가지 설계 판단을 명시해 둡니다.
 
@@ -202,6 +211,20 @@ flowchart TD
   유일한 예외는 9.4의 무게 반증 거부권(이슈 #22) — 증거 강도가 아니라 물리적
   배제(단위무게상 1개 취출조차 불가능)라 배제 후 남은 서열대로 고르는 것이 맞고,
   conf 하한은 생존 후보에 다시 폴스루 없이 적용됩니다.
+
+냉장 strict COMPLETE에서 무게 유효 조합이 경합하면, 이미 통과한 후보들의
+모션 변위 증거를 최종 선택에 반영합니다. strict 매칭 점수에 조합 내 고유 class별
+정규화된 `best_path` 합계의 0.1배를 더해 비교하고, 기존 판정보다 0.01 이상
+높은 조합만 채택합니다. 새로 들어오는 class는 정식 `vision_candidates`에 있어야
+하며 최소 3표·confidence 0.5 이상, 모션 증거 통과가 필요합니다. 기본 strict의
+`STRICT_COUNT_OCCAM`도 유지합니다. vision-only, 세그먼트 목표 재시도, 모션 근거가
+없는 경우에는 기존 판정을 유지합니다. 다중 트레이에서는 앞서 배정한 class를 뒤
+이벤트에서 제외해 중복 배정을 막습니다.
+
+이 선택 단계는 `ratio`/`share`에서 탈락한 후보를 복구하지 않습니다. ses-1에서는
+69×2 대신 무게상 동등한 69+65 조합이 두 후보의 강한 모션 증거로 채택되고,
+ses-2에서는 기존 69+68을 64와 69로 재배정합니다. 이는 트리거를 더 잘게 나누는
+기능이 아니라, 기존 로드셀 이벤트와 후보별 모션 증거를 함께 쓰는 판정 수정입니다.
 
 ## 4. 판정 노브
 
@@ -453,6 +476,14 @@ note 코드 해석표는 [05. 운영·진단 가이드](05-operations.md)에 있
 앵커는 `change_timestamps` → `segments.start_ts` → `ts` 순으로 폴백하며, 세 경우 모두
 IO-BOARD 클럭 축이라 존 간 비교가 가능합니다(프레임 인덱스 환산은 금지). 기본값은
 replay 4.0 / trigger 4.0 / ε 1.0으로 카메라 계약과 단일 소스입니다.
+
+**held carryover 선행 복구**: 일반 오염 창이 겹치지 않아도, 앞선 다른 존에서 이미
+판정된 상품이 현재 영상 득표의 80% 이상을 차지하고 그 표가 held 트랙으로 기록된
+경우에는 carryover 후보로 본다(최소 held 5표, 같은 세션의 앞선 판정 30초 이내).
+해당 상품 후보를 제외하고, 원래 `share` 기준에서만 탈락한 후보를 held 표를 뺀
+새 1위 득표 기준으로 재평가한 뒤 CLOSE에서 다시 판정한다. 다른 존의 선행 판정이
+없거나 held 비중이 기준 미만이면 기존 판정을 바꾸지 않는다. 재평가 후에도 후보가
+없으면 과다청구 후보를 유지하지 않고 `NO_DETECTION`으로 남긴다.
 
 **안전장치 3중 방어**
 

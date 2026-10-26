@@ -28,6 +28,11 @@ class TriggerEvent:
     # 2차 패스가 재구성하는 근거. IO-BOARD 단일 클럭(F7)이라 존 간 비교 가능.
     # 구버전 카메라는 빈 튜플 — segments/ts 폴백 (cross_zone.sub_event_anchors).
     change_timestamps: tuple[float, ...] = ()
+    # CLOSE held-track recovery: counts explicitly marked as held by the
+    # trigger's shadow diagnostics, plus candidates rejected only by min-share.
+    held_vote_counts: tuple[tuple[int, int], ...] = ()
+    share_rejected_candidates: tuple[VisionCandidate, ...] = ()
+    min_vote_share: float = 0.1
 
 
 @dataclass

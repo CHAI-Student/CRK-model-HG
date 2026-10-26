@@ -53,6 +53,11 @@ def event_to_dict(e: TriggerEvent) -> dict:
         # 진단 강화 (issue #6): G2 코퍼스 재생의 입력이 되므로 저널에도 남긴다.
         "vision_candidates": [asdict(c) for c in e.vision_candidates],
         "video_paths": {k: v for k, v in e.video_paths},
+        "held_vote_counts": [list(item) for item in e.held_vote_counts],
+        "share_rejected_candidates": [
+            asdict(candidate) for candidate in e.share_rejected_candidates
+        ],
+        "min_vote_share": e.min_vote_share,
         # 0711 교차존 오염 (Phase 1 계측): 서브이벤트 앵커 — 저널 replay로
         # 타 존 오염 창 겹침 빈도를 사후 정량화하는 근거.
         "change_timestamps": list(e.change_timestamps),
@@ -86,6 +91,15 @@ def event_from_dict(d: dict) -> TriggerEvent:
         ),
         video_paths=tuple(d.get("video_paths", {}).items()),
         change_timestamps=tuple(d.get("change_timestamps", ())),
+        held_vote_counts=tuple(
+            (int(class_id), int(votes))
+            for class_id, votes in d.get("held_vote_counts", ())
+        ),
+        share_rejected_candidates=tuple(
+            VisionCandidate(**candidate)
+            for candidate in d.get("share_rejected_candidates", ())
+        ),
+        min_vote_share=d.get("min_vote_share", 0.1),
     )
 
 
