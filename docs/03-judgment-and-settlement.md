@@ -182,7 +182,7 @@ flowchart TD
 | 6 | `same_weight_collision_guard` | 냉장 & 후보 있음 & delta<0 | 동일 무게대 후보 2개 이상 충돌 시 최고 conf 채택 | 충돌 아님 → 다음 |
 | 7 | `strict` | 냉장 & 후보 있음 | 무게 우선 백트래킹 조합(최대 6개/3종), I5·I12는 탐색 공간에서 강제 | `strict_mismatch` → 7.5 |
 | 7.5 | `stage_count_combo` | 냉장 & 세그먼트 목표 ≥2 | 위와 동일 (strict 실패 후 구제) | → 8 |
-| 8 | `same_product_count` | 냉장 & 후보 있음 | 동일 품목 n개(n≥2) 중 무게 오차 최소 | → 9 |
+| 8 | `same_product_count` | 냉장 & 후보 있음 | 동일 품목 n개(n≥2) 중 무게 오차 최소. 단, 최적 후보가 비전 1위가 아니면 해당 다량 판정을 금지하고 비전 1위 1개 PARTIAL로 보존 | 후보 top 상품 재고가 없으면 NO_DETECTION, 그 외 → 9 |
 | 9 | `relaxed` | 냉장 & 후보 있음 | tolerance×2로 조합 재시도, conf×0.8 (I6이 다시 강등할 수 있음) | → 9.1 |
 | 9.1 | `relaxed_loadcell_only` | 냉장 & 후보 있음 & **모든 후보가 allowlist 불일치** | 전 재고 nearest-single, 5g 내만, count=1 PARTIAL | 5g 초과 → 9.2 |
 | 9.2 | `vision_first_identity_partial` | 냉동 & 후보 있음 & delta<0 | 무게 검증 통과 시 COMPLETE(`vision_identity_weight_validated`), 실패 시 정체성만 count=1 PARTIAL | 청구 conf < 하한이면 **폴스루 없이 None** |

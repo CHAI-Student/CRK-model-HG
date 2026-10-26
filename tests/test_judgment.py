@@ -76,6 +76,41 @@ class TestStrictMatcher:
         assert {pc.product.product_id: pc.count for pc in best.products} == {"P001": 2}
 
 
+class TestSameProductCountVisionRanking:
+    def test_low_rank_light_product_is_not_multiplied_over_vision_top(self):
+        top = ActiveProduct(
+            "P500", "비전 1위 상품", class_id=500, unit_weight=500.0,
+            unit_price=3000, stock_qty=10,
+        )
+        jerky = ActiveProduct(
+            "P20", "육포", class_id=20, unit_weight=20.0,
+            unit_price=1000, stock_qty=20,
+        )
+        result = JudgmentRouter().judge(ctx(
+            -200.0,
+            [top, jerky],
+            [cand(500, 0.95, 100), cand(20, 0.70, 10)],
+        ))
+
+        assert result.status is JudgmentStatus.PARTIAL
+        assert result.reason == "same_product_count_vision_top_conflict"
+        assert [(pc.product.class_id, pc.count) for pc in result.products] == [(500, 1)]
+
+    def test_vision_top_can_still_be_counted_when_weight_supports_multiple(self):
+        jerky = ActiveProduct(
+            "P20", "육포", class_id=20, unit_weight=20.0,
+            unit_price=1000, stock_qty=20,
+        )
+        result = JudgmentRouter().judge(ctx(
+            -200.0,
+            [jerky],
+            [cand(20, 0.95, 100)],
+        ))
+
+        assert result.status is JudgmentStatus.COMPLETE
+        assert [(pc.product.class_id, pc.count) for pc in result.products] == [(20, 10)]
+
+
 class TestFullDeltaMatch:
     def test_downgrades_partial_explanation(self, cola):
         # I6: 부분 설명으로 과금 금지

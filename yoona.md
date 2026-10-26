@@ -870,3 +870,55 @@ tests/test_ledger.py: 기존 "동률 COMPLETE → partial" 테스트를 "→ rev
   결제 payload 주석 갱신
 - [tests/test_ledger.py](tests/test_ledger.py) — 기존 테스트 1건 갱신(review
   기대값) + 우선순위 회귀 테스트 1건 추가
+
+---
+
+# 2026-10-26 냉장 저득표 경량 상품의 무게 기반 다량 과금 방지
+
+## 현상과 원인
+
+냉장고에서 육포처럼 단위 무게가 약 20g인 상품을 비전이 약하게 검출했을 때,
+다른 상품보다 confidence·득표가 낮아도 `same_product_count`가 무게에 가장 잘
+맞는 후보를 고르는 문제가 있었다. 예를 들어 delta가 −200g이면 후보 목록에
+육포가 포함된 것만으로 육포×10(20g×10=200g)이 계산되고, 기존 전략은
+득표 순위보다 무게 오차를 먼저 비교해 이를 COMPLETE로 확정할 수 있었다.
+
+문제는 무게 판정 점수의 가중치가 높다는 것만이 아니다. `same_product_count`는
+같은 품목의 개수를 무게로 역산한 뒤 후보들 중 무게 오차가 가장 작은 결과를
+반환하는 독립 전략이라, 비전 후보로 진입한 저순위 상품도 다량 확정의 주체가
+될 수 있었다.
+
+## 수정 내용
+
+`SameProductCountStrategy`에서 무게상 최적 후보가 비전 1위와 다르면 그 다량
+결과를 COMPLETE로 확정하지 않도록 변경했다.
+
+- 무게상 최적 다량 후보가 비전 1위와 같으면 기존대로 무게에 따른 다량 판정을
+  허용한다.
+- 최적 후보가 비전 1위가 아니면 비전 1위 상품 1개를 `PARTIAL`로 보존한다.
+  비전 증거가 개수를 확인하지 못했으므로, 무게만으로 열 개 등으로 확대된
+  수량을 확정하지 않는다.
+- 비전 1위 상품이 판매 가능 재고 후보에 없으면 `NO_DETECTION`으로 끝내며,
+  낮은 순위의 상품을 대체로 청구하지 않는다.
+
+`same_product_count` 외의 전략, 냉동 판정, 로드셀 허용 오차는 변경하지 않았다.
+기존 파이프라인 순서와 정상적인 비전 1위 다량 취출도 그대로 유지한다.
+
+## 회귀 테스트 및 문서
+
+- −200g에서 비전 1위 500g 상품과 저순위 육포 20g 후보가 경쟁하면 육포×10
+  대신 비전 1위 1개 `PARTIAL`인지 검증
+- 육포가 비전 1위이고 −200g을 설명하면 기존대로 육포×10 `COMPLETE`인지 검증
+- 기존 ses-60 빼빼로×8 사례도 라우터 단계에서 다량 과금 대신 비전 1위
+  토레타 1개 `PARTIAL`로 보존되는지 검증
+- `tests/test_judgment.py` 및 `tests/test_service.py`: 140 passed
+- `git diff --check` 통과
+
+변경 파일:
+
+- [crk_model/judgment/strategies.py](crk_model/judgment/strategies.py) —
+  저순위 후보 다량 확정 방지
+- [docs/03-judgment-and-settlement.md](docs/03-judgment-and-settlement.md) —
+  `same_product_count` 정책 갱신
+- [tests/test_judgment.py](tests/test_judgment.py),
+  [tests/test_service.py](tests/test_service.py) — 회귀 검증

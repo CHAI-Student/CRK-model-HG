@@ -926,7 +926,11 @@ class StrictStrategy:
 
 
 class SameProductCountStrategy:
-    """순위 8: strict 실패 시 동일 품목 n개 조합 (freezer repeat-count 계열)."""
+    """순위 8: strict 실패 시 동일 품목 n개 조합 (freezer repeat-count 계열).
+
+    냉장 저단위 무게 상품은 작은 관측 오차로 큰 수량이 만들어질 수 있으므로,
+    다량 후보가 비전 1위와 다르면 무게만으로 그 후보를 확정하지 않는다.
+    """
 
     name = "same_product_count"
 
@@ -953,6 +957,20 @@ class SameProductCountStrategy:
         if best is None:
             return None
         _, p, n = best
+        top = max(ctx.vision_candidates, key=lambda c: (c.vote_count, c.confidence))
+        if p.class_id != top.class_id:
+            top_product = by_class.get(top.class_id)
+            if top_product is None:
+                return JudgmentResult(
+                    JudgmentStatus.NO_DETECTION,
+                    reason="same_product_count_top_unavailable",
+                )
+            return JudgmentResult(
+                JudgmentStatus.PARTIAL,
+                (ProductCount(top_product, 1),),
+                confidence=top.confidence * 0.5,
+                reason="same_product_count_vision_top_conflict",
+            )
         return JudgmentResult(
             JudgmentStatus.COMPLETE,
             (ProductCount(p, n),),

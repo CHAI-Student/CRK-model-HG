@@ -951,9 +951,8 @@ class TestDominantTopSingleRetry:
 
 
 class TestWeakMultiCountConflictGuard:
-    def test_ses60_weak_pepero_x8_becomes_toreta_single_partial(self):
+    def test_ses60_weak_pepero_is_not_multiplied_by_weight(self):
         from crk_model.judgment.router import JudgmentRouter
-        from crk_model.service.pipeline import _weak_multi_count_conflict_guard
 
         toreta = ActiveProduct("P59", "토레타", 59, 535.0, 2000, 10)
         pepero = ActiveProduct("P18", "빼빼로", 18, 66.0, 2500, 10)
@@ -969,14 +968,10 @@ class TestWeakMultiCountConflictGuard:
             (toreta, pepero),
         )
         original = JudgmentRouter().judge(ctx)
-        assert original.status is JudgmentStatus.COMPLETE
+        assert original.status is JudgmentStatus.PARTIAL
         assert original.strategy == "same_product_count"
-        assert [(pc.product.class_id, pc.count) for pc in original.products] == [(18, 8)]
-
-        out = _weak_multi_count_conflict_guard(ctx, original)
-
-        assert out.status is JudgmentStatus.PARTIAL
-        assert [(pc.product.class_id, pc.count) for pc in out.products] == [(59, 1)]
+        assert original.reason == "same_product_count_vision_top_conflict"
+        assert [(pc.product.class_id, pc.count) for pc in original.products] == [(59, 1)]
 
     def test_normal_multi_count_and_freezer_are_untouched(self):
         from crk_model.service.pipeline import _weak_multi_count_conflict_guard
