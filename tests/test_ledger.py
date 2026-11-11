@@ -715,3 +715,87 @@ class TestInterim:
         assert isinstance(summary, InterimSummary)
         with pytest.raises(TypeError):
             build_payment_payload(summary)
+
+
+class TestFreezerCrossZoneReturn:
+    PROFILES = {1: FREEZER, 2: FREEZER, 3: FREEZER}
+
+    def settle(self, events):
+        return CloseSettler(default_profile=FREEZER).settle("s1", events, self.PROFILES)
+
+    @staticmethod
+    def counts(result):
+        return {
+            (z.zone, pc.product.product_id): pc.count
+            for z in result.zones for pc in z.products
+        }
+
+    @pytest.mark.parametrize("taken,returned", [(1, 1), (2, 1), (3, 1), (3, 2), (2, 2)])
+    def test_cross_zone_return_survives_close_resolve(self, cola, taken, returned):
+        result = self.settle([
+            removal("s1", 1, 1.0, cola, count=taken),
+            ret("s1", 2, 2.0, cola.unit_weight * returned),
+        ])
+        assert result.product_count == taken - returned
+        assert self.counts(result).get((1, cola.product_id), 0) == taken - returned
+        assert any("cross_zone_return:zone2->zone1" in n for n in result.notes)
+        # 보고 무게는 원본 센서값이며, 이동 보정은 정산 내부에서만 사용한다.
+        assert {z.zone: z.weight_delta for z in result.zones} == {
+            1: -cola.unit_weight * taken, 2: cola.unit_weight * returned,
+        }
+
+    def test_returned_item_taken_again_at_destination(self, cola):
+        result = self.settle([
+            removal("s1", 1, 1.0, cola, count=2),
+            ret("s1", 2, 2.0, 100.0),
+            removal("s1", 2, 3.0, cola),
+        ])
+        assert self.counts(result) == {(1, cola.product_id): 1, (2, cola.product_id): 1}
+
+    def test_chained_transfers_leave_only_unreturned_item(self, cola):
+        result = self.settle([
+            removal("s1", 1, 1.0, cola, count=2),
+            ret("s1", 2, 2.0, 100.0),
+            removal("s1", 2, 3.0, cola),
+            ret("s1", 3, 4.0, 100.0),
+        ])
+        # 동일 SKU 두 취출 중 어느 물리 인스턴스를 반납했는지는 무게로 구분
+        # 못 한다. 세션 잔량은 1개이며, 반납만 한 3층에는 청구하지 않는다.
+        assert result.product_count == 1
+        assert all(pc.product == cola for z in result.zones for pc in z.products)
+        assert not next(z for z in result.zones if z.zone == 3).products
+
+    def test_return_does_not_consume_future_take(self, cola):
+        result = self.settle([
+            ret("s1", 2, 1.0, 100.0),
+            removal("s1", 1, 2.0, cola),
+        ])
+        assert result.product_count == 1
+        assert any("unmatched_return:zone2" in n for n in result.notes)
+        assert not any("cross_zone_return" in n for n in result.notes)
+
+    def test_same_zone_return_keeps_priority(self, cola):
+        result = self.settle([
+            removal("s1", 1, 1.0, cola),
+            removal("s1", 2, 2.0, cola),
+            ret("s1", 2, 3.0, 100.0),
+        ])
+        assert self.counts(result) == {(1, cola.product_id): 1}
+        assert not any("cross_zone_return" in n for n in result.notes)
+
+    def test_return_noise_is_transferred_without_double_counting(self, cola):
+        result = self.settle([
+            removal("s1", 1, 1.0, cola, count=2, delta=-205.0),
+            ret("s1", 2, 2.0, 105.0),
+            removal("s1", 2, 3.0, cola, delta=-100.0),
+        ])
+        assert self.counts(result) == {(1, cola.product_id): 1, (2, cola.product_id): 1}
+
+    def test_extra_return_cannot_cancel_item_taken_afterwards(self, cola):
+        result = self.settle([
+            removal("s1", 1, 1.0, cola),
+            ret("s1", 2, 2.0, 100.0),
+            ret("s1", 2, 3.0, 100.0),
+            removal("s1", 3, 4.0, cola),
+        ])
+        assert self.counts(result) == {(3, cola.product_id): 1}

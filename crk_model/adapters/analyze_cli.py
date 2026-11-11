@@ -16,7 +16,7 @@
    (docs/07-rejected-and-retired.md).
 
 부가: 트랙릿 T1 계측 — track_detail의 head_obs 분포와 클래스당 트랙 수
-(단절/fragmentation 감시).
+(단절/fragmentation 감시), 냉동 Y축 방향 후보·구간(결제 미반영).
 
 사용 예 (Jetson, 실험 후):
 
@@ -171,6 +171,39 @@ def load_documents(
     return docs
 
 
+def _y_direction_tracks(trigger: dict) -> list[dict]:
+    """기록된 방향 진단만 읽는다. 구 로그에서 반납을 추정하거나 재판정하지 않는다."""
+    trace = trigger.get("trace") or {}
+    me = (trace.get("vote_summary") or {}).get("motion_evidence") or {}
+    rows = []
+    if not isinstance(me, dict):
+        return rows
+    paths = trigger.get("video_paths") or {}
+    for camera, classes in me.items():
+        if not isinstance(classes, dict):
+            continue
+        for cid, info in classes.items():
+            if not isinstance(info, dict):
+                continue
+            for index, track in enumerate(info.get("track_detail") or []):
+                if not isinstance(track, dict):
+                    continue
+                direction = track.get("y_direction")
+                if not isinstance(direction, dict):
+                    continue
+                status = direction.get("status")
+                if not isinstance(status, str) or not status:
+                    continue
+                rows.append({
+                    "camera": camera, "class_id": cid, "track_index": index,
+                    "first": track.get("first"), "last": track.get("last"),
+                    "obs": track.get("obs"),
+                    "video_path": paths.get(camera) if isinstance(paths, dict) else None,
+                    "y_direction": direction,
+                })
+    return rows
+
+
 def analyze(docs: list[dict]) -> dict:
     report: dict = {
         "sessions": 0,
@@ -205,6 +238,12 @@ def analyze(docs: list[dict]) -> dict:
             # 뻔한 사례 — 0713 S1 계열), 비정답 건수는 강등의 기대 효과.
             "held_gt_flags": [],
             "held_non_gt": 0,
+        },
+        # 트리거별 트랙 관측 수다. 공유 영상의 중복과 양 카메라의 동일
+        # 물체 관측을 포함하므로 상품 개수/정확도로 해석하지 않는다.
+        "y_direction": {
+            "triggers": 0, "unrecorded_triggers": 0, "tracks": 0,
+            "by_camera": {}, "records": [],
         },
         # 세션 고스트 원장 shadow (ledger/ghost_ledger.py, 0723 이슈 #17 P1):
         # 정산 notes의 ghost_classes/ghost_shadow를 집계 — MODEL__GHOST__MODE
@@ -330,11 +369,24 @@ def analyze(docs: list[dict]) -> dict:
                             lv["both_wrong"] += 1
                 gh["shadow"].append(rec)
 
-        for trig in doc.get("triggers") or []:
+        for trigger_index, trig in enumerate(doc.get("triggers") or []):
             zone = trig.get("zone")
             trace = trig.get("trace") or {}
             delta = float(trig.get("delta_weight") or 0.0)
             gt_zone = _gt_multiset(gt_items, zone) if gt_items else []
+
+            yd = report["y_direction"]
+            direction_tracks = _y_direction_tracks(trig)
+            yd["triggers" if direction_tracks else "unrecorded_triggers"] += 1
+            for row in direction_tracks:
+                yd["tracks"] += 1
+                counts = yd["by_camera"].setdefault(row["camera"], {})
+                status = row["y_direction"]["status"]
+                counts[status] = counts.get(status, 0) + 1
+                yd["records"].append({
+                    "session": sid, "zone": zone, "trigger_index": trigger_index,
+                    "ts": trig.get("ts"), "delta_weight": delta, **row,
+                })
 
             # 트랙릿 T1 (report 키 주석 참조) — 라벨 없이도 트랙 수 분포는
             # 집계, head_obs의 GT 분리 실측은 라벨 트리거 한정
@@ -568,6 +620,20 @@ def render(report: dict) -> str:
                 lines.append(
                     "  → 정답 플래그 0 지속 시 HELD_TRACK_DEMOTION=active 승격 가능"
                 )
+    yd = report.get("y_direction") or {}
+    if yd:
+        lines.append("")
+        lines.append("--- Y축 방향 (진단·결제 미반영) ---")
+        lines.append(
+            f"  기록된 트리거 {yd['triggers']}개, 미기록 {yd['unrecorded_triggers']}개, "
+            f"트랙 관측 {yd['tracks']}건 (공유 영상 중복 포함·상품 수 아님)"
+        )
+        for camera, counts in sorted(yd["by_camera"].items()):
+            lines.append(f"  {camera}: {counts}")
+        if yd["unrecorded_triggers"]:
+            lines.append("  미기록은 정지/빈손 판정이 아님 — 구버전·모션 꺼짐·추론 생략 등 확인")
+        lines.append("  후보와 영상 동작을 대조해야 하며, 최종 과금 라벨은 동작 정답이 아님")
+
     gh = report.get("ghost") or {}
     if gh.get("observed"):
         lines.append("")
@@ -763,6 +829,26 @@ def render_session(doc: dict, *, full: bool = False) -> str:
                 lines.append("   motion 몰수: " + ", ".join(vetoed))
             if held_tracks:
                 lines.append("   held 트랙: " + "; ".join(held_tracks[:6]))
+            for row in _y_direction_tracks(t):
+                direction = row["y_direction"]
+                lines.append(
+                    f"   Y축 후보: {row['camera']}/c{row['class_id']}/"
+                    f"track{row['track_index']} {direction['status']} "
+                    f"obs={row['obs']} (진단·결제 미반영)"
+                )
+                segments = direction.get("segments") or []
+                for seg in segments:
+                    if not isinstance(seg, dict):
+                        continue
+                    lines.append(
+                        f"     {seg.get('direction', '?')}: "
+                        f"pos {seg.get('first', '?')}~{seg.get('last', '?')} "
+                        f"y {seg.get('start_y', '?')}->{seg.get('end_y', '?')} "
+                        f"Δy={seg.get('delta_y', '?')}px obs={seg.get('obs', '?')}"
+                    )
+                total = direction.get("segment_count")
+                if isinstance(total, int) and total > len(segments):
+                    lines.append(f"     구간 {len(segments)}/{total}개 기록 (나머지 생략)")
         tube = vs.get("tube_diag")
         if isinstance(tube, dict) and tube.get("by_class"):
             # 튜브 진단: 클래스별 유효표 / 결정적 소수 표 / 튜브 conf —

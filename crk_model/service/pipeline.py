@@ -36,6 +36,7 @@ from crk_model.ledger.events import TriggerEvent
 from crk_model.perception.detector import HAND_CLASS_ID, Detector
 from crk_model.perception.early_termination import EarlyTerminator
 from crk_model.perception.filters import DetectionFilterChain
+from crk_model.perception.motion_direction import YDirectionConfig
 from crk_model.perception.motion_evidence import MotionEvidence
 from crk_model.perception.voting import VotingEnsemble
 from crk_model.service.snapshot import ActiveProductStore, ProductSnapshot
@@ -644,6 +645,9 @@ class TriggerPipeline:
                 held_min_head=self._held_min_head,
                 unmeasurable_policy=self._motion_unmeasurable,
                 measurable_min_obs=self._motion_measurable_min_obs,
+                direction_config=(
+                    YDirectionConfig() if not profile.weight_is_discriminative else None
+                ),
             )
             voting.attach_motion_evidence(evidence)
         terminator = EarlyTerminator(profile, enabled=self._et_enabled)

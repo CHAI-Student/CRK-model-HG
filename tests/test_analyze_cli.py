@@ -5,8 +5,12 @@
 아카이브도 예외 없이 읽는 관용 파싱은 운영 데이터 호환성 계약으로 유지한다.
 """
 import json
+from copy import deepcopy
 
-from crk_model.adapters.analyze_cli import analyze, load_documents, main, render
+from crk_model.adapters.analyze_cli import analyze, load_documents, main, render, render_session
+from crk_model.perception.detector import Detection
+from crk_model.perception.motion_direction import YDirectionConfig
+from crk_model.perception.motion_evidence import MotionEvidence
 
 
 def _doc(session_id="ses-1", **over):
@@ -323,6 +327,81 @@ class TestAnalyze:
         )
         report = analyze([doc])  # 예외 없이 완료, 잔차 표본 없음
         assert report["unit_residual"]["samples"] == []
+
+
+class TestYDirectionReport:
+    @staticmethod
+    def trigger(ys=(240, 180, 100, 50, 100, 180, 240), zone=2):
+        evidence = MotionEvidence(direction_config=YDirectionConfig())
+        for pos, cy in enumerate(ys):
+            evidence.observe(
+                "top", [Detection(1, 0.9, bbox=(50, cy - 20, 90, cy + 20))], pos=pos
+            )
+        return _trigger(
+            zone=zone, ts=123.0, video_paths={"top": "/device/episode.avi"},
+            trace={"vote_summary": {"motion_evidence": evidence.summary()}},
+        )
+
+    def test_round_trip_shown_without_interpreting_final_bill_as_action_label(self):
+        doc = _doc(ground_truth=_gt(), triggers=[self.trigger()])
+        original = deepcopy(doc)
+        report = analyze([doc])
+        yd = report["y_direction"]
+        assert yd["triggers"] == 1 and yd["tracks"] == 1
+        assert yd["by_camera"] == {"top": {"mixed": 1}}
+        row, = yd["records"]
+        assert (row["session"], row["zone"], row["ts"]) == ("ses-1", 2, 123.0)
+        assert row["video_path"] == "/device/episode.avi"
+        assert [s["direction"] for s in row["y_direction"]["segments"]] == ["take", "return"]
+        assert "Y축 방향 (진단·결제 미반영)" in render(report)
+        out = render_session(doc)
+        assert "top/c1/track0 mixed" in out
+        assert "take: pos 0~3 y 240.0->50.0 Δy=-190.0px obs=4" in out
+        assert "return: pos 3~6 y 50.0->240.0 Δy=190.0px obs=4" in out
+        assert doc == original  # 보고서와 상세 출력은 아카이브를 바꾸지 않는다.
+
+    def test_missing_diagnostic_differs_from_observed_unknown(self):
+        report = analyze([_doc(triggers=[_trigger(), self.trigger(ys=(180, 181, 182))])])
+        yd = report["y_direction"]
+        assert yd["triggers"] == 1 and yd["unrecorded_triggers"] == 1
+        assert yd["by_camera"] == {"top": {"unknown": 1}}
+        assert "미기록은 정지/빈손 판정이 아님" in render(report)
+
+    def test_shared_video_is_explicitly_counted_as_trigger_observations(self):
+        report = analyze([_doc(triggers=[self.trigger(), self.trigger(zone=3)])])
+        yd = report["y_direction"]
+        assert yd["triggers"] == 2 and yd["tracks"] == 2
+        assert yd["by_camera"] == {"top": {"mixed": 2}}
+        assert [r["trigger_index"] for r in yd["records"]] == [0, 1]
+        assert "공유 영상 중복 포함·상품 수 아님" in render(report)
+
+    def test_segment_limit_is_visible(self):
+        trigger = self.trigger()
+        detail = trigger["trace"]["vote_summary"]["motion_evidence"]["top"][1]["track_detail"]
+        detail[0]["y_direction"]["segment_count"] = 10
+        out = render_session(_doc(triggers=[trigger]))
+        assert "구간 2/10개 기록 (나머지 생략)" in out
+
+    def test_incomplete_diagnostic_ignored_as_unrecorded(self):
+        trigger = self.trigger()
+        detail = trigger["trace"]["vote_summary"]["motion_evidence"]["top"][1]["track_detail"]
+        detail[0]["y_direction"] = None
+        report = analyze([_doc(triggers=[trigger])])
+        assert report["y_direction"]["unrecorded_triggers"] == 1
+        assert report["y_direction"]["tracks"] == 0
+        assert "Y축 후보" not in render_session(_doc(triggers=[trigger]))
+
+    def test_cli_json_and_session_detail(self, tmp_path, capsys):
+        day = tmp_path / "2026-11-10"
+        day.mkdir()
+        (day / "ses-y.json").write_text(json.dumps(
+            _doc("ses-y", triggers=[self.trigger()])
+        ), encoding="utf-8")
+        assert main(["--dir", str(tmp_path), "--json"]) == 0
+        report = json.loads(capsys.readouterr().out)
+        assert report["y_direction"]["by_camera"] == {"top": {"mixed": 1}}
+        assert main(["--dir", str(tmp_path), "--session", "ses-y"]) == 0
+        assert "top/c1/track0 mixed" in capsys.readouterr().out
 
 
 class TestCli:

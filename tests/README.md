@@ -55,7 +55,7 @@ CI는 FastAPI, NumPy, ffmpeg까지 설치해 환경 의존 테스트가 빠지�
 | 파일 | 건수 | 만들어진 이유 | 주요 검증 내용과 유지 근거 |
 |---|---:|---|---|
 | `test_adapters.py` | 4 | 도메인 서비스와 FastAPI/프레임 어댑터의 결합 경계를 검증 | 게이트용 축소 뷰와 검출용 원본 프레임 분리, OPEN→trigger→CLOSE HTTP 흐름, health 배리어, 중복 트리거 응답. FastAPI 연동 회귀를 막으므로 유지한다. |
-| `test_analyze_cli.py` | 22 | 운영 아카이브를 배포 후 분석하는 `analyze-sessions`의 정본 동작을 고정 | 청구 정오, 분위수, 개당 잔차, 트랙·held·ghost 계측, 단건/기간 조회, 손상 파일 오류와 구 스키마 관용 파싱. 과거 운영 데이터 호환 때문에 유지한다. |
+| `test_analyze_cli.py` | 28 | 운영 아카이브를 배포 후 분석하는 `analyze-sessions`의 정본 동작을 고정 | 청구 정오, 분위수, 개당 잔차, 트랙·held·ghost 계측, Y축 후보·왕복 구간과 미기록 구분, 단건/기간 조회, 손상 파일 오류와 구 스키마 관용 파싱. 과거 운영 데이터 호환 때문에 유지한다. |
 | `test_cross_zone.py` | 28 | 다른 존 영상이 섞여 발생한 오과금을 CLOSE 2차 패스에서 교정 | 시간 앵커, 오염 창, 상호 강등·self-fit·무게 가드, PARTIAL 재판정, 오염 PARTIAL 선택 제거와 정상 동일상품 PARTIAL 보존, 저널 왕복과 무겹침 진단. 승격된 기본 ON 기제이므로 핵심 회귀 테스트다. |
 | `test_frames.py` | 7 | 추론량을 줄이는 모션 게이트가 손 존재 시 증거를 버리지 않도록 검증 | 첫 프레임, 정지/움직임, 손 래치, exit 확인, keepalive, 직전 통과 프레임 기준 비교. 프레임 누락이 판정 누락으로 직결돼 유지한다. |
 | `test_frames_streaming.py` | 18 | 긴 AVI의 메모리 폭증 방지와 ffmpeg 스트리밍 최적화를 검증 | hwaccel 프로브와 CPU 폴백, lazy iterator와 자원 해제, NumPy/순수 Python 차분 등가성, generator 1회 소비, 게이트 뷰 순서. `ffmpeg`/`numpy` 환경 의존이다. |

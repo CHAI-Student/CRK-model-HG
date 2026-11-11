@@ -645,6 +645,33 @@ class TestAllowedClassIds:
 class TestMotionEvidencePipeline:
     """변위 필터 파이프라인 통합 (issue #16 후속): 진열 상품 표 몰수."""
 
+    @pytest.mark.parametrize("profile", [FREEZER, REFRIGERATOR])
+    def test_y_direction_is_freezer_diagnostic_without_changing_judgment(self, cola, profile):
+        class Scene(FakeDetector):
+            def detect(self, frame, allowed_class_ids=None):
+                ys = [240, 180, 100, 50, 100, 180, 240]
+                cy = ys[self.calls]
+                self.calls += 1
+                return [Detection(1, 0.9, bbox=(50, cy - 20, 90, cy + 20))]
+
+        store = ActiveProductStore()
+        store.update([cola])
+        req = TriggerRequest(2, {"top": moving_frames(7)}, samples(500, 400), 1.0)
+        outcome = TriggerPipeline(
+            Scene(), {2: profile}, store, motion_evidence_enabled=True,
+        ).process("s1", req)
+        baseline = TriggerPipeline(Scene(), {2: profile}, store).process("s1", req)
+        assert outcome.event.judgment == baseline.event.judgment
+        assert outcome.event.judgment.products == (ProductCount(cola, 1),)
+        detail = outcome.trace.vote_summary["motion_evidence"]["top"][1]["track_detail"][0]
+        if profile is FREEZER:
+            assert detail["y_direction"]["status"] == "mixed"
+            assert [s["direction"] for s in detail["y_direction"]["segments"]] == [
+                "take", "return",
+            ]
+        else:
+            assert "y_direction" not in detail
+
     def test_static_display_class_removed_from_candidates(self):
         # 실기 로그 4의 근본 차단: 진열 만두가 매 프레임 잡혀 63표 1위가 돼도
         # 변위 증거가 없으면 후보에서 몰수 — 진짜 상품이 득표 1위가 된다.

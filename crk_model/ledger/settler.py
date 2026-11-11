@@ -1,7 +1,8 @@
 """close-time 단일 글로벌 정산기 (D5, L6, QA Q6·Q7).
 
 반품 복구 3계층 + freezer close resolver(4층)를 하나의 정산기로 통합.
-3계층은 내부 매칭 우선순위로 강등: 동존 즉시 > net-delta > 교차존.
+냉장 매칭 우선순위: 동존 즉시 > net-delta > 교차존.
+냉동 교차존 반납은 시간순 취출 이력과 먼저 매칭하고, 이동량을 net에 보정한다.
 
 불변식:
 - I11: finalize 멱등 — 같은 session_id는 항상 같은 결과 객체.
@@ -123,32 +124,83 @@ def pass_same_zone(
     default_profile: SensorProfile = REFRIGERATOR,
 ) -> tuple[dict[int, _Basket], list[tuple[int, float]]]:
     """1층: 동존 즉시 복구 — removal은 판정 품목 축적, return은 무게 매칭 차감."""
+    baskets, unmatched, _ = _pass_returns(events, profiles, default_profile)
+    return baskets, unmatched
+
+
+def _pass_returns(
+    events: Sequence[TriggerEvent],
+    profiles: Mapping[int, SensorProfile],
+    default_profile: SensorProfile,
+    *,
+    freezer_cross_zone: bool = False,
+    notes: list[str] | None = None,
+) -> tuple[dict[int, _Basket], list[tuple[int, float]], dict[int, float]]:
+    """시간순 반납 매칭. 냉동 이동량은 출발 존에 +, 반납 존에 -로 보존한다.
+
+    보정 net = 관측 net + 타 존으로 반납한 무게 - 타 존에서 반납받은 무게.
+    원본 이벤트/보고용 weight_delta는 유지한다. 잠정 집계는 동존만 사용한다.
+    """
     baskets: dict[int, _Basket] = defaultdict(_Basket)
     unmatched: list[tuple[int, float]] = []
+    net_adjustments: dict[int, float] = defaultdict(float)
     for e in sorted(events, key=lambda e: e.ts):
         b = baskets[e.zone]
-        tol = _profile(profiles, e.zone, default_profile).tolerance_grams
+        prof = _profile(profiles, e.zone, default_profile)
+        tol = prof.tolerance_grams
         if e.delta_weight < 0:
             for pc in e.judgment.products:
                 b.add(pc.product, pc.count)
         elif e.delta_weight > 0:
-            if not _match_return(b, e.delta_weight, tol):
-                unmatched.append((e.zone, e.delta_weight))
-    return baskets, unmatched
+            if _match_return(b, e.delta_weight, tol):
+                continue
+            if freezer_cross_zone and not prof.weight_is_discriminative:
+                matched = False
+                for origin, origin_basket in baskets.items():
+                    origin_prof = _profile(profiles, origin, default_profile)
+                    if origin == e.zone or origin_prof.weight_is_discriminative:
+                        continue
+                    products = _return_products(
+                        origin_basket, e.delta_weight, origin_prof.tolerance_grams
+                    )
+                    if not products:
+                        continue
+                    for product in products:
+                        origin_basket.remove_one(product.product_id)
+                        if notes is not None:
+                            notes.append(
+                                f"cross_zone_return:zone{e.zone}->zone{origin}:"
+                                f"{product.product_id}-1"
+                            )
+                    net_adjustments[origin] += e.delta_weight
+                    net_adjustments[e.zone] -= e.delta_weight
+                    matched = True
+                    break
+                if matched:
+                    continue
+            unmatched.append((e.zone, e.delta_weight))
+    return baskets, unmatched, dict(net_adjustments)
 
 
 def _match_return(b: _Basket, ret_weight: float, tol: float) -> bool:
+    products = _return_products(b, ret_weight, tol)
+    for product in products:
+        b.remove_one(product.product_id)
+    return bool(products)
+
+
+def _return_products(b: _Basket, ret_weight: float, tol: float) -> tuple[ActiveProduct, ...]:
     for p, _c in b.items():
         if abs(ret_weight - p.unit_weight) <= tol:
-            return b.remove_one(p.product_id)
+            return (p,)
     items = b.items()
     for i, (p1, c1) in enumerate(items):
         for j, (p2, _c2) in enumerate(items):
             if j < i or (i == j and c1 < 2):
                 continue
             if abs(ret_weight - (p1.unit_weight + p2.unit_weight)) <= tol:
-                return b.remove_one(p1.product_id) and b.remove_one(p2.product_id)
-    return False
+                return (p1, p2)
+    return ()
 
 
 # 결제 status 3단계(2026-10) 중 "완전"과 "불완전(PARTIAL)" 사이의 중간 등급 —
@@ -301,10 +353,18 @@ class CloseSettler:
             }
         )
 
-        baskets, unmatched = pass_same_zone(ok, profiles, self.default_profile)
-        self._pass_net_delta(baskets, ok, profiles, unmatched, notes, self.default_profile)
+        baskets, unmatched, net_adjustments = _pass_returns(
+            ok, profiles, self.default_profile, freezer_cross_zone=True, notes=notes
+        )
+        self._pass_net_delta(
+            baskets, ok, profiles, unmatched, notes, self.default_profile,
+            net_adjustments=net_adjustments,
+        )
         self._pass_cross_zone(baskets, unmatched, profiles, notes, self.default_profile)
-        self._freezer_resolve(baskets, ok, profiles, notes, self.default_profile)
+        self._freezer_resolve(
+            baskets, ok, profiles, notes, self.default_profile,
+            net_adjustments=net_adjustments,
+        )
 
         # OPS 로그용: basket이 비어 있어도(예: unmatched_return만 있던 zone)
         # 이벤트가 발생했던 zone은 요약에 나와야 한다 — events는 ok+error 전체
@@ -413,11 +473,14 @@ class CloseSettler:
         unmatched: list[tuple[int, float]],
         notes: list[str],
         default_profile: SensorProfile = REFRIGERATOR,
+        *,
+        net_adjustments: Mapping[int, float] | None = None,
     ) -> None:
         """2층: 세션 net delta와 어긋난 과잉 청구 교정."""
         for zone, b in baskets.items():
             tol = _profile(profiles, zone, default_profile).tolerance_grams
             net = sum(e.delta_weight for e in events if e.zone == zone)
+            net += (net_adjustments or {}).get(zone, 0.0)
             excess = b.weight() - max(0.0, -net)
             while excess > tol:
                 cands = [p for p, _c in b.items() if p.unit_weight <= excess + tol]
@@ -447,6 +510,13 @@ class CloseSettler:
             for oz, b in baskets.items():
                 if oz == zone:
                     continue
+                # 냉동끼리는 이미 시간순 매칭했다. 여기서 다시 찾으면 반납
+                # 이후의 취출을 과거 반납이 상쇄하는 역인과가 생긴다.
+                if (
+                    not _profile(profiles, zone, default_profile).weight_is_discriminative
+                    and not _profile(profiles, oz, default_profile).weight_is_discriminative
+                ):
+                    continue
                 tol = _profile(profiles, oz, default_profile).tolerance_grams
                 for p, _c in b.items():
                     if abs(wt - p.unit_weight) <= tol:
@@ -468,6 +538,8 @@ class CloseSettler:
         profiles: Mapping[int, SensorProfile],
         notes: list[str],
         default_profile: SensorProfile = REFRIGERATOR,
+        *,
+        net_adjustments: Mapping[int, float] | None = None,
     ) -> None:
         """4층: freezer 부호있는 net basket 재solve (불안정 close 대비, QA Q6)."""
         # 세션 스코프 콤보 자격 제외 재료 — zone 루프 밖에서 1회 계산.
@@ -486,6 +558,7 @@ class CloseSettler:
                 continue
             gate = prof.count_gate
             net = sum(e.delta_weight for e in events if e.zone == zone)
+            net += (net_adjustments or {}).get(zone, 0.0)
             if net >= -gate:
                 # 순변화 없음(전량 반품 포함) → 과금 없음
                 if b.items():

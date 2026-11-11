@@ -107,13 +107,22 @@ flowchart TD
 ### `settler.py`
 
 원래 별개였던 "반품 복구 3계층"과 "freezer close resolver"를 한 정산기로 통합했고, 3계층은
-독립 단계가 아니라 **내부 매칭 우선순위**로 강등됐다: 동존 즉시 > net-delta > 교차존.
+독립 단계가 아니라 **내부 매칭 우선순위**로 강등됐다. 냉장은 동존 즉시 > net-delta > 교차존이다.
+냉동끼리의 다른 층 반납은 `_pass_returns()`에서 시간순으로 먼저 처리한다.
+동존 매칭 실패 시 이미 취출된 다른 냉동 존의 장바구니에서 단품 또는 2품 합을 찾아
+차감한다. 미래 취출을 과거 반납과 연결하지 않는다. 상품 식별은 기존 무게 매칭 범위이며,
+무게가 유사한 다품종의 반납 정체성은 아직 보장하지 않는다.
+
+이동이 성립하면 관측 반납 무게를 출발 존 net에는 더하고 반납 존 net에서는 뺀다.
+2층 보정과 4층 재solve는 이 보정 net을 함께 사용한다. 예를 들어 1층에서 200g 취출 후
+2층에 100g 반납하면 두 존의 보정 net은 각각 -100g, 0g이다. 반납한 2층에서 다시 100g을
+꺼내면 2층의 보정 net은 -100g이 된다. 보고용 `weight_delta`와 원본 이벤트는 관측값을 유지한다.
 
 | 층 | 함수 | 규칙 | note |
 |---|---|---|---|
-| 1층 동존 즉시 | `pass_same_zone()` | 시간순 순회. `delta<0`은 판정 품목 누적, `delta>0`은 같은 존 장바구니에서 무게 매칭(단품 → 2품 합) 차감. 실패는 `unmatched`로 이월 | (정상 경로 — 없음) |
+| 1층 반납 매칭 | `_pass_returns()` / `pass_same_zone()` | 시간순 순회. 동존 매칭 후 냉동끼리는 다른 존의 앞선 취출까지 매칭하고 net 이동량 기록. 잠정 집계용 `pass_same_zone()`은 동존만 처리 | 냉동 교차존은 `cross_zone_return` |
 | 2층 net-delta | `_pass_net_delta()` | 장바구니 무게가 존 net delta를 초과하면(`excess > tol`) 초과분에 가장 가까운 품목을 1개씩 뺀다. 이 보정이 설명한 미매칭 반품은 `unmatched`에서 소거(교차존 이중 차감 방지) | `net_delta_correction:zoneN:<pid>-1` |
-| 3층 교차존 반납 | `_pass_cross_zone()` | 남은 미매칭 반품 무게를 **다른 존** 장바구니와 매칭해 차감 | `cross_zone_return:zone{origin}->zone{dest}:<pid>-1` / `unmatched_return:zoneN:+Xg` |
+| 3층 교차존 반납 | `_pass_cross_zone()` | 남은 미매칭 반품 무게를 **다른 존** 장바구니와 매칭. 냉동끼리는 1층에서 처리했으므로 여기서 재매칭하지 않음 | `cross_zone_return:zone{origin}->zone{dest}:<pid>-1` / `unmatched_return:zoneN:+Xg` |
 | 4층 freezer | `_freezer_resolve()` | 아래 참조 | `freezer_close_*` |
 
 허용 오차는 항상 존 프로파일에서 온다. 존이 `profiles`에 없으면 `default_profile`로 폴백하며,
@@ -388,6 +397,8 @@ barrier_timeout)도 트리거 이벤트만으로 존별 근사 요약을 재구�
 1. **`settle()`의 패스 순서를 바꾸지 말 것.** ghost → cross_zone에는 실사고 근거가 있고
    (유령을 먼저 강등하지 않으면 교차존 재판정이 유령을 채택한다), 1→2→3→4층 순서도 2층이
    설명한 미매칭 반품을 3층에서 다시 차감하지 않게 하는 `unmatched` 소거에 의존한다.
+   냉동끼리의 반납은 1층 시간순 매칭에서 처리하며, 2층과 4층에 같은 net 이동 보정을 전달한다.
+   3층에서 냉동끼리 재매칭하면 이미 소진한 반납이나 미래 취출을 다시 차감할 수 있다.
 2. **notes 문자열 포맷은 계약이다.** `analyze-sessions`(`adapters/analyze_cli.py`)와
    `_notes_for_zone()` 정규식이 `zoneN:` / `zoneN->` 접두 규칙에 의존한다 — 새 note도 같은
    규칙을 따르고 존 번호를 맨 앞에 둔다.

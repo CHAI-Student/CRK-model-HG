@@ -47,6 +47,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 
 from crk_model.perception.detector import Detection
+from crk_model.perception.motion_direction import YDirectionConfig, summarize_y_direction
 
 _ZERO_BBOX = (0.0, 0.0, 0.0, 0.0)
 
@@ -70,6 +71,7 @@ class _Track:
     last_pos: int = -1
     head_obs: int = 0  # pos < head_frames 관측 수
     head_path: float = 0.0  # head 구간 내 누적 이동 (held 오인 방지 — 10차)
+    y_observations: list[tuple[int, float]] = field(default_factory=list)
 
     def observe(self, cx: float, cy: float, size: float, frame_idx: int) -> float:
         step = ((cx - self.last_cx) ** 2 + (cy - self.last_cy) ** 2) ** 0.5
@@ -142,6 +144,9 @@ class MotionEvidence:
     # "측정했더니 정지"(장수 트랙, path≈0 = 진열)는 계속 몰수된다.
     unmeasurable_policy: str = "forfeit"
     measurable_min_obs: int = 3
+    # None이면 관측을 저장하지 않는다. 냉동 pipeline만 진단 설정을 주입하며,
+    # 방향은 기존 모션 통과/held/투표/판정에 사용하지 않는다.
+    direction_config: YDirectionConfig | None = None
     _tracks: dict[tuple[str, int], list[_Track]] = field(
         default_factory=lambda: defaultdict(list)
     )
@@ -216,6 +221,8 @@ class MotionEvidence:
                 self._next_tid += 1
                 tracks.append(best)
             step = best.observe(cx, cy, size, idx)
+            if self.direction_config is not None:
+                best.y_observations.append((pos if pos is not None else idx, cy))
             # T2' 튜브 귀속 (클래스 무관) — 트랙과 병행. 귀속은 마지막 관측
             # 기준(한 트랙이 튜브를 갈아타는 드문 경우 최신이 이긴다).
             tube = self._observe_tube(camera, cx, cy, size, idx, d.class_id)
@@ -391,6 +398,7 @@ class MotionEvidence:
                 if best.n
                 else self.floor_px
             )
+            detail_tracks = sorted(tracks, key=lambda t: -t.n)[:8]
             detail = [
                 {
                     "first": t.first_pos,
@@ -401,8 +409,13 @@ class MotionEvidence:
                     "passed": t.passes(self.floor_px, self.size_scale),
                     "held": self.track_held(t.tid),  # T2 판정 결과 (shadow 관측)
                 }
-                for t in sorted(tracks, key=lambda t: -t.n)[:8]
+                for t in detail_tracks
             ]
+            if self.direction_config is not None:
+                for entry, track in zip(detail, detail_tracks, strict=True):
+                    entry["y_direction"] = summarize_y_direction(
+                        track.y_observations, self.direction_config
+                    )
             entry = {
                 "passed": self.class_motion(camera, cid),
                 "best_path": round(max(best.path, best.max_disp), 1),
