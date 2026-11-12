@@ -3,8 +3,8 @@
 
 경로 분기 (다이어그램 4):
 - I2: 빈 allowlist → 추론 차단 (YOLO 호출 0, fail-closed)
-- 냉장 저무게 스킵: |delta| < 프로파일 게이트 → vision 생략 (QA Q8)
-- 냉동: 순무게 0도 영상 분석, 반납/왕복은 방향별 종류와 부호별 무게로 판정
+- 저무게 스킵: |delta| < 프로파일 게이트 → vision 생략 (QA Q8)
+- 취출/반납과 수량은 기존 무게 판정 경로 사용. 영상 방향은 진단 전용
 - 로드셀 신뢰 불가 → vision_only 강제 (원본 _should_force_vision_only)
 - I1: 처리 예외 → status="error" 이벤트로 전파 (무검출로 조용히 바꾸지 않음)
 - L2: 조기 종료 시 추론만 중단 (I15 가드는 EarlyTerminator 내부)
@@ -31,7 +31,6 @@ from crk_model.ingest.loadcell import (
     LoadcellAnalyzer,
     LoadcellSample,
 )
-from crk_model.judgment.freezer_actions import infer_freezer_action
 from crk_model.judgment.interfaces import JudgmentContext
 from crk_model.judgment.router import JudgmentRouter
 from crk_model.ledger.events import FreezerAction, TriggerEvent
@@ -113,6 +112,7 @@ class TriggerTrace:
     directional_candidates: dict[str, tuple[VisionCandidate, ...]] = field(default_factory=dict)
     uncertain_directions: list[str] = field(default_factory=list)
     crossed_directions: list[str] = field(default_factory=list)
+    # 이전 행동별 아카이브/저널 호환용. 신규 트리거는 기존 무게 경로(None)를 쓴다.
     freezer_actions: tuple[FreezerAction, ...] | None = None
 
 
@@ -297,8 +297,7 @@ class TriggerPipeline:
         if analysis.reason == "final_delta_unstable":
             trace.reason_codes.append("loadcell_final_delta_unstable")
         delta = analysis.delta_weight
-        if (profile.weight_is_discriminative and not vision_only
-                and abs(delta) < profile.min_weight_change_grams):
+        if not vision_only and abs(delta) < profile.min_weight_change_grams:
             # 저무게 스킵: vision 전체 생략 = YOLO 호출 0 (QA Q8)
             trace.reason_codes.append("low_weight_skip")
             judgment = JudgmentResult(
@@ -309,39 +308,6 @@ class TriggerPipeline:
             return self._outcome(session_id, req, delta, analysis.segments, judgment, trace)
 
         candidates = self._run_vision(req, profile, snapshot, delta, trace)
-        if not profile.weight_is_discriminative:
-            actions = self._judge_freezer_actions(analysis, profile, snapshot, trace)
-            if actions is not None:
-                trace.freezer_actions = actions
-                counts = {}
-                for action in actions:
-                    if action.delta_weight < 0:
-                        for pc in action.judgment.products:
-                            old = counts.get(pc.product.product_id)
-                            counts[pc.product.product_id] = ProductCount(
-                                pc.product, pc.count + (old.count if old else 0)
-                            )
-                complete = bool(actions) and all(
-                    a.judgment.status is JudgmentStatus.COMPLETE for a in actions
-                )
-                judgment = JudgmentResult(
-                    JudgmentStatus.COMPLETE if complete else JudgmentStatus.PARTIAL,
-                    tuple(counts.values()),
-                    min((a.judgment.confidence for a in actions), default=0.0),
-                    reason="freezer_actions" if complete else "freezer_actions_need_review",
-                    strategy="freezer_action",
-                )
-                return self._outcome(
-                    session_id, req, delta, analysis.segments, judgment, trace, candidates
-                )
-            if not vision_only and abs(delta) < profile.min_weight_change_grams:
-                judgment = JudgmentResult(
-                    JudgmentStatus.NO_DETECTION, reason="below_min_weight_change",
-                    strategy="freezer_no_action",
-                )
-                return self._outcome(
-                    session_id, req, delta, analysis.segments, judgment, trace, candidates
-                )
         ctx = JudgmentContext(
             zone=req.zone,
             profile=profile,
@@ -362,73 +328,6 @@ class TriggerPipeline:
         return self._outcome(
             session_id, req, delta, analysis.segments, judgment, trace, candidates
         )
-
-    def _judge_freezer_actions(self, analysis, profile, snapshot, trace):
-        """단일 반납 및 취출→반납/반납→취출의 분리된 행동을 판정한다.
-
-        순무게만 남은 복잡한 왕복은 수량을 지어내지 않고 검토 대상으로 보존한다.
-        기존 단방향 취출은 검증된 라우터 경로를 유지한다.
-        """
-        delta = analysis.delta_weight
-        groups: list[float] = []
-        previous = None
-        overlapping = False
-        for segment in sorted(analysis.segments, key=lambda s: s.start_ts):
-            weight = segment.delta_grams
-            if abs(weight) < profile.min_weight_change_grams:
-                continue
-            if (previous is not None and previous.delta_grams * weight < 0
-                    and previous.end_ts > segment.start_ts):
-                overlapping = True
-            if groups and groups[-1] * weight > 0:
-                groups[-1] += weight
-            else:
-                groups.append(weight)
-            previous = segment
-        mixed = any(w < 0 for w in groups) and any(w > 0 for w in groups)
-        crossed = set(trace.crossed_directions)
-
-        def unknown(reason):
-            trace.reason_codes.append(reason)
-            return (FreezerAction(delta, JudgmentResult(
-                JudgmentStatus.NO_DETECTION, reason=reason, strategy="freezer_action"
-            )),)
-
-        if mixed:
-            if (not analysis.stabilized or len(groups) != 2 or overlapping
-                    or abs(sum(groups) - delta) > profile.count_gate
-                    or crossed != {"take", "return"}):
-                return unknown("freezer_mixed_actions_unresolved")
-            weights = groups
-        elif crossed == {"take", "return"}:
-            return unknown("freezer_mixed_actions_missing_weight_segments")
-        elif delta >= profile.min_weight_change_grams:
-            if not analysis.stabilized:
-                return unknown("freezer_return_not_stabilized")
-            weights = [delta]
-        elif abs(delta) < profile.min_weight_change_grams and crossed:
-            return unknown("freezer_action_missing_weight_segments")
-        elif (delta < 0 and "take" in crossed
-              and len(trace.directional_candidates.get("take", ())) > 1):
-            if not analysis.stabilized:
-                return unknown("freezer_take_not_stabilized")
-            weights = [delta]
-        else:
-            return None
-        actions = []
-        for weight in weights:
-            direction = "return" if weight > 0 else "take"
-            candidates = (
-                trace.directional_candidates.get(direction, ())
-                if direction not in trace.uncertain_directions else ()
-            )
-            judgment = infer_freezer_action(
-                weight, candidates, snapshot.products, profile,
-                count_unit_slack=self._router.count_unit_slack,
-            )
-            trace.reason_codes.append(judgment.reason)
-            actions.append(FreezerAction(weight, judgment))
-        return tuple(actions)
 
     def _judge_tray_events(
         self,

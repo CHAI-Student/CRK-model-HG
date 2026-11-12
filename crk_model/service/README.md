@@ -136,7 +136,7 @@ CLOSE 재폴링이 재계산돼 다른 결과를 낼 수 있어, 현재+최근 �
 | 스냅샷이 `last_valid` 폴백 | 계속 진행하되 사실을 기록 | `snapshot_source=last_valid` |
 | 로드셀 신뢰 불가 (`insufficient_samples` / `insufficient_stable_regions`) | `vision_only=True` 강제 | `loadcell_<사유>` |
 | 재수집 대기 (`needs_return_stabilization`) | 구간화 보류 사실만 기록 (재수집은 장치측 훅) | `return_stabilization_pending` |
-| 냉장 & `abs(delta) < profile.min_weight_change_grams` (vision_only 아닐 때) | vision 전체 생략, YOLO 0회. 냉동은 순무게 0인 교환도 영상 분석 | `low_weight_skip` |
+| `abs(delta) < profile.min_weight_change_grams` (vision_only 아닐 때) | 냉장·냉동 모두 vision 전체 생략, YOLO 0회 | `low_weight_skip` |
 | 매핑된 class_id가 0개 | allowlist가 hand만 남음 | `no_mapped_class_ids` |
 | 채택된 비전 1위가 과금 목록에 없음 | 관측만 (판정 무변경) | `vision_top_not_billed:class<N>` |
 
@@ -327,11 +327,11 @@ sequenceDiagram
 냉동의 Y 경계는 아래 원점 `Y=480-영상 중심 Y`이며, 위로 갈수록 증가한다.
 기본 ROI는 `0≤Y≤350`(영상 아래쪽 350px)이고, 손·상품 bbox는 원본 영상 좌표를 유지한다.
 top의 축/방향/최소 이동량, 카메라별 ROI 유지 방향, 위 공통 진단 임계는 별도 env로
-노출하지 않는다. 냉동 반납은 방향별 영상 후보로 종류를 추론하고 무게로 수량을
-검증한다. 경계가 있으면 실제 통과를 요구한다. 왕복/교환의 분리는 취출·반납 양쪽
-경계 증거와 안정된 부호별 무게 구간이 필요하며, 여러 차례 번갈아 움직이는 복잡한
-에피소드는 검토 대상으로 보존한다. 확정한 행동은 `TriggerEvent.freezer_actions`에
-저장한다. 모션 증거가 꺼져 있으면 반납 종류를 확정하지 않는다.
+노출하지 않는다. 취출·반납은 기존 최종 무게 변화 기준으로 처리한다. 중간 양수/음수
+구간을 별도 행동으로 쪼개지 않으며, 반납 안정화·채널 게이트·수량 라우터도 기존대로다.
+방향별 후보와 경계 통과는 진단용으로 기록하고, 영상 방향이나 경계 미통과로 무게 판정을
+취소하지 않는다. 신규 이벤트는 `freezer_actions=None`이며 기존 같은 층/다른 층 무게
+반납 매칭을 사용한다. 이전 행동별 저널/아카이브는 기존 저장 의미를 보존해 읽고 재생한다.
 
 ## 6. 테스트
 

@@ -125,8 +125,7 @@ class LoadcellAnalyzer:
         상품 이벤트는 항상 단일 채널에 온전히 실리며, 합산 분석은
         조용한 트레이의 노이즈를 delta에 섞고 동시 이벤트를 뭉갠다.
         채널별로 plateau 분석을 돌리고 |delta| >= min_weight_change인
-        채널만 존 delta에 기여시킨다. 냉동은 순변화 0인 왕복 구간도 보존한다.
-        반환 계약(reason 문자열 포함)은
+        채널만 존 delta에 기여시킨다. 반환 계약(reason 문자열 포함)은
         기존 합산 분석과 동일하다.
         """
         if not samples:
@@ -180,7 +179,6 @@ class LoadcellAnalyzer:
         gated = [
             (ch, a) for ch, a in settled
             if abs(a.delta_weight) >= self._profile.min_weight_change_grams
-            or (not self._profile.weight_is_discriminative and a.segments)
         ]
         if gated:
             delta = sum(a.delta_weight for _, a in gated)
@@ -219,12 +217,7 @@ class LoadcellAnalyzer:
         delta = plateaus[-1].mean - baseline
 
         # QA Q3 ①: 반품은 stabilization 완료 후에만 구간화 (순서 고정)
-        has_return = delta > 0 or (
-            not self._profile.weight_is_discriminative
-            and any(cur.mean - prev.mean >= self._profile.segment_step_grams
-                    for prev, cur in zip(plateaus, plateaus[1:], strict=False))
-        )
-        if has_return:
+        if delta > 0:
             last = plateaus[-1]
             duration = samples[last.end].ts - samples[last.start].ts
             if duration < self._stab_wait:

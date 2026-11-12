@@ -9,10 +9,10 @@ from crk_model.core.types import JudgmentResult, VisionCandidate, WeightSegment
 
 @dataclass(frozen=True)
 class FreezerAction:
-    """한 냉동 에피소드의 부호별 행동. +는 반납, -는 취출이다.
+    """이전 버전의 냉동 행동별 기록을 읽고 재생하기 위한 호환 형식.
 
-    종류는 해당 방향의 영상으로, 수량은 분리된 무게 변화로 검증한다.
-    미확정 행동은 products를 비워 보존하며 무게만으로 다른 SKU를 고르지 않는다.
+    +는 반납, -는 취출. 신규 트리거는 최종 무게 기준의 기존 경로를 사용하며
+    이 형식을 생성하지 않는다. 과거에 저장한 행동별 판정은 그대로 재생한다.
     """
 
     delta_weight: float
@@ -40,7 +40,7 @@ class TriggerEvent:
     # 2차 패스가 재구성하는 근거. IO-BOARD 단일 클럭(F7)이라 존 간 비교 가능.
     # 구버전 카메라는 빈 튜플 — segments/ts 폴백 (cross_zone.sub_event_anchors).
     change_timestamps: tuple[float, ...] = ()
-    # None은 구 저널/기존 취출 경로. 빈 튜플은 분석했으나 행동을 확정하지 못함.
+    # 신규 트리거는 None(기존 무게 경로). 행동별 값/빈 튜플은 이전 기록의 재생용.
     freezer_actions: tuple[FreezerAction, ...] | None = None
 
 

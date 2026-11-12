@@ -145,10 +145,6 @@ class JudgmentRouter:
         # I8: solve=None인 전략 기록. 24h+ soak에서 무상한 성장 방지 (deque)
         self.miss_log: deque[str] = deque(maxlen=256)
 
-    @property
-    def count_unit_slack(self) -> float:
-        return self._count_unit_slack
-
     def judge(self, ctx: JudgmentContext) -> JudgmentResult:
         for entry in self.pipeline:
             if isinstance(entry, Stage):
