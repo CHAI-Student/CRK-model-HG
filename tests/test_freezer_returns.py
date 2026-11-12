@@ -170,22 +170,31 @@ def pipeline_event(top, levels, side=(), side_config=None, analyzer=LoadcellAnal
 
 
 def test_return_video_uses_moving_product_and_ignores_stationary_similar_item():
-    scene = [[detection(1, 50, 100), detection(2, 350, y)] for y in [180, 220, 260]]
+    scene = [[detection(1, 50, 100), detection(2, 350, y)] for y in [300, 260, 220]]
     outcome, _ = pipeline_event(scene, [500, 605])
     actions = outcome.event.freezer_actions
     assert actions[0].judgment.products == (ProductCount(B, 1),)
     assert counts(settle([take(1, 1, (A, 1), (B, 1)), outcome.event])) == {"a": 1}
 
 
-def test_both_cameras_support_one_return_without_double_counting():
+def test_downward_motion_is_not_a_return_with_new_camera_orientation():
     scene = [[detection(2, 100, y)] for y in [180, 220, 260]]
+    outcome, _ = pipeline_event(scene, [500, 605])
+    assert not outcome.event.freezer_actions[0].judgment.products
+    result = settle([take(1, 1, (A, 1), (B, 1)), outcome.event])
+    assert counts(result) == {"a": 1, "b": 1}
+    assert result.zones[0].status in ("review", "partial")
+
+
+def test_both_cameras_support_one_return_without_double_counting():
+    scene = [[detection(2, 100, y)] for y in [300, 260, 220]]
     outcome, _ = pipeline_event(scene, [500, 605], side=scene)
     assert outcome.event.freezer_actions[0].judgment.products == (ProductCount(B, 1),)
 
 
 def test_camera_identity_conflict_is_reviewed_instead_of_two_product_return():
-    top = [[detection(1, 100, y)] for y in [180, 220, 260]]
-    side = [[detection(2, 100, y)] for y in [180, 220, 260]]
+    top = [[detection(1, 100, y)] for y in [300, 260, 220]]
+    side = [[detection(2, 100, y)] for y in [300, 260, 220]]
     outcome, _ = pipeline_event(top, [500, 605], side=side)
     assert "return" in outcome.trace.uncertain_directions
     result = settle([take(1, 1, (A, 1), (B, 1)), outcome.event])
@@ -197,8 +206,8 @@ def test_camera_identity_conflict_is_reviewed_instead_of_two_product_return():
 @pytest.mark.parametrize("same_product", [True, False])
 def test_zero_net_take_return_and_same_weight_exchange(same_product, analyzer):
     cid = 1 if same_product else 3
-    scene = [[detection(1, 50, y)] for y in [280, 240, 200]]
-    scene += [[detection(cid, 350, y)] for y in [200, 240, 280]]
+    scene = [[detection(1, 50, y)] for y in [200, 240, 280]]
+    scene += [[detection(cid, 350, y)] for y in [280, 240, 200]]
     outcome, detector = pipeline_event(scene, [500, 400, 500], analyzer=analyzer)
     assert detector.calls == 6  # net 0 still runs vision.
     assert [a.delta_weight for a in outcome.event.freezer_actions] == [-100, 100]
@@ -209,23 +218,23 @@ def test_zero_net_take_return_and_same_weight_exchange(same_product, analyzer):
 
 
 def test_same_clip_mixed_kind_take_then_return_b():
-    scene = [[detection(1, 50, y), detection(2, 350, y)] for y in [280, 240, 200]]
-    scene += [[detection(2, 350, y)] for y in [200, 240, 280]]
+    scene = [[detection(1, 50, y), detection(2, 350, y)] for y in [200, 240, 280]]
+    scene += [[detection(2, 350, y)] for y in [280, 240, 200]]
     outcome, _ = pipeline_event(scene, [500, 295, 400])
     result = settle([outcome.event])
     assert counts(result) == {"a": 1}
 
 
 def test_mixed_kind_pickup_does_not_collapse_to_a_double_before_later_return():
-    scene = [[detection(1, 50, y), detection(2, 350, y)] for y in [280, 240, 200]]
+    scene = [[detection(1, 50, y), detection(2, 350, y)] for y in [200, 240, 280]]
     outcome, _ = pipeline_event(scene, [500, 295])
     assert counts(settle([outcome.event])) == {"a": 1, "b": 1}
     assert counts(settle([outcome.event, returned(3, 3, (B, 1))])) == {"a": 1}
 
 
 def test_return_before_take_in_same_episode_uses_prior_history_only():
-    scene = [[detection(2, 350, y)] for y in [200, 240, 280]]
-    scene += [[detection(1, 50, y)] for y in [280, 240, 200]]
+    scene = [[detection(2, 350, y)] for y in [280, 240, 200]]
+    scene += [[detection(1, 50, y)] for y in [200, 240, 280]]
     outcome, _ = pipeline_event(scene, [500, 605, 505])
     assert [a.delta_weight for a in outcome.event.freezer_actions] == [105, -100]
     assert counts(settle([take(2, 1, (B, 1)), outcome.event])) == {"a": 1}
@@ -233,14 +242,14 @@ def test_return_before_take_in_same_episode_uses_prior_history_only():
 
 def test_class_flicker_along_one_physical_path_is_not_two_products():
     scene = [[detection(cid, 100, y)]
-             for cid, y in zip([1, 1, 1, 2, 2, 2], [180, 200, 220, 240, 260, 280], strict=True)]
+             for cid, y in zip([1, 1, 1, 2, 2, 2], [300, 280, 260, 240, 220, 200], strict=True)]
     outcome, _ = pipeline_event(scene, [500, 705])
     assert "return" in outcome.trace.uncertain_directions
     assert not outcome.event.freezer_actions[0].judgment.products
 
 
 def test_configured_boundary_requires_full_crossing():
-    scene = [[detection(2, 100, y)] for y in [120, 150, 180]]
+    scene = [[detection(2, 100, y)] for y in [200, 180, 160]]
     outcome, _ = pipeline_event(scene, [500, 605])
     assert not outcome.event.freezer_actions[0].judgment.products
 
@@ -255,8 +264,8 @@ def test_return_stabilization_is_required_even_when_round_trip_net_is_zero(analy
 
 
 def test_unsegmented_mixed_video_does_not_invent_action_quantities():
-    scene = [[detection(1, 50, y)] for y in [280, 240, 200]]
-    scene += [[detection(3, 350, y)] for y in [200, 240, 280]]
+    scene = [[detection(1, 50, y)] for y in [200, 240, 280]]
+    scene += [[detection(3, 350, y)] for y in [280, 240, 200]]
     outcome, _ = pipeline_event(scene, [500, 500])
     assert outcome.event.judgment.status is JudgmentStatus.PARTIAL
     assert settle([outcome.event]).zones[0].status == "review"
@@ -293,7 +302,7 @@ def test_shared_video_across_zones_does_not_bypass_contamination_checks():
 
 
 def test_archive_keeps_return_identity_and_directional_candidates():
-    scene = [[detection(2, 100, y)] for y in [180, 220, 260]]
+    scene = [[detection(2, 100, y)] for y in [300, 260, 220]]
     outcome, _ = pipeline_event(scene, [500, 605])
     archive = _event_to_dict(outcome.event, outcome.trace, 10)
     assert archive["freezer_actions"][0]["judgment"]["products"][0]["product"]["product_id"] == "b"
@@ -320,8 +329,8 @@ def test_opposing_overlapping_tray_changes_do_not_invent_causal_order():
                 WeightSegment(0, 1, -100), WeightSegment(.5, 1.5, 100),
             ), True, 500)
 
-    scene = [[detection(1, 50, y)] for y in [280, 240, 200]]
-    scene += [[detection(1, 350, y)] for y in [200, 240, 280]]
+    scene = [[detection(1, 50, y)] for y in [200, 240, 280]]
+    scene += [[detection(1, 350, y)] for y in [280, 240, 200]]
     outcome, _ = pipeline_event(scene, [500, 400, 500], analyzer=lambda _: OverlapAnalyzer())
     assert not outcome.event.freezer_actions[0].judgment.products
     assert settle([outcome.event]).zones[0].status == "review"

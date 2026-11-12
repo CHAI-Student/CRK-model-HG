@@ -313,7 +313,7 @@ sequenceDiagram
 | `MODEL__VISION__MOTION_EVIDENCE` | `true` | 변위 증거 활성 (라이브러리 기본값은 `False` — 직접 생성 테스트 하위호환) |
 | `MODEL__VISION__FREEZER_SIDE_ROI_Y_SPLIT` | 미설정 | 경사 side의 검출 Y 경계만 보정. 미설정이면 공통 `FREEZER_ROI_Y_SPLIT` 사용. top은 항상 공통 경계 사용 |
 | `MODEL__VISION__FREEZER_SIDE_DIRECTION_AXIS` | `y` | side 방향 진단의 축 `x/y`. top은 Y축 고정 |
-| `MODEL__VISION__FREEZER_SIDE_RETURN_DIRECTION` | `increasing` | side 반납 방향 `increasing/decreasing`. top은 증가=반납 고정 |
+| `MODEL__VISION__FREEZER_SIDE_RETURN_DIRECTION` | `decreasing` | side 반납 방향 `increasing/decreasing`. 현재 top은 Y 감소=반납 고정 |
 | `MODEL__VISION__FREEZER_SIDE_DIRECTION_MIN_DISPLACEMENT_PX` | `20` | side 최소 이동량. 10px 이상. top은 20px 코드 기본값 |
 | `MODEL__VISION__FREEZER_{TOP,SIDE}_RETURN_BOUNDARY_PX` | 미설정 | 선택 축의 동작 경계 진단. ROI처럼 검출을 제거하지 않음 |
 | `MODEL__WEIGHT__SEGMENT_RETRY_GAP_GRAMS` | `5.0` | `_segment_target_retry` 발동 임계 |

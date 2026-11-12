@@ -21,7 +21,7 @@ class CameraScene:
         self.allowed[camera] = tuple(allowed_class_ids)
         pos = self.positions[camera]
         self.positions[camera] += 1
-        cx, cy = (100, [180, 220, 260][pos]) if camera == "top" else ([240, 200, 160][pos], 200)
+        cx, cy = (100, [260, 240, 220][pos]) if camera == "top" else ([240, 200, 160][pos], 200)
         out = [Detection(1, .95, bbox=(cx-10, cy-10, cx+10, cy+10))]
         if 0 in allowed_class_ids:
             out.append(Detection(0, .9, is_hand=True, bbox=(cx-20, cy-20, cx+20, cy+20)))
@@ -145,3 +145,17 @@ def test_blank_side_boundary_and_roi_inherit(monkeypatch):
     settings = Settings.from_env()
     assert settings.freezer_side_return_boundary_px is None
     assert settings.freezer_side_roi_y_split is None
+
+
+@pytest.mark.parametrize("source", ["defaults", "env"])
+def test_default_freezer_orientation_is_upward_return(monkeypatch, source):
+    monkeypatch.setenv("MODEL__MACHINE__CABINET_TYPE", "freezer")
+    monkeypatch.delenv("MODEL__VISION__FREEZER_SIDE_DIRECTION_AXIS", raising=False)
+    monkeypatch.delenv("MODEL__VISION__FREEZER_SIDE_RETURN_DIRECTION", raising=False)
+    settings = Settings(cabinet_type="freezer") if source == "defaults" else Settings.from_env()
+    assert settings.freezer_side_return_direction == "decreasing"
+    pipeline = ModelService(CameraScene(), settings=settings).pipeline
+    assert {camera: (config.axis, config.return_direction)
+            for camera, config in pipeline._freezer_direction_configs.items()} == {
+        "top": ("y", "decreasing"), "side": ("y", "decreasing"),
+    }

@@ -667,7 +667,7 @@ class TestMotionEvidencePipeline:
         if profile is FREEZER:
             assert detail["y_direction"]["status"] == "mixed"
             assert [s["direction"] for s in detail["y_direction"]["segments"]] == [
-                "take", "return",
+                "return", "take",
             ]
         else:
             assert "y_direction" not in detail

@@ -206,10 +206,10 @@ class Settings:
     freezer_roi_y_split: float = 300.0
     # 경사 side의 검출 영역만 별도 보정. None이면 위 공통 Y 경계 사용.
     freezer_side_roi_y_split: float | None = None
-    # top은 기존 Y축/증가=반납/20px 기본값. 경사 side만 시점에 맞춰 보정.
+    # top은 Y축/감소=반납/20px 기본값. 경사 side만 시점에 맞춰 보정.
     # ROI와 별개인 행동 경계. 지정하면 통과한 구간만 반납 상품 판정에 사용한다.
     freezer_side_direction_axis: str = "y"
-    freezer_side_return_direction: str = "increasing"
+    freezer_side_return_direction: str = "decreasing"
     freezer_side_direction_min_displacement_px: float = 20.0
     freezer_top_return_boundary_px: float | None = None
     freezer_side_return_boundary_px: float | None = None
@@ -434,7 +434,7 @@ class Settings:
             ),
             freezer_side_return_direction=_env_choice(
                 "MODEL__VISION__FREEZER_SIDE_RETURN_DIRECTION",
-                "increasing", ("increasing", "decreasing"),
+                "decreasing", ("increasing", "decreasing"),
             ),
             freezer_side_direction_min_displacement_px=_env_float(
                 "MODEL__VISION__FREEZER_SIDE_DIRECTION_MIN_DISPLACEMENT_PX", 20.0

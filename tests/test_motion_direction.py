@@ -13,13 +13,13 @@ from crk_model.perception.voting import VotingEnsemble
 
 
 @pytest.mark.parametrize("ys,status,directions", [
-    ([240, 180, 100, 50], "take_candidate", ["take"]),
-    ([50, 100, 180, 240], "return_candidate", ["return"]),
-    ([240, 180, 100, 50, 100, 180, 240], "mixed", ["take", "return"]),
-    ([50, 100, 180, 240, 180, 100, 50], "mixed", ["return", "take"]),
+    ([240, 180, 100, 50], "return_candidate", ["return"]),
+    ([50, 100, 180, 240], "take_candidate", ["take"]),
+    ([240, 180, 100, 50, 100, 180, 240], "mixed", ["return", "take"]),
+    ([50, 100, 180, 240, 180, 100, 50], "mixed", ["take", "return"]),
     ([180, 183, 179, 182, 181], "unknown", []),
     ([240, 180], "unknown", []),
-    ([240, 180, 182, 100], "take_candidate", ["take"]),
+    ([240, 180, 182, 100], "return_candidate", ["return"]),
     ([240, 230, 225], "unknown", []),
     ([], "unknown", []),
 ])
@@ -83,8 +83,8 @@ def test_camera_directions_are_independent():
         for camera, cy in [("top", top_y), ("side", side_y)]:
             ev.observe(camera, [Detection(1, 0.9, bbox=(50, cy - 20, 90, cy + 20))], pos=pos)
     summary = ev.summary()
-    assert summary["top"][1]["track_detail"][0]["y_direction"]["status"] == "take_candidate"
-    assert summary["side"][1]["track_detail"][0]["y_direction"]["status"] == "return_candidate"
+    assert summary["top"][1]["track_detail"][0]["y_direction"]["status"] == "return_candidate"
+    assert summary["side"][1]["track_detail"][0]["y_direction"]["status"] == "take_candidate"
 
 
 @pytest.mark.parametrize("kwargs", [
@@ -122,7 +122,7 @@ def test_oblique_side_has_independent_axis_sign_and_threshold():
             axis="x", return_direction="decreasing", boundary_px=200, min_displacement_px=30,
         ),
     })
-    for pos, (top_y, side_x) in enumerate(zip([180, 220, 260], [240, 200, 160], strict=True)):
+    for pos, (top_y, side_x) in enumerate(zip([260, 240, 220], [240, 200, 160], strict=True)):
         for camera, cx, cy in [("top", 100, top_y), ("side", side_x, 200)]:
             ev.observe(camera, [Detection(1, .9, bbox=(cx-10, cy-10, cx+10, cy+10))], pos=pos)
     summary = ev.summary()
@@ -144,7 +144,7 @@ def test_per_camera_threshold_is_not_shared():
         for camera in ("top", "side"):
             ev.observe(camera, [Detection(1, .9, bbox=(50, cy-10, 70, cy+10))], pos=pos)
     summary = ev.summary()
-    assert summary["top"][1]["track_detail"][0]["y_direction"]["status"] == "return_candidate"
+    assert summary["top"][1]["track_detail"][0]["y_direction"]["status"] == "take_candidate"
     assert summary["side"][1]["track_detail"][0]["y_direction"]["status"] == "unknown"
 
 

@@ -117,14 +117,15 @@ conf 하한(`side_hand_conf_floor`, 미설정 시 공용 하한 상속)을 분�
 위치는 `vote_summary.motion_evidence.<camera>.<class_id>.track_detail[]` 아래의
 `y_direction`(Y축, 기존 키 유지) 또는 `motion_direction`(X축)이다.
 `take_candidate`, `return_candidate`, `mixed`(양방향), `unknown`을 구분한다.
-top은 Y 감소=취출·증가=반납이며, 경사 side만 env에서 축(X/Y)과 반납 방향을 바꿀 수 있다.
+현재 카메라에서 top은 Y 감소=반납·증가=취출이며, 경사 side도 기본은 같다.
+side는 env에서 축(X/Y)과 반납 방향을 별도로 보정할 수 있다.
 기본은 3관측 이상·20px 이상 이동이며, 3px 흔들림을 허용하고 극점에서 10px 역행하면
 새 구간을 시작한다. 관측 공백이 디코드 위치 기준 12프레임을 넘으면 구간을 끊는다.
 방향별 구간은 8개까지 기록하고 전체 개수는 `segment_count`에 남긴다.
 모션 증거 기능이 꺼져 있으면 이 진단도 없다. 냉동은 순무게가 0이어도 영상 분석한다.
 
 카메라별 `RETURN_BOUNDARY_PX`가 설정되면 구간에 `boundary_crossed`를 기록한다.
-경계240/여유10/반납 increasing이면 230 이하에서 250 이상으로 이동해야 통과다.
+경계240/여유10/반납 decreasing이면 250 이상에서 230 이하로 이동해야 통과다.
 같은 구간을 반대로 이동하면 취출 통과이며, 경계가 없으면 `null`이다. 3회 관측과
 경계 여유10px는 코드 기본값으로 관리하고, side 최소 이동량만 env에서 별도 보정한다. 방향 후보는
 경계를 통과하지 않아도 기록될 수 있으므로 반납 확정과 혼동하지 않는다.

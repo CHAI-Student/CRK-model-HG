@@ -528,7 +528,8 @@ class TestCabinetTypeDefaultProfile:
         이 delta는 정확히 폴백 프로파일 차이만 가른다."""
         # FakeDetector는 X 증가 방향으로 움직인다. side의 실제 반납 방향을 보정한다.
         settings = Settings(cabinet_type="freezer", close_grace_s=0.0,
-                            freezer_side_direction_axis="x")
+                            freezer_side_direction_axis="x",
+                            freezer_side_return_direction="increasing")
         svc = ModelService(
             FakeDetector(),  # class_id=1(콜라) 검출 → freezer_vision_first 판정
             clock=FakeClock(),

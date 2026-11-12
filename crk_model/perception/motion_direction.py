@@ -18,7 +18,7 @@ class MotionDirectionConfig:
     reversal_px: float = 10.0
     max_gap_frames: int = 12  # 게이트 스킵 포함 디코드 위치 기준
     axis: str = "y"
-    return_direction: str = "increasing"
+    return_direction: str = "decreasing"  # 현 카메라: 위쪽(Y 감소)=반납, 아래쪽=취출
     boundary_px: float | None = None
     boundary_margin_px: float = 10.0
 
