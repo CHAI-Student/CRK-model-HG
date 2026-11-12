@@ -299,7 +299,7 @@ note 코드: `zoneN:cross_zone_vision_penalty:demoted=..:adopted=..:source=zoneM
 | 저장 실패가 서비스를 죽이지 않는다 | `save()`가 예외를 삼키고 warning만 남긴다. 단 `annotate_ground_truth()`는 삼키지 **않는다** — 사람이 지금 실행 중인 작업이라 조용한 실패가 더 해롭다 |
 | 런타임 의존성 0 유지 | `yaml`은 저장·읽기 시점 lazy import, ImportError면 같은 내용을 `.json`으로 저장 |
 | 보존기간 정리 / 비활성 | 새 저장 시점에 초과 날짜 디렉토리 `rmtree`(journal prune과 같은 패턴) · `archive_dir=""`이면 `enabled=False`로 `save()`가 즉시 무동작 |
-| libyaml C 구현 우선 | 읽기 `CSafeLoader`·쓰기 `CDumper` 가용 시 사용 — `SAVE_DETECTIONS` 세션은 수백 KB라 순수 파이썬 로더로는 전량 로드가 분 단위로 늘고, 직렬화가 finalize 경로(워커 락 안)에서 CLOSE 응답을 지연시킨다 |
+| libyaml C 구현 우선 | 읽기 `CSafeLoader`·쓰기 `CSafeDumper` 가용 시 사용 — `SAVE_DETECTIONS` 세션은 수백 KB라 순수 파이썬 로더로는 전량 로드가 분 단위로 늘고, 직렬화가 finalize 경로(워커 락 안)에서 CLOSE 응답을 지연시킨다 |
 
 경로는 `{archive_dir}/{YYYY-MM-DD}/{session_id}.yaml`(폴백 `.json`), 날짜는 finalize 시각
 기준이다. 담기는 것:
@@ -318,6 +318,11 @@ note 코드: `zoneN:cross_zone_vision_penalty:demoted=..:adopted=..:source=zoneM
 barrier_timeout)도 트리거 이벤트만으로 존별 근사 요약을 재구성해 저장한다. 조회는 `find()`
 (최신 날짜 우선), `latest()`(`label-session --latest`용), `annotate_ground_truth()`(기존 라벨
 대체 — 오기입 정정).
+
+YAML 저장과 라벨 수정은 `CSafeDumper`(미설치 시 `SafeDumper`)를 사용해 튜플도 표준
+목록으로 저장한다. 구 파일의 `!!python/tuple`은 아카이브 전용 SafeLoader에서 목록으로
+읽는다. 다른 Python 객체 태그는 허용하지 않으며, 조회만으로 원본 파일을 바꾸지 않는다.
+따라서 이전 반납 세션도 `render-session`/`analyze-sessions`/`label-session`으로 읽을 수 있다.
 
 **아카이브 스키마의 관용 파싱은 계약이다.** 아카이브는 코드 버전이 섞이므로 폐기된 기제의 구
 필드(2026-07-30 제거된 `trace.likelihood_shadow`, `vote_summary.tube_shadow` → 현행은 진단 전용
@@ -387,7 +392,7 @@ barrier_timeout)도 트리거 이벤트만으로 존별 근사 요약을 재구�
 | `tests/test_ledger.py` (28건) | 배리어 3조건(큐 정합·로드셀·seq 워터마크)의 차단/해제. 정산기 불변식 — I11 동일 객체·확정 후 거부, 동존/교차존 반품, net-delta 교정, I14 음수 금지, I13 blocked + 결제 빌더 `ValueError`, 에러 존 제외 정책. freezer close — net~0 clear, 게이트 실패 시 증분 유지, `gate_n` 개수 비례. 콤보 중재 12건 — 스냅 뒤집기 성공/자격 표 하한/게이트 실패 구제/N=1 미탐색/가드 ①②③④⑤ 각각의 억제 note와 과금 결과/kill switch. I10 잠정 타입 `TypeError` |
 | `tests/test_cross_zone.py` (28건) | 앵커 폴백 3단, 오염 창 산식, 문서 시나리오 재판정 + 정산기 통합, 상호 강등 가드(잔차 우세/동률 양쪽 면제/self-fit 자격 박탈), θ 미달 소스의 침묵 진단 note, **무겹침 침묵 진단**(이슈 #23 — 근접 노트/30s 상한/겹침 시 무기록), 무게 유일 해·냉장 tolerance에서 미발동, **PARTIAL 원 판정의 ④ 우회 재판정 + COMPLETE 원 판정의 ④ KEEP 보존**(이슈 #22), 오염 PARTIAL 선택 제거와 동일상품 PARTIAL 재승리 보존(이슈 #27), 재판정 게이트 실패 시 원 판정 유지, 페널티 후 승자 유지, disabled no-op, `change_timestamps` 저널 왕복·구버전 호환 |
 | `tests/test_ghost_ledger.py` (15건) | 검출 정의 — 다존+뒷받침 0은 유령 / COMPLETE 뒷받침은 보호(held 실물) / near_gate는 뒷받침 아님 / 단일 존 아님 / **공유 에피소드는 1회 등장** / 서로 다른 에피소드는 성립 / **같은 순간·다른 파일의 창 겹침 병합과 별개 순간의 breadth 성립, window_cfg 미전달 구 동작**(이슈 #22) / vote_floor 미달 제외. shadow는 동작 무변경 + note만(유령 미과금 존은 무기록), off는 no-op, active는 재판정 채택·게이트 실패 시 원 판정 유지·비과금 이벤트도 후보 강등(α). 정산기 기본값 shadow에서 과금 무변경 |
-| `tests/test_session_archive.py` (18건) | finalize 시 YAML 1파일 + 후보·전략·`video_paths`·`trace` 포함, ERROR 세션도 `status=error`로 저장, **재폴링 3회에도 1파일**, 보존기간 디렉토리 삭제, PyYAML 부재 시 `.json` 폴백(라벨 기입까지), `archive_dir=""` 비활성, 저널 신규 필드 왕복·누락 시 기본값, settlement 없는 에러 세션의 존 요약 재구성, `ground_truth` placeholder·기입·대체·미존재 `FileNotFoundError`·`latest()`, `label-session` CLI 파싱과 E2E, `SAVE_DETECTIONS` off/on의 키 유무·conf 컷·`camera_crops` |
+| `tests/test_session_archive.py` (30건) | finalize 시 YAML 1파일 + 후보·전략·`video_paths`·`trace` 포함, ERROR 세션도 `status=error`로 저장, **재폴링 3회에도 1파일**, 보존기간 디렉토리 삭제, PyYAML 부재 시 `.json` 폴백(라벨 기입까지), `archive_dir=""` 비활성, 저널 신규 필드 왕복·누락 시 기본값, settlement 없는 에러 세션의 존 요약 재구성, `ground_truth` placeholder·기입·대체·미존재 `FileNotFoundError`·`latest()`, `label-session` CLI 파싱과 E2E, `SAVE_DETECTIONS` off/on의 키 유무·conf 컷·`camera_crops` |
 | `tests/test_lifecycle.py` (33건 중 ledger 관련) | 24h+ soak 무한 성장 방지 — 새 OPEN마다 `EventLog`·멱등 캐시 prune, 활성 세션은 절대 삭제 안 됨, **prune 후에도 직전 세션 CLOSE 재폴링이 같은 금액**(I11). 저널 로테이션 파일명·롤오버·날짜순 replay·세션 필터·보존기간 삭제/보존·단일 인자 생성자 호환·**G2.5 replay 등가성**. `cabinet_type=freezer`가 close 정산까지 도달하는지 |
 
 ---

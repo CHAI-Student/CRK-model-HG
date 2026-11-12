@@ -73,7 +73,7 @@ CI는 FastAPI, NumPy, ffmpeg까지 설치해 환경 의존 테스트가 빠지�
 | `test_product_mapping.py` | 17 | Node 상품 필드를 YOLO class ID로 안정적으로 변환 | camel/snake 별칭, 영문명 대소문자 폴백, 미매핑 `-1`, OPEN 로그와 HTTP E2E. 매핑 실패로 allowlist가 비는 사고를 방지한다. |
 | `test_render_cli.py` | 12 | 저장된 bbox를 당시 영상 기하에 맞게 재현하는 `render-session`을 검증 | mp4/JPG 생성, 장치 경로 remap, 누락 자료 안내, crop 원점, 그리기 primitive, 구 `kept=false` 레코드 제외. `ffmpeg`/`numpy` 환경 의존이다. |
 | `test_service.py` | 44 | 7단계 파이프라인과 서비스 파사드의 통합 동작을 검증 | 멀티트레이, 전체 세션 E2E, snapshot fail-closed, 중복·저무게·예외, 허용 클래스, 필터·재시도, 저널 replay, frame detection 저장, env 배선. 계층 간 연결 회귀를 잡는다. |
-| `test_session_archive.py` | 18 | 오판정 사후 재구성용 세션 아카이브를 검증 | FINALIZED/ERROR 1회 저장, 보존기간, YAML→JSON 폴백, 저널 신규·누락 필드 호환, 정답 라벨 CLI, frame detection 포함. 운영 증거 보존 계약이다. |
+| `test_session_archive.py` | 30 | 오판정 사후 재구성용 세션 아카이브를 검증 | FINALIZED/ERROR 1회 저장, 보존기간, YAML→JSON 폴백, 저널 신규·누락 필드 호환, 정답 라벨 CLI, frame detection 포함. 운영 증거 보존 계약이다. |
 | `test_t2_batch.py` | 19 | Jetson 지연 개선용 마이크로배치·프리페치가 판정을 바꾸지 않도록 검증 | 배치/비배치 결과 등가성, 잔여 배치, 예외·close 전파, 정적 batch 엔진, stream open 시점, tensor input 및 env 배선. 기본 OFF여도 재활성화 가능한 현행 코드라 유지한다. |
 | `test_wire_contract.py` | 6 | Node·카메라가 의존하는 HTTP 필드 계약을 별도 고정 | `/trigger` 성공·중복, `change_timestamps`, 비디오 파일 사전 검증, `/api/health` 필수 필드. 내부 E2E와 목적이 달라 별도 유지한다. |
 

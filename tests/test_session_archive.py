@@ -19,7 +19,9 @@ from __future__ import annotations
 import builtins
 import datetime
 import json
+import sys
 from dataclasses import replace as dc_replace
+from types import ModuleType
 
 import pytest
 from conftest import cand
@@ -27,8 +29,8 @@ from conftest import cand
 from crk_model.core.config import Settings
 from crk_model.core.profiles import REFRIGERATOR
 from crk_model.core.types import JudgmentResult, JudgmentStatus, ProductCount
-from crk_model.ledger.archive import SessionArchive, build_session_document
-from crk_model.ledger.events import TriggerEvent
+from crk_model.ledger.archive import SessionArchive, _load_document, build_session_document
+from crk_model.ledger.events import FreezerAction, TriggerEvent
 from crk_model.ledger.journal import event_from_dict, event_to_dict
 from crk_model.perception.detector import Detection
 from crk_model.service import ModelService
@@ -242,6 +244,119 @@ class TestYamlFallback:
         doc = json.loads(path.read_text(encoding="utf-8"))
         assert doc["session_id"] == "s3"
         assert doc["status"] == "error"
+
+
+class TestYamlTupleCompatibility:
+    """실제 writer/reader 계약과 기존 반납 아카이브의 tuple 태그 호환."""
+
+    @pytest.fixture(params=["default", "python"])
+    def yaml_backend(self, request, monkeypatch):
+        import yaml
+
+        if request.param == "python":
+            monkeypatch.delattr(yaml, "CSafeLoader", raising=False)
+            monkeypatch.delattr(yaml, "CSafeDumper", raising=False)
+        return yaml
+
+    def _legacy_archive(self, tmp_path, yaml):
+        archive = SessionArchive(tmp_path)
+        directory = tmp_path / "2026-11-12"
+        directory.mkdir()
+        path = directory / "legacy.yaml"
+        document = {
+            "session_id": "legacy",
+            "triggers": [{
+                "freezer_actions": [{
+                    "delta_weight": 100,
+                    "judgment": {"status": "complete", "products": (
+                        {"product": {"product_id": "p1"}, "count": 1},
+                    )},
+                }],
+                "trace": {"nested": (1, (2, 3))},
+            }],
+        }
+        path.write_text(yaml.dump(document, Dumper=yaml.Dumper), encoding="utf-8")
+        return archive, path
+
+    def test_actual_freezer_save_is_readable_by_standard_safe_loader(
+        self, tmp_path, cola, yaml_backend,
+    ):
+        from crk_model.ledger.journal import action_to_dict
+        from crk_model.service.pipeline import TriggerTrace
+
+        judgment = JudgmentResult(JudgmentStatus.COMPLETE, (ProductCount(cola, 1),), .9)
+        action = FreezerAction(100, judgment)
+        event = TriggerEvent("return", 1, 1, 100, (), judgment, freezer_actions=(action,))
+        trace = TriggerTrace(vote_summary={"nested": (1, (2, 3))})
+        assert isinstance(action_to_dict(action)["judgment"]["products"], list)
+        path = SessionArchive(tmp_path).save(
+            "return", "finalized", [event], None, traces={event: trace},
+        )
+        assert path is not None
+        text = path.read_text(encoding="utf-8")
+        assert "!!python/" not in text
+        document = yaml_backend.safe_load(text)
+        products = document["triggers"][0]["freezer_actions"][0]["judgment"]["products"]
+        assert products[0]["product"]["product_id"] == cola.product_id
+        assert document["triggers"][0]["trace"]["vote_summary"]["nested"] == [1, [2, 3]]
+        assert _load_document(path) == document
+        assert isinstance(action.judgment.products, tuple)  # 도메인 이벤트는 불변 유지
+
+    def test_legacy_nested_tuples_are_lists_without_rewriting_file(
+        self, tmp_path, yaml_backend,
+    ):
+        _, path = self._legacy_archive(tmp_path, yaml_backend)
+        before = path.read_bytes()
+        assert b"!!python/tuple" in before
+        document = _load_document(path)
+        products = document["triggers"][0]["freezer_actions"][0]["judgment"]["products"]
+        assert isinstance(products, list) and products[0]["count"] == 1
+        assert document["triggers"][0]["trace"]["nested"] == [1, [2, 3]]
+        assert path.read_bytes() == before
+        # 전역 SafeLoader의 생성자 목록은 변경하지 않는다.
+        with pytest.raises(yaml_backend.constructor.ConstructorError):
+            yaml_backend.safe_load(before)
+
+    def test_annotating_legacy_file_rewrites_as_standard_yaml(self, tmp_path, yaml_backend):
+        archive, path = self._legacy_archive(tmp_path, yaml_backend)
+        truth = {"items": [{"zone": 1, "class_id": 1, "count": 1}]}
+        assert archive.annotate_ground_truth("legacy", truth) == path
+        text = path.read_text(encoding="utf-8")
+        assert "!!python/" not in text
+        document = yaml_backend.safe_load(text)
+        assert document["ground_truth"] == truth
+        assert document["triggers"][0]["trace"]["nested"] == [1, [2, 3]]
+
+    @pytest.mark.parametrize("payload", [
+        "x: !!python/name:builtins.str ''",
+        "x: !!python/object/apply:builtins.str [test]",
+    ])
+    def test_other_python_tags_are_still_rejected(self, tmp_path, yaml_backend, payload):
+        path = tmp_path / "unsupported.yaml"
+        path.write_text(payload, encoding="utf-8")
+        with pytest.raises(yaml_backend.constructor.ConstructorError):
+            _load_document(path)
+
+    def test_render_latest_can_read_legacy_file(
+        self, tmp_path, yaml_backend, monkeypatch, capsys,
+    ):
+        from crk_model.adapters import render_cli
+
+        self._legacy_archive(tmp_path, yaml_backend)
+        monkeypatch.setattr(render_cli.shutil, "which", lambda _name: "/test/ffmpeg")
+        monkeypatch.setitem(sys.modules, "numpy", ModuleType("numpy"))
+        monkeypatch.setenv("MODEL__VIDEO__DECODER", "ffmpeg")
+        rendered = []
+
+        def render(trigger, *_args):
+            products = trigger["freezer_actions"][0]["judgment"]["products"]
+            assert isinstance(products, list)
+            rendered.append(trigger)
+            return [tmp_path / "rendered.mp4"]
+
+        monkeypatch.setattr(render_cli, "render_trigger", render)
+        assert render_cli.main(["--latest", "--dir", str(tmp_path)]) == 0
+        assert len(rendered) == 1 and "완료:" in capsys.readouterr().out
 
 
 class TestArchiveDisabled:

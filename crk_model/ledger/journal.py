@@ -41,9 +41,10 @@ def _judgment_from_dict(j: dict) -> JudgmentResult:
 
 
 def action_to_dict(action: FreezerAction) -> dict:
-    """저널과 YAML 아카이브가 공유하는 행동 직렬화. Enum은 문자열로 보존."""
+    """저널과 YAML 공용 직렬화: Enum은 문자열, 상품 튜플은 표준 목록으로 보존."""
     out = asdict(action)
     out["judgment"]["status"] = action.judgment.status.value
+    out["judgment"]["products"] = list(out["judgment"]["products"])
     return out
 
 

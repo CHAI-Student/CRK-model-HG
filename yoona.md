@@ -1523,3 +1523,21 @@ side만 해당 영역 검출을 제외하는 것도 확인했다. 변경 코드 
 충돌, 경사 side의 X축 반납, 클래스 플리커, 경계 미통과, 공유 영상, 안정화,
 두 로드셀 분석기, 저널 재생과 YAML 직렬화를 검증했다. 변경 코드 ruff와
 `git diff --check`가 통과했다. 합성 입력 검증이며 실제 장치 영상 재생은 아직 하지 않았다.
+
+# 2026-11-12 render-session의 python/tuple YAML 읽기 오류 수정
+
+반납 정보의 `judgment.products` 튜플이 `action_to_dict()`에 남아 일반 YAML 더머가
+`!!python/tuple`을 기록했다. 안전 로더를 사용하는 `render-session --latest`에서
+`ConstructorError`가 발생하는 것을 실제 `SessionArchive.save()` 경로로 재현했다.
+앞선 검증은 `safe_dump()`를 직접 사용해 실제 writer의 타입 태그를 놓쳤다.
+
+행동 직렬화에서 상품 튜플을 목록으로 변환하고, 아카이브 신규 저장/라벨 재저장 모두
+`CSafeDumper`/`SafeDumper`로 통일했다. 기존 파일의 튜플 태그는 아카이브 전용 안전
+로더에서 목록으로만 읽는다. 임의 Python 객체 태그는 계속 거부하며, 읽기만으로
+기존 파일을 변경하지 않는다. 기존 세션은 새 파일로 다시 생성할 필요 없이 읽을 수 있다.
+
+회귀 사례 12개를 추가했다. 실제 반납 이벤트 저장→표준 안전 로더 읽기, 중첩 튜플
+태그의 기존 파일 읽기, 라벨 수정 후 표준 YAML 저장, 임의 Python 태그 거부,
+`render-session --latest`의 파일 로드→렌더 호출 경로를 C/순수 Python 백엔드에서
+검증했다. CLI 검증에서 영상 인코딩은 스텁을 사용했고 실제 장치 영상은 재생하지 않았다.
+전체 결과는 `582 passed, 24 skipped`이며 변경 코드 ruff와 `git diff --check`가 통과했다.
