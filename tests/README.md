@@ -55,7 +55,10 @@ CI는 FastAPI, NumPy, ffmpeg까지 설치해 환경 의존 테스트가 빠지�
 | 파일 | 건수 | 만들어진 이유 | 주요 검증 내용과 유지 근거 |
 |---|---:|---|---|
 | `test_adapters.py` | 4 | 도메인 서비스와 FastAPI/프레임 어댑터의 결합 경계를 검증 | 게이트용 축소 뷰와 검출용 원본 프레임 분리, OPEN→trigger→CLOSE HTTP 흐름, health 배리어, 중복 트리거 응답. FastAPI 연동 회귀를 막으므로 유지한다. |
-| `test_analyze_cli.py` | 28 | 운영 아카이브를 배포 후 분석하는 `analyze-sessions`의 정본 동작을 고정 | 청구 정오, 분위수, 개당 잔차, 트랙·held·ghost 계측, Y축 후보·왕복 구간과 미기록 구분, 단건/기간 조회, 손상 파일 오류와 구 스키마 관용 파싱. 과거 운영 데이터 호환 때문에 유지한다. |
+| `test_analyze_cli.py` | 29 | 운영 아카이브를 배포 후 분석하는 `analyze-sessions`의 정본 동작을 고정 | 청구 정오, 분위수, 개당 잔차, 트랙·held·ghost 계측, X/Y축 후보·왕복 구간·경계와 미기록 구분, 단건/기간 조회, 손상 파일 오류와 구 스키마 관용 파싱. 과거 운영 데이터 호환 때문에 유지한다. |
+| `test_motion_direction.py` | 32 | 동작 방향 진단과 카메라 보정 | 취출/반납·왕복·가림·흔들림, X/Y축·반전·시점별 임계·경계 여유, 투표 무영향 |
+| `test_freezer_camera_views.py` | 12 | 상단 top + 경사 side의 env 배선 | 두 카메라의 ROI·방향·손 검출 실제 파이프라인 기여, 공통 ROI와 side 경계 보정, 내부 ROI off, 냉장 경로 보존, 잘못된 설정 기동 실패 |
+| `test_freezer_returns.py` | 38 | 냉동 행동별 상품 원장 | 유사 무게 SKU, 다품목·다개·층간 반납, 방향별 상품 판정, 카메라 충돌·공유 영상, 종류 플리커, 순무게 0 교환, 반납 안정화, 두 분석기, 저널·YAML 재생 |
 | `test_cross_zone.py` | 28 | 다른 존 영상이 섞여 발생한 오과금을 CLOSE 2차 패스에서 교정 | 시간 앵커, 오염 창, 상호 강등·self-fit·무게 가드, PARTIAL 재판정, 오염 PARTIAL 선택 제거와 정상 동일상품 PARTIAL 보존, 저널 왕복과 무겹침 진단. 승격된 기본 ON 기제이므로 핵심 회귀 테스트다. |
 | `test_frames.py` | 7 | 추론량을 줄이는 모션 게이트가 손 존재 시 증거를 버리지 않도록 검증 | 첫 프레임, 정지/움직임, 손 래치, exit 확인, keepalive, 직전 통과 프레임 기준 비교. 프레임 누락이 판정 누락으로 직결돼 유지한다. |
 | `test_frames_streaming.py` | 18 | 긴 AVI의 메모리 폭증 방지와 ffmpeg 스트리밍 최적화를 검증 | hwaccel 프로브와 CPU 폴백, lazy iterator와 자원 해제, NumPy/순수 Python 차분 등가성, generator 1회 소비, 게이트 뷰 순서. `ffmpeg`/`numpy` 환경 의존이다. |

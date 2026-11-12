@@ -171,7 +171,7 @@ def load_documents(
     return docs
 
 
-def _y_direction_tracks(trigger: dict) -> list[dict]:
+def _direction_tracks(trigger: dict) -> list[dict]:
     """기록된 방향 진단만 읽는다. 구 로그에서 반납을 추정하거나 재판정하지 않는다."""
     trace = trigger.get("trace") or {}
     me = (trace.get("vote_summary") or {}).get("motion_evidence") or {}
@@ -188,7 +188,7 @@ def _y_direction_tracks(trigger: dict) -> list[dict]:
             for index, track in enumerate(info.get("track_detail") or []):
                 if not isinstance(track, dict):
                     continue
-                direction = track.get("y_direction")
+                direction = track.get("motion_direction") or track.get("y_direction")
                 if not isinstance(direction, dict):
                     continue
                 status = direction.get("status")
@@ -241,6 +241,7 @@ def analyze(docs: list[dict]) -> dict:
         },
         # 트리거별 트랙 관측 수다. 공유 영상의 중복과 양 카메라의 동일
         # 물체 관측을 포함하므로 상품 개수/정확도로 해석하지 않는다.
+        # X축 설정도 포함하되 초기 JSON 리포트의 y_direction 키는 호환 유지.
         "y_direction": {
             "triggers": 0, "unrecorded_triggers": 0, "tracks": 0,
             "by_camera": {}, "records": [],
@@ -376,7 +377,7 @@ def analyze(docs: list[dict]) -> dict:
             gt_zone = _gt_multiset(gt_items, zone) if gt_items else []
 
             yd = report["y_direction"]
-            direction_tracks = _y_direction_tracks(trig)
+            direction_tracks = _direction_tracks(trig)
             yd["triggers" if direction_tracks else "unrecorded_triggers"] += 1
             for row in direction_tracks:
                 yd["tracks"] += 1
@@ -623,7 +624,7 @@ def render(report: dict) -> str:
     yd = report.get("y_direction") or {}
     if yd:
         lines.append("")
-        lines.append("--- Y축 방향 (진단·결제 미반영) ---")
+        lines.append("--- 카메라별 취출·반납 방향 (진단·결제 미반영) ---")
         lines.append(
             f"  기록된 트리거 {yd['triggers']}개, 미기록 {yd['unrecorded_triggers']}개, "
             f"트랙 관측 {yd['tracks']}건 (공유 영상 중복 포함·상품 수 아님)"
@@ -829,13 +830,20 @@ def render_session(doc: dict, *, full: bool = False) -> str:
                 lines.append("   motion 몰수: " + ", ".join(vetoed))
             if held_tracks:
                 lines.append("   held 트랙: " + "; ".join(held_tracks[:6]))
-            for row in _y_direction_tracks(t):
+            for row in _direction_tracks(t):
                 direction = row["y_direction"]
+                axis = direction.get("axis", "y")
                 lines.append(
-                    f"   Y축 후보: {row['camera']}/c{row['class_id']}/"
+                    f"   {axis.upper()}축 후보: {row['camera']}/c{row['class_id']}/"
                     f"track{row['track_index']} {direction['status']} "
                     f"obs={row['obs']} (진단·결제 미반영)"
                 )
+                if direction.get("return_direction"):
+                    lines.append(
+                        f"     반납 방향={direction['return_direction']} "
+                        f"경계={direction.get('boundary_px')}px "
+                        f"여유={direction.get('boundary_margin_px')}px"
+                    )
                 segments = direction.get("segments") or []
                 for seg in segments:
                     if not isinstance(seg, dict):
@@ -843,8 +851,13 @@ def render_session(doc: dict, *, full: bool = False) -> str:
                     lines.append(
                         f"     {seg.get('direction', '?')}: "
                         f"pos {seg.get('first', '?')}~{seg.get('last', '?')} "
-                        f"y {seg.get('start_y', '?')}->{seg.get('end_y', '?')} "
-                        f"Δy={seg.get('delta_y', '?')}px obs={seg.get('obs', '?')}"
+                        f"{axis} {seg.get(f'start_{axis}', '?')}->"
+                        f"{seg.get(f'end_{axis}', '?')} "
+                        f"Δ{axis}={seg.get(f'delta_{axis}', '?')}px obs={seg.get('obs', '?')}"
+                        + (
+                            f" 경계통과={seg['boundary_crossed']}"
+                            if seg.get("boundary_crossed") is not None else ""
+                        )
                     )
                 total = direction.get("segment_count")
                 if isinstance(total, int) and total > len(segments):

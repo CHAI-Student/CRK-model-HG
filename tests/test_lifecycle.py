@@ -526,7 +526,9 @@ class TestCabinetTypeDefaultProfile:
         REFRIGERATOR(±5g)로 남아 있으면 반품 미매칭 → 콜라 1개가 그대로
         청구된다 (net_delta 교정도 cola 100g > excess+tol=93g라 불가) —
         이 delta는 정확히 폴백 프로파일 차이만 가른다."""
-        settings = Settings(cabinet_type="freezer", close_grace_s=0.0)
+        # FakeDetector는 X 증가 방향으로 움직인다. side의 실제 반납 방향을 보정한다.
+        settings = Settings(cabinet_type="freezer", close_grace_s=0.0,
+                            freezer_side_direction_axis="x")
         svc = ModelService(
             FakeDetector(),  # class_id=1(콜라) 검출 → freezer_vision_first 판정
             clock=FakeClock(),
@@ -538,7 +540,7 @@ class TestCabinetTypeDefaultProfile:
         return_payload = {
             "zone": 1,
             "frames": {"top": moving_frames(8), "side": moving_frames(8)},
-            "loadcells": samples(400, 490),  # return: delta +90g
+            "loadcells": samples(400, 490, n=20),  # return: delta +90g, 안정화 완료
             "ts": 2.0,
             "video_paths": {"top": "/r0.avi", "side": "/rs0.avi"},
         }

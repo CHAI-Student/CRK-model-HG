@@ -16,6 +16,7 @@ from __future__ import annotations
 import re
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Mapping, Sequence
+from dataclasses import replace
 
 from crk_model.core.policy import ErrorSessionPolicy
 from crk_model.core.profiles import REFRIGERATOR, SensorProfile
@@ -23,6 +24,7 @@ from crk_model.core.types import (
     ActiveProduct,
     FinalizedSettlement,
     InterimSummary,
+    JudgmentResult,
     JudgmentStatus,
     ProductCount,
     ZoneBasket,
@@ -124,7 +126,7 @@ def pass_same_zone(
     default_profile: SensorProfile = REFRIGERATOR,
 ) -> tuple[dict[int, _Basket], list[tuple[int, float]]]:
     """1층: 동존 즉시 복구 — removal은 판정 품목 축적, return은 무게 매칭 차감."""
-    baskets, unmatched, _ = _pass_returns(events, profiles, default_profile)
+    baskets, unmatched, _, _, _ = _pass_returns(events, profiles, default_profile)
     return baskets, unmatched
 
 
@@ -135,7 +137,7 @@ def _pass_returns(
     *,
     freezer_cross_zone: bool = False,
     notes: list[str] | None = None,
-) -> tuple[dict[int, _Basket], list[tuple[int, float]], dict[int, float]]:
+) -> tuple[dict[int, _Basket], list[tuple[int, float]], dict[int, float], set[int], set[int]]:
     """시간순 반납 매칭. 냉동 이동량은 출발 존에 +, 반납 존에 -로 보존한다.
 
     보정 net = 관측 net + 타 존으로 반납한 무게 - 타 존에서 반납받은 무게.
@@ -144,10 +146,72 @@ def _pass_returns(
     baskets: dict[int, _Basket] = defaultdict(_Basket)
     unmatched: list[tuple[int, float]] = []
     net_adjustments: dict[int, float] = defaultdict(float)
+    protected: set[int] = set()
+    review: set[int] = set()
     for e in sorted(events, key=lambda e: e.ts):
         b = baskets[e.zone]
         prof = _profile(profiles, e.zone, default_profile)
         tol = prof.tolerance_grams
+        if e.freezer_actions is not None and not prof.weight_is_discriminative:
+            protected.add(e.zone)
+            for action in e.freezer_actions:
+                judgment = action.judgment
+                if judgment.status is not JudgmentStatus.COMPLETE or not judgment.products:
+                    # 종류/수량 미확정 반납이 뒤의 net 보정으로 다른 SKU를 지우지 못한다.
+                    affected = {
+                        z for z in baskets
+                        if not _profile(profiles, z, default_profile).weight_is_discriminative
+                    }
+                    protected.update(affected)
+                    review.update(affected | {e.zone})
+                    if notes is not None:
+                        notes.append(f"zone{e.zone}:freezer_action_unresolved:{judgment.reason}")
+                    continue
+                if action.delta_weight < 0:
+                    for pc in judgment.products:
+                        b.add(pc.product, pc.count)
+                    continue
+                if action.delta_weight <= 0:
+                    review.add(e.zone)
+                    continue
+                for pc in judgment.products:
+                    remaining = pc.count
+                    # SKU가 결정된 뒤에만 같은 층을 우선한다. 층이 다르다고 종류를 바꾸지 않는다.
+                    origins = [e.zone] + [z for z in baskets if z != e.zone]
+                    for origin in origins:
+                        if origin != e.zone and not freezer_cross_zone:
+                            continue
+                        if _profile(profiles, origin, default_profile).weight_is_discriminative:
+                            continue
+                        origin_basket = baskets[origin]
+                        count = min(remaining, origin_basket.counts.get(pc.product.product_id, 0))
+                        if count <= 0:
+                            continue
+                        for _ in range(count):
+                            origin_basket.remove_one(pc.product.product_id)
+                        remaining -= count
+                        protected.add(origin)
+                        if origin != e.zone:
+                            moved = pc.product.unit_weight * count
+                            net_adjustments[origin] += moved
+                            net_adjustments[e.zone] -= moved
+                        if notes is not None:
+                            notes.append(
+                                f"zone{origin}:freezer_identity_return:from_zone{e.zone}:"
+                                f"{pc.product.product_id}-{count}"
+                            )
+                        if remaining == 0:
+                            break
+                    if remaining:
+                        review.add(e.zone)
+                        if notes is not None:
+                            notes.append(
+                                f"zone{e.zone}:unmatched_identity_return:"
+                                f"{pc.product.product_id}:{remaining}"
+                            )
+            if not e.freezer_actions:
+                review.add(e.zone)
+            continue
         if e.delta_weight < 0:
             for pc in e.judgment.products:
                 b.add(pc.product, pc.count)
@@ -179,7 +243,7 @@ def _pass_returns(
                 if matched:
                     continue
             unmatched.append((e.zone, e.delta_weight))
-    return baskets, unmatched, dict(net_adjustments)
+    return baskets, unmatched, dict(net_adjustments), protected, review
 
 
 def _match_return(b: _Basket, ret_weight: float, tol: float) -> bool:
@@ -319,6 +383,31 @@ class CloseSettler:
 
         notes: list[str] = []
         ok = _ok_events(events)
+        # 행동별로 분해한 이벤트를 순 delta용 재판정기로 다시 풀면 반납 영상이
+        # 취출 후보로 섞인다. 해당 이벤트는 SKU 원장 경로에서만 정산한다.
+        action_events = []
+        for e in ok:
+            if e.freezer_actions is None:
+                continue
+            # 같은 영상 쌍을 여러 층이 공유하면 방향만으로 층별 행동을 귀속할 수 없다.
+            # 순 delta용 오염 보정을 우회해 두 층에서 같은 행동을 확정하지 않는다.
+            shared = e.video_paths and any(
+                other.zone != e.zone and dict(other.video_paths) == dict(e.video_paths)
+                for other in ok
+            )
+            if shared:
+                unresolved = JudgmentResult(
+                    JudgmentStatus.NO_DETECTION,
+                    reason="freezer_shared_video_action_unresolved", strategy="freezer_action",
+                )
+                e = replace(e, freezer_actions=tuple(
+                    replace(action, judgment=unresolved) for action in e.freezer_actions
+                ), judgment=replace(
+                    e.judgment, status=JudgmentStatus.PARTIAL, products=(),
+                    reason=unresolved.reason,
+                ))
+            action_events.append(e)
+        ok = [e for e in ok if e.freezer_actions is None]
         # 0723 세션 고스트 원장 — cross_zone보다 먼저: active에서 유령 후보를
         # 강등해 두면 cross_zone 재판정의 채택 후보에서도 밀려난다 (ses-11).
         if self.ghost.mode != "off" and self._products_provider is not None:
@@ -352,18 +441,21 @@ class CloseSettler:
                 if e.status != "ok" or e.judgment.status is JudgmentStatus.ERROR
             }
         )
+        ok = sorted([*ok, *action_events], key=lambda e: e.ts)
 
-        baskets, unmatched, net_adjustments = _pass_returns(
+        baskets, unmatched, net_adjustments, protected, return_review = _pass_returns(
             ok, profiles, self.default_profile, freezer_cross_zone=True, notes=notes
         )
         self._pass_net_delta(
             baskets, ok, profiles, unmatched, notes, self.default_profile,
             net_adjustments=net_adjustments,
+            protected_zones=protected,
         )
         self._pass_cross_zone(baskets, unmatched, profiles, notes, self.default_profile)
         self._freezer_resolve(
             baskets, ok, profiles, notes, self.default_profile,
             net_adjustments=net_adjustments,
+            protected_zones=protected,
         )
 
         # OPS 로그용: basket이 비어 있어도(예: unmatched_return만 있던 zone)
@@ -418,7 +510,7 @@ class CloseSettler:
                 )
             if any(j.status is JudgmentStatus.PARTIAL for j in concluded_judgments):
                 zone_status = JudgmentStatus.PARTIAL.value
-            elif ambiguous_events:
+            elif ambiguous_events or zone in return_review:
                 zone_status = PAYMENT_STATUS_REVIEW
             else:
                 zone_status = JudgmentStatus.COMPLETE.value
@@ -475,9 +567,12 @@ class CloseSettler:
         default_profile: SensorProfile = REFRIGERATOR,
         *,
         net_adjustments: Mapping[int, float] | None = None,
+        protected_zones: set[int] | None = None,
     ) -> None:
         """2층: 세션 net delta와 어긋난 과잉 청구 교정."""
         for zone, b in baskets.items():
+            if zone in (protected_zones or ()):
+                continue
             tol = _profile(profiles, zone, default_profile).tolerance_grams
             net = sum(e.delta_weight for e in events if e.zone == zone)
             net += (net_adjustments or {}).get(zone, 0.0)
@@ -540,6 +635,7 @@ class CloseSettler:
         default_profile: SensorProfile = REFRIGERATOR,
         *,
         net_adjustments: Mapping[int, float] | None = None,
+        protected_zones: set[int] | None = None,
     ) -> None:
         """4층: freezer 부호있는 net basket 재solve (불안정 close 대비, QA Q6)."""
         # 세션 스코프 콤보 자격 제외 재료 — zone 루프 밖에서 1회 계산.
@@ -553,6 +649,9 @@ class CloseSettler:
                 ghosts = detect_ghosts(events, self.ghost, self.cross_zone)
             backed_zones = self._backed_zones_by_class(events)
         for zone, b in list(baskets.items()):
+            if zone in (protected_zones or ()):
+                notes.append(f"zone{zone}:freezer_identity_ledger_preserved")
+                continue
             prof = _profile(profiles, zone, default_profile)
             if prof.weight_is_discriminative:
                 continue

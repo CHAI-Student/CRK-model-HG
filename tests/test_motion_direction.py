@@ -2,7 +2,12 @@
 import pytest
 
 from crk_model.perception.detector import Detection
-from crk_model.perception.motion_direction import YDirectionConfig, summarize_y_direction
+from crk_model.perception.motion_direction import (
+    MotionDirectionConfig,
+    YDirectionConfig,
+    summarize_direction,
+    summarize_y_direction,
+)
 from crk_model.perception.motion_evidence import MotionEvidence
 from crk_model.perception.voting import VotingEnsemble
 
@@ -89,3 +94,64 @@ def test_camera_directions_are_independent():
 def test_invalid_config_rejected(kwargs):
     with pytest.raises(ValueError):
         YDirectionConfig(**kwargs)
+
+
+@pytest.mark.parametrize("coords,sign,action,crossed", [
+    ([200, 230, 260], "increasing", "return", True),
+    ([270, 250, 220], "increasing", "take", True),
+    ([270, 250, 220], "decreasing", "return", True),
+    ([200, 230, 260], "decreasing", "take", True),
+    ([200, 220, 235], "increasing", "return", False),
+    ([245, 260, 280], "increasing", "return", False),
+])
+def test_boundary_crossing_respects_axis_direction_and_margin(coords, sign, action, crossed):
+    result = summarize_direction(list(enumerate(coords)), MotionDirectionConfig(
+        axis="x", return_direction=sign, boundary_px=240, boundary_margin_px=10,
+    ))
+    segment, = result["segments"]
+    assert segment["direction"] == action
+    assert segment["boundary_crossed"] is crossed
+    assert segment["start_x"] == coords[0] and segment["end_x"] == coords[-1]
+    assert "start_y" not in segment
+
+
+def test_oblique_side_has_independent_axis_sign_and_threshold():
+    ev = MotionEvidence(direction_configs={
+        "top": MotionDirectionConfig(boundary_px=240),
+        "side": MotionDirectionConfig(
+            axis="x", return_direction="decreasing", boundary_px=200, min_displacement_px=30,
+        ),
+    })
+    for pos, (top_y, side_x) in enumerate(zip([180, 220, 260], [240, 200, 160], strict=True)):
+        for camera, cx, cy in [("top", 100, top_y), ("side", side_x, 200)]:
+            ev.observe(camera, [Detection(1, .9, bbox=(cx-10, cy-10, cx+10, cy+10))], pos=pos)
+    summary = ev.summary()
+    top = summary["top"][1]["track_detail"][0]["y_direction"]
+    side = summary["side"][1]["track_detail"][0]["motion_direction"]
+    assert top["status"] == side["status"] == "return_candidate"
+    assert top["segments"][0]["boundary_crossed"] is True
+    assert side["segments"][0]["boundary_crossed"] is True
+    assert side["segments"][0]["delta_x"] == -80
+    assert side["axis"] == "x" and side["min_displacement_px"] == 30
+
+
+def test_per_camera_threshold_is_not_shared():
+    ev = MotionEvidence(direction_configs={
+        "top": MotionDirectionConfig(min_displacement_px=20),
+        "side": MotionDirectionConfig(min_displacement_px=30),
+    })
+    for pos, cy in enumerate([100, 112, 125]):
+        for camera in ("top", "side"):
+            ev.observe(camera, [Detection(1, .9, bbox=(50, cy-10, 70, cy+10))], pos=pos)
+    summary = ev.summary()
+    assert summary["top"][1]["track_detail"][0]["y_direction"]["status"] == "return_candidate"
+    assert summary["side"][1]["track_detail"][0]["y_direction"]["status"] == "unknown"
+
+
+@pytest.mark.parametrize("kwargs", [
+    {"axis": "z"}, {"return_direction": "up"}, {"boundary_px": 481},
+    {"boundary_px": float("nan")}, {"boundary_margin_px": -1},
+])
+def test_invalid_camera_geometry_rejected(kwargs):
+    with pytest.raises(ValueError):
+        MotionDirectionConfig(**kwargs)

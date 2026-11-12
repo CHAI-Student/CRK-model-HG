@@ -3,7 +3,8 @@
 
 경로 분기 (다이어그램 4):
 - I2: 빈 allowlist → 추론 차단 (YOLO 호출 0, fail-closed)
-- 저무게 스킵: |delta| < 프로파일 게이트 → vision 생략 (QA Q8)
+- 냉장 저무게 스킵: |delta| < 프로파일 게이트 → vision 생략 (QA Q8)
+- 냉동: 순무게 0도 영상 분석, 반납/왕복은 방향별 종류와 부호별 무게로 판정
 - 로드셀 신뢰 불가 → vision_only 강제 (원본 _should_force_vision_only)
 - I1: 처리 예외 → status="error" 이벤트로 전파 (무검출로 조용히 바꾸지 않음)
 - L2: 조기 종료 시 추론만 중단 (I15 가드는 EarlyTerminator 내부)
@@ -30,13 +31,14 @@ from crk_model.ingest.loadcell import (
     LoadcellAnalyzer,
     LoadcellSample,
 )
+from crk_model.judgment.freezer_actions import infer_freezer_action
 from crk_model.judgment.interfaces import JudgmentContext
 from crk_model.judgment.router import JudgmentRouter
-from crk_model.ledger.events import TriggerEvent
+from crk_model.ledger.events import FreezerAction, TriggerEvent
 from crk_model.perception.detector import HAND_CLASS_ID, Detector
 from crk_model.perception.early_termination import EarlyTerminator
 from crk_model.perception.filters import DetectionFilterChain
-from crk_model.perception.motion_direction import YDirectionConfig
+from crk_model.perception.motion_direction import MotionDirectionConfig
 from crk_model.perception.motion_evidence import MotionEvidence
 from crk_model.perception.voting import VotingEnsemble
 from crk_model.service.snapshot import ActiveProductStore, ProductSnapshot
@@ -107,6 +109,10 @@ class TriggerTrace:
     camera_crops: dict[str, str] | None = None
     # 냉동 final delta의 시작/종료 안정값. 불안정 판정의 사후 원인 확인용.
     loadcell_terminal_levels: list[dict] | None = None
+    directional_candidates: dict[str, tuple[VisionCandidate, ...]] = field(default_factory=dict)
+    uncertain_directions: list[str] = field(default_factory=list)
+    crossed_directions: list[str] = field(default_factory=list)
+    freezer_actions: tuple[FreezerAction, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -156,6 +162,8 @@ class TriggerPipeline:
         # motion_evidence.py unmeasurable_policy 참조. 기본 = 현행 몰수.
         motion_measurable_min_obs: int = 3,
         # 측정 자격 최소 관측 수 (MODEL__VISION__MOTION_MEASURABLE_MIN_OBS).
+        freezer_direction_configs: Mapping[str, MotionDirectionConfig] | None = None,
+        # 냉동 top/경사 side별 동작 축·반납 방향·경계. None이면 기존 Y 기본값.
         held_track_min_head: int = 5,
         # T2 held 트랙 판정의 head 임계 (MotionEvidence.held_min_head 주입,
         # MODEL__VISION__HELD_TRACK_MIN_HEAD). 강등 모드 자체는 voting_params
@@ -208,6 +216,10 @@ class TriggerPipeline:
         self._motion_evidence_floor = motion_evidence_floor_px
         self._motion_unmeasurable = motion_unmeasurable_policy
         self._motion_measurable_min_obs = motion_measurable_min_obs
+        self._freezer_direction_configs = (
+            dict(freezer_direction_configs) if freezer_direction_configs is not None
+            else {"top": MotionDirectionConfig(), "side": MotionDirectionConfig()}
+        )
         self._held_min_head = held_track_min_head
         self._save_detections = save_detections
         self._camera_crops = dict(camera_crops) if camera_crops else None
@@ -280,7 +292,8 @@ class TriggerPipeline:
         if analysis.reason == "final_delta_unstable":
             trace.reason_codes.append("loadcell_final_delta_unstable")
         delta = analysis.delta_weight
-        if not vision_only and abs(delta) < profile.min_weight_change_grams:
+        if (profile.weight_is_discriminative and not vision_only
+                and abs(delta) < profile.min_weight_change_grams):
             # 저무게 스킵: vision 전체 생략 = YOLO 호출 0 (QA Q8)
             trace.reason_codes.append("low_weight_skip")
             judgment = JudgmentResult(
@@ -291,6 +304,39 @@ class TriggerPipeline:
             return self._outcome(session_id, req, delta, analysis.segments, judgment, trace)
 
         candidates = self._run_vision(req, profile, snapshot, delta, trace)
+        if not profile.weight_is_discriminative:
+            actions = self._judge_freezer_actions(analysis, profile, snapshot, trace)
+            if actions is not None:
+                trace.freezer_actions = actions
+                counts = {}
+                for action in actions:
+                    if action.delta_weight < 0:
+                        for pc in action.judgment.products:
+                            old = counts.get(pc.product.product_id)
+                            counts[pc.product.product_id] = ProductCount(
+                                pc.product, pc.count + (old.count if old else 0)
+                            )
+                complete = bool(actions) and all(
+                    a.judgment.status is JudgmentStatus.COMPLETE for a in actions
+                )
+                judgment = JudgmentResult(
+                    JudgmentStatus.COMPLETE if complete else JudgmentStatus.PARTIAL,
+                    tuple(counts.values()),
+                    min((a.judgment.confidence for a in actions), default=0.0),
+                    reason="freezer_actions" if complete else "freezer_actions_need_review",
+                    strategy="freezer_action",
+                )
+                return self._outcome(
+                    session_id, req, delta, analysis.segments, judgment, trace, candidates
+                )
+            if not vision_only and abs(delta) < profile.min_weight_change_grams:
+                judgment = JudgmentResult(
+                    JudgmentStatus.NO_DETECTION, reason="below_min_weight_change",
+                    strategy="freezer_no_action",
+                )
+                return self._outcome(
+                    session_id, req, delta, analysis.segments, judgment, trace, candidates
+                )
         ctx = JudgmentContext(
             zone=req.zone,
             profile=profile,
@@ -311,6 +357,73 @@ class TriggerPipeline:
         return self._outcome(
             session_id, req, delta, analysis.segments, judgment, trace, candidates
         )
+
+    def _judge_freezer_actions(self, analysis, profile, snapshot, trace):
+        """단일 반납 및 취출→반납/반납→취출의 분리된 행동을 판정한다.
+
+        순무게만 남은 복잡한 왕복은 수량을 지어내지 않고 검토 대상으로 보존한다.
+        기존 단방향 취출은 검증된 라우터 경로를 유지한다.
+        """
+        delta = analysis.delta_weight
+        groups: list[float] = []
+        previous = None
+        overlapping = False
+        for segment in sorted(analysis.segments, key=lambda s: s.start_ts):
+            weight = segment.delta_grams
+            if abs(weight) < profile.min_weight_change_grams:
+                continue
+            if (previous is not None and previous.delta_grams * weight < 0
+                    and previous.end_ts > segment.start_ts):
+                overlapping = True
+            if groups and groups[-1] * weight > 0:
+                groups[-1] += weight
+            else:
+                groups.append(weight)
+            previous = segment
+        mixed = any(w < 0 for w in groups) and any(w > 0 for w in groups)
+        crossed = set(trace.crossed_directions)
+
+        def unknown(reason):
+            trace.reason_codes.append(reason)
+            return (FreezerAction(delta, JudgmentResult(
+                JudgmentStatus.NO_DETECTION, reason=reason, strategy="freezer_action"
+            )),)
+
+        if mixed:
+            if (not analysis.stabilized or len(groups) != 2 or overlapping
+                    or abs(sum(groups) - delta) > profile.count_gate
+                    or crossed != {"take", "return"}):
+                return unknown("freezer_mixed_actions_unresolved")
+            weights = groups
+        elif crossed == {"take", "return"}:
+            return unknown("freezer_mixed_actions_missing_weight_segments")
+        elif delta >= profile.min_weight_change_grams:
+            if not analysis.stabilized:
+                return unknown("freezer_return_not_stabilized")
+            weights = [delta]
+        elif abs(delta) < profile.min_weight_change_grams and crossed:
+            return unknown("freezer_action_missing_weight_segments")
+        elif (delta < 0 and "take" in crossed
+              and len(trace.directional_candidates.get("take", ())) > 1):
+            if not analysis.stabilized:
+                return unknown("freezer_take_not_stabilized")
+            weights = [delta]
+        else:
+            return None
+        actions = []
+        for weight in weights:
+            direction = "return" if weight > 0 else "take"
+            candidates = (
+                trace.directional_candidates.get(direction, ())
+                if direction not in trace.uncertain_directions else ()
+            )
+            judgment = infer_freezer_action(
+                weight, candidates, snapshot.products, profile,
+                count_unit_slack=self._router.count_unit_slack,
+            )
+            trace.reason_codes.append(judgment.reason)
+            actions.append(FreezerAction(weight, judgment))
+        return tuple(actions)
 
     def _judge_tray_events(
         self,
@@ -645,8 +758,9 @@ class TriggerPipeline:
                 held_min_head=self._held_min_head,
                 unmeasurable_policy=self._motion_unmeasurable,
                 measurable_min_obs=self._motion_measurable_min_obs,
-                direction_config=(
-                    YDirectionConfig() if not profile.weight_is_discriminative else None
+                direction_configs=(
+                    self._freezer_direction_configs if not profile.weight_is_discriminative
+                    else None
                 ),
             )
             voting.attach_motion_evidence(evidence)
@@ -859,6 +973,23 @@ class TriggerPipeline:
             # 분모 의미가 바뀐 세션임을 아카이브에 명시 — 과거 세션과
             # vote_ratio를 섞어 비교할 때의 단일 정의(함정 #4) 보호.
             trace.vote_summary["ratio_denominator"] = voting.ratio_denominator
+        if evidence is not None and not profile.weight_is_discriminative:
+            frames, uncertain, crossed = evidence.action_frames({
+                camera: self._voting_params.get(f"entry_conf_{camera}", 0.0)
+                for camera in CAMERAS
+            })
+            for direction, observations in frames.items():
+                action_voting = VotingEnsemble(**self._voting_params)
+                for (camera, pos), detections in sorted(observations.items()):
+                    action_voting.add_frame(camera, detections, pos=pos)
+                trace.directional_candidates[direction] = action_voting.combine()
+                observed_ids = {d.class_id for detections in observations.values()
+                                for d in detections}
+                accepted_ids = {c.class_id for c in trace.directional_candidates[direction]}
+                if observed_ids - accepted_ids:
+                    uncertain.add(direction)
+            trace.uncertain_directions = sorted(uncertain)
+            trace.crossed_directions = sorted(crossed)
         return voting.combine()
 
     def _record_frame_detections(
@@ -911,5 +1042,6 @@ class TriggerPipeline:
             vision_candidates=tuple(candidates),
             video_paths=tuple(req.video_paths.items()),
             change_timestamps=tuple(req.change_timestamps),
+            freezer_actions=trace.freezer_actions,
         )
         return TriggerOutcome(event, trace)

@@ -190,10 +190,10 @@ class Settings:
     # (원본 엔진 좌표계 복원)을 쓴다. top 카메라는 항상 center.
     side_camera_crop: str = "center"
     # ---- 수직 ROI (원본 정합 웨이브 2 — perf-gap P1-5 이식) ----
-    # camera_layout: "dual"(top+side, 기본) | "dual_top_proxy"(냉동 실기 —
-    #   side 스트림도 top 뷰). dual_top_proxy + cabinet_type=freezer면 두
-    #   카메라 모두 freezer 수직 ROI(기본 상단 절반)를 적용하고 side x-ROI는
-    #   생략한다 (원본 _uses_freezer_dual_top_profile 동형).
+    # camera_layout: "dual"(top+side, 기본) | "dual_top_proxy"(냉동 상단+경사 side).
+    #   dual_top_proxy + cabinet_type=freezer면 freezer 수직 ROI를 적용한다.
+    #   기본은 공통 경계를 쓰며 side 경계만 별도로 보정 가능. side 수직 ROI가 켜져
+    #   있으면 side x-ROI는 생략한다.
     # freezer_roi_vertical_region/y_split: 유지할 절반과 분할선 (center-crop
     #   480×480 좌표계 — y_split은 세로축이라 crop 원점 이동(가로) 영향 없음).
     #   원본 운영값은 upper/240이었으나 300으로 상향(2026-07-24, 사용자 결정).
@@ -204,6 +204,15 @@ class Settings:
     camera_layout: str = "dual"
     freezer_roi_vertical_region: str = "upper"
     freezer_roi_y_split: float = 300.0
+    # 경사 side의 검출 영역만 별도 보정. None이면 위 공통 Y 경계 사용.
+    freezer_side_roi_y_split: float | None = None
+    # top은 기존 Y축/증가=반납/20px 기본값. 경사 side만 시점에 맞춰 보정.
+    # ROI와 별개인 행동 경계. 지정하면 통과한 구간만 반납 상품 판정에 사용한다.
+    freezer_side_direction_axis: str = "y"
+    freezer_side_return_direction: str = "increasing"
+    freezer_side_direction_min_displacement_px: float = 20.0
+    freezer_top_return_boundary_px: float | None = None
+    freezer_side_return_boundary_px: float | None = None
     top_roi_enabled: bool = False
     top_roi_y_split: float = 240.0
     # 손 검출 conf 하한 (perf-gap P1-7): 유령 손의 래치·궤적 오염 차단.
@@ -211,8 +220,8 @@ class Settings:
     hand_confidence_threshold: float = 0.30
     # side 카메라 hand 추론 (이슈 #18): side allowlist에 hand(0) 포함 —
     # side에서도 래치(I16)·hand_path 손 근접 게이팅이 작동해 정지 진열
-    # 오투표를 거른다. 원본에 없는 신설 동작이라 기본 off. dual_top_proxy
-    # (냉동)에서는 side 스트림이 top 뷰라 의미가 다르니 냉장 전용으로 켤 것.
+    # 오투표를 거른다. 기본 off. 냉동 경사 side에서도 켤 수 있으나 손 검출이
+    # 기존 hand_path 필터까지 활성화하므로 실영상으로 손 근접 누락을 확인한다.
     side_hand_enabled: bool = False
     # side 전용 손 conf 하한. side는 손 1건이 hand_path를 무장시키는
     # 방아쇠라 top보다 조일 수 있게 분리. 음수(기본) = hand_confidence_
@@ -417,6 +426,25 @@ class Settings:
                 ("upper", "lower", "off"),
             ),
             freezer_roi_y_split=_env_float("MODEL__VISION__FREEZER_ROI_Y_SPLIT", 300.0),
+            freezer_side_roi_y_split=_env_opt_float(
+                "MODEL__VISION__FREEZER_SIDE_ROI_Y_SPLIT"
+            ),
+            freezer_side_direction_axis=_env_choice(
+                "MODEL__VISION__FREEZER_SIDE_DIRECTION_AXIS", "y", ("x", "y")
+            ),
+            freezer_side_return_direction=_env_choice(
+                "MODEL__VISION__FREEZER_SIDE_RETURN_DIRECTION",
+                "increasing", ("increasing", "decreasing"),
+            ),
+            freezer_side_direction_min_displacement_px=_env_float(
+                "MODEL__VISION__FREEZER_SIDE_DIRECTION_MIN_DISPLACEMENT_PX", 20.0
+            ),
+            freezer_top_return_boundary_px=_env_opt_float(
+                "MODEL__VISION__FREEZER_TOP_RETURN_BOUNDARY_PX"
+            ),
+            freezer_side_return_boundary_px=_env_opt_float(
+                "MODEL__VISION__FREEZER_SIDE_RETURN_BOUNDARY_PX"
+            ),
             top_roi_enabled=_env_bool("MODEL__VISION__TOP_ROI_ENABLED", False),
             top_roi_y_split=_env_float("MODEL__VISION__TOP_ROI_Y_SPLIT", 240.0),
             hand_confidence_threshold=_env_float(

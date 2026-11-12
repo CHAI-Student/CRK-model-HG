@@ -29,7 +29,6 @@ from crk_model.core.profiles import SensorProfile
 from crk_model.core.types import WeightSegment
 from crk_model.ingest.loadcell import (
     ChannelWeightEvent,
-    ChannelTerminalLevel,
     LoadcellAnalysis,
     LoadcellSample,
     terminal_levels,
@@ -198,6 +197,11 @@ class BocpdLoadcellAnalyzer:
             moved_channels = [
                 channel for channel in res.channels
                 if channel.delta <= -min_change
+                or (not self._profile.weight_is_discriminative
+                    and abs(channel.delta) < min_change and any(
+                    abs(cur.level - prev.level) >= step
+                    for prev, cur in zip(channel.segments, channel.segments[1:], strict=False)
+                ))
             ]
             unstable = [
                 channel.channel for channel in moved_channels
@@ -243,9 +247,21 @@ class BocpdLoadcellAnalyzer:
             ):
                 level = terminal_by_channel[c.channel]
                 delta = level.end_median - c.segments[0].level
-            if abs(delta) < min_change:
+            segs = tuple(
+                WeightSegment(
+                    samples[prev.end].ts, samples[cur.start].ts, cur.level - prev.level
+                )
+                for prev, cur in zip(c.segments, c.segments[1:], strict=False)
+                if abs(cur.level - prev.level) >= step
+            )
+            if abs(delta) < min_change and (
+                self._profile.weight_is_discriminative or not segs
+            ):
                 continue  # 평탄/노이즈 트레이 — baseline에만 기여
-            if delta > 0:
+            if delta > 0 or (
+                not self._profile.weight_is_discriminative
+                and any(s.delta_grams > 0 for s in segs)
+            ):
                 # 반품 안정화 대기 (QA Q3 ①): 마지막 레벨이 충분히 지속돼야
                 # 구간화 — plateau 경로와 동일 계약.
                 last = c.segments[-1]
@@ -254,13 +270,6 @@ class BocpdLoadcellAnalyzer:
                     pending = True
                     pending_delta += delta
                     continue
-            segs = tuple(
-                WeightSegment(
-                    samples[prev.end].ts, samples[cur.start].ts, cur.level - prev.level
-                )
-                for prev, cur in zip(c.segments, c.segments[1:], strict=False)
-                if abs(cur.level - prev.level) >= step
-            )
             events.append(ChannelWeightEvent(c.channel, delta, segs))
         if pending:
             delta = pending_delta + sum(e.delta_grams for e in events)

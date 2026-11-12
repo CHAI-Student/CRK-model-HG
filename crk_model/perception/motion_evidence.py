@@ -32,22 +32,23 @@ baseline은 손 신호에 의존해 top(프리롤에 이미 손)에서는 무력
   판단 근거). pos는 voting.add_frame과 동일한 "게이트 스킵 포함 디코드
   위치" — head_obs는 표가 아니라 관측 수 기준이다 (entry_conf 미달 저신뢰
   검출도 트랙은 이으므로, held 트랙의 프리롤 존재를 표보다 빠짐없이 센다).
-- 튜브 층 (진단 전용): 클래스-조건 트랙과 **병행**으로 클래스 무관 튜브
+- 튜브 층: 클래스-조건 트랙과 **병행**으로 클래스 무관 튜브
   (_Tube)를 연관해 관측 클래스 히스토그램을 쌓는다. tube_minority()가
   "한 궤적 위에서 깜빡인 결정적 소수 클래스"(의류 산탄의 시그니처)를
   판정하고, voting.tube_summary()가 이를 아카이브 계측으로만 싣는다 —
   이 판정으로 표를 몰수하던 경로(구 `TUBE_IDENTITY=active`)는 냉동 실측
   열세로 폐기됐다 (docs/07-rejected-and-retired.md). 트랙 상태의 단일
-  소유자는 이 모듈이다.
+  소유자는 이 모듈이다. 냉동 action_frames()는 별도로 저장한 방향 구간의
+  관측에서 종류 우세를 확인해 행동별 후보를 만든다. 기존 표 몰수 경로와 분리한다.
 """
 from __future__ import annotations
 
 from collections import defaultdict
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 
 from crk_model.perception.detector import Detection
-from crk_model.perception.motion_direction import YDirectionConfig, summarize_y_direction
+from crk_model.perception.motion_direction import MotionDirectionConfig, summarize_direction
 
 _ZERO_BBOX = (0.0, 0.0, 0.0, 0.0)
 
@@ -71,7 +72,7 @@ class _Track:
     last_pos: int = -1
     head_obs: int = 0  # pos < head_frames 관측 수
     head_path: float = 0.0  # head 구간 내 누적 이동 (held 오인 방지 — 10차)
-    y_observations: list[tuple[int, float]] = field(default_factory=list)
+    axis_observations: list[tuple[int, float]] = field(default_factory=list)
 
     def observe(self, cx: float, cy: float, size: float, frame_idx: int) -> float:
         step = ((cx - self.last_cx) ** 2 + (cy - self.last_cy) ** 2) ** 0.5
@@ -106,6 +107,8 @@ class _Tube:
     n: int = 0
     matched_frame: int = -1
     class_counts: dict[int, int] = field(default_factory=dict)
+    # 냉동 행동 판정용 원본 관측. 클래스 플리커를 같은 물체의 투표로 묶는다.
+    observations: list[tuple[int, Detection]] = field(default_factory=list)
 
 
 @dataclass
@@ -144,9 +147,11 @@ class MotionEvidence:
     # "측정했더니 정지"(장수 트랙, path≈0 = 진열)는 계속 몰수된다.
     unmeasurable_policy: str = "forfeit"
     measurable_min_obs: int = 3
-    # None이면 관측을 저장하지 않는다. 냉동 pipeline만 진단 설정을 주입하며,
-    # 방향은 기존 모션 통과/held/투표/판정에 사용하지 않는다.
-    direction_config: YDirectionConfig | None = None
+    # None이면 방향 관측을 저장하지 않는다. 냉동 pipeline이 설정을 주입하며,
+    # 기존 모션 투표와 별도로 행동별 영상 후보를 만든다(action_frames).
+    direction_config: MotionDirectionConfig | None = None
+    # None이면 공통 설정. 명시한 매핑에서는 지정된 카메라만 진단한다.
+    direction_configs: Mapping[str, MotionDirectionConfig] | None = None
     _tracks: dict[tuple[str, int], list[_Track]] = field(
         default_factory=lambda: defaultdict(list)
     )
@@ -185,6 +190,7 @@ class MotionEvidence:
         T1 트랙별 위치 계측 입력. None이면 계측 생략 (하위호환)."""
         idx = self._frame_idx[camera]
         self._frame_idx[camera] = idx + 1
+        direction_config = self._direction_config(camera)
         ids: list[int | None] = []
         for d in detections:
             if d.is_hand:
@@ -221,11 +227,14 @@ class MotionEvidence:
                 self._next_tid += 1
                 tracks.append(best)
             step = best.observe(cx, cy, size, idx)
-            if self.direction_config is not None:
-                best.y_observations.append((pos if pos is not None else idx, cy))
+            if direction_config is not None:
+                coordinate = cx if direction_config.axis == "x" else cy
+                best.axis_observations.append((pos if pos is not None else idx, coordinate))
             # T2' 튜브 귀속 (클래스 무관) — 트랙과 병행. 귀속은 마지막 관측
             # 기준(한 트랙이 튜브를 갈아타는 드문 경우 최신이 이긴다).
             tube = self._observe_tube(camera, cx, cy, size, idx, d.class_id)
+            if direction_config is not None:
+                tube.observations.append((pos if pos is not None else idx, d))
             self._tube_of_tid[best.tid] = tube.aid
             if pos is not None:
                 if best.first_pos < 0:
@@ -384,6 +393,70 @@ class MotionEvidence:
             camera, class_id
         )
 
+    def _direction_config(self, camera: str) -> MotionDirectionConfig | None:
+        if self.direction_configs is not None:
+            return self.direction_configs.get(camera)
+        return self.direction_config
+
+    def action_frames(self, entry_conf: Mapping[str, float]) -> tuple[dict, set, set]:
+        """방향 구간별 투표 재료/불확실 방향/경계 통과 방향. 진단 상한 미적용.
+
+        한 튜브의 종류가 2:1 이상 우세하고 3회 이상 관측돼야 정체성 증거다.
+        경계가 설정된 카메라는 실제 통과를 요구한다. 경계 없는 side도 무게가
+        증언한 반납을 보조하지만, 순변화 0인 교환은 별도 경계 증거를 요구한다.
+        """
+        frames: dict[str, dict[tuple[str, int], list[Detection]]] = {
+            "take": defaultdict(list), "return": defaultdict(list),
+        }
+        uncertain: set[str] = set()
+        crossed: set[str] = set()
+        for camera, tubes in self._tubes.items():
+            config = self._direction_config(camera)
+            if config is None:
+                continue
+            for tube in tubes:
+                points = [(pos, d) for pos, d in tube.observations
+                          if d.confidence >= entry_conf.get(camera, 0.0)]
+                by_pos: dict[int, Detection] = {}
+                for pos, d in points:
+                    if pos not in by_pos or d.confidence > by_pos[pos].confidence:
+                        by_pos[pos] = d
+                axis = 0 if config.axis == "x" else 1
+                coords = [(pos, (d.bbox[axis] + d.bbox[axis + 2]) / 2)
+                          for pos, d in sorted(by_pos.items())]
+                segments = summarize_direction(coords, config, segment_limit=None)["segments"]
+                for segment in segments:
+                    action = segment["direction"]
+                    if segment["boundary_crossed"] is False:
+                        continue
+                    if segment["boundary_crossed"] is True:
+                        crossed.add(action)
+                    window = [(pos, d) for pos, d in points
+                              if segment["first"] <= pos <= segment["last"]]
+                    votes: dict[int, set[int]] = defaultdict(set)
+                    for pos, d in window:
+                        votes[d.class_id].add(pos)
+                    ranked = sorted(votes, key=lambda cid: -len(votes[cid]))
+                    winner = ranked[0]
+                    if len(votes[winner]) < config.min_observations or (
+                        len(ranked) > 1 and len(votes[winner]) < 2 * len(votes[ranked[1]])
+                    ):
+                        uncertain.add(action)
+                        continue
+                    for pos, d in window:
+                        if d.class_id == winner:
+                            frames[action][camera, pos].append(d)
+        # 두 시점이 서로 다른 종류만 주장하면 두 상품으로 합치지 않는다.
+        for action, observations in frames.items():
+            classes: dict[str, set[int]] = defaultdict(set)
+            for (camera, _pos), detections in observations.items():
+                classes[camera].update(d.class_id for d in detections)
+            if classes.get("top") and classes.get("side"):
+                a, b = classes["top"], classes["side"]
+                if not (a <= b or b <= a):
+                    uncertain.add(action)
+        return frames, uncertain, crossed
+
     def summary(self) -> dict:
         """vote_summary 진단용 — 카메라×클래스별 통과 여부와 최대 경로/임계.
 
@@ -411,10 +484,12 @@ class MotionEvidence:
                 }
                 for t in detail_tracks
             ]
-            if self.direction_config is not None:
+            config = self._direction_config(camera)
+            if config is not None:
                 for entry, track in zip(detail, detail_tracks, strict=True):
-                    entry["y_direction"] = summarize_y_direction(
-                        track.y_observations, self.direction_config
+                    # Y축 기존 아카이브 키는 보존. X축은 오해 없이 일반 키로 기록.
+                    entry["y_direction" if config.axis == "y" else "motion_direction"] = (
+                        summarize_direction(track.axis_observations, config)
                     )
             entry = {
                 "passed": self.class_motion(camera, cid),

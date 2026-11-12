@@ -28,7 +28,23 @@ from crk_model.core.types import (
     VisionCandidate,
     WeightSegment,
 )
-from crk_model.ledger.events import TriggerEvent
+from crk_model.ledger.events import FreezerAction, TriggerEvent
+
+
+def _judgment_from_dict(j: dict) -> JudgmentResult:
+    return JudgmentResult(
+        status=JudgmentStatus(j["status"]),
+        products=tuple(ProductCount(ActiveProduct(**pc["product"]), pc["count"])
+                       for pc in j["products"]),
+        confidence=j["confidence"], reason=j["reason"], strategy=j["strategy"],
+    )
+
+
+def action_to_dict(action: FreezerAction) -> dict:
+    """저널과 YAML 아카이브가 공유하는 행동 직렬화. Enum은 문자열로 보존."""
+    out = asdict(action)
+    out["judgment"]["status"] = action.judgment.status.value
+    return out
 
 
 def event_to_dict(e: TriggerEvent) -> dict:
@@ -56,21 +72,15 @@ def event_to_dict(e: TriggerEvent) -> dict:
         # 0711 교차존 오염 (Phase 1 계측): 서브이벤트 앵커 — 저널 replay로
         # 타 존 오염 창 겹침 빈도를 사후 정량화하는 근거.
         "change_timestamps": list(e.change_timestamps),
+        "freezer_actions": (
+            [action_to_dict(a) for a in e.freezer_actions]
+            if e.freezer_actions is not None else None
+        ),
     }
 
 
 def event_from_dict(d: dict) -> TriggerEvent:
-    j = d["judgment"]
-    judgment = JudgmentResult(
-        status=JudgmentStatus(j["status"]),
-        products=tuple(
-            ProductCount(ActiveProduct(**pc["product"]), pc["count"])
-            for pc in j["products"]
-        ),
-        confidence=j["confidence"],
-        reason=j["reason"],
-        strategy=j["strategy"],
-    )
+    judgment = _judgment_from_dict(d["judgment"])
     return TriggerEvent(
         session_id=d["session_id"],
         zone=d["zone"],
@@ -86,6 +96,11 @@ def event_from_dict(d: dict) -> TriggerEvent:
         ),
         video_paths=tuple(d.get("video_paths", {}).items()),
         change_timestamps=tuple(d.get("change_timestamps", ())),
+        freezer_actions=(
+            tuple(FreezerAction(a["delta_weight"], _judgment_from_dict(a["judgment"]))
+                  for a in d["freezer_actions"])
+            if d.get("freezer_actions") is not None else None
+        ),
     )
 
 

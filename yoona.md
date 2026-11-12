@@ -1346,3 +1346,180 @@ MODEL__SESSION__SAVE_DETECTIONS=1
 현재 저장소에는 실영상/세션 아카이브가 없어 실제 동작 검증과 임계 보정은 아직
 수행하지 않았다. 새 코드의 진단이 없는 과거 로그는 원본 영상·프레임 검출 등
 보유 자료를 먼저 확인한 후 별도 재생 범위를 정한다.
+
+---
+
+# 2026-11-12 냉동 상단 top + 45도 경사 side의 시점별 설정
+
+아래는 최초 분리 구현 기록이다. env 항목의 최종 목록은 뒤의 "설정 간소화"를 따른다.
+
+냉동 side는 맨 상단 top 카메라의 바로 옆에서 약 45도 각도로 같은 동작을
+촬영한다는 장착 정보를 반영했다. 기존에도 side 상품은 추론했지만 두 영상에
+동일한 Y 이동 방향·20px 임계·공통 ROI를 적용했다. 이제 카메라별로 설정한다.
+장착 각도 45도로부터 영상 좌표의 45도 회전을 추정하거나 강제 보정하지 않는다.
+
+## 동작 방향과 반납 경계
+
+`MODEL__VISION__FREEZER_TOP_*`와 `MODEL__VISION__FREEZER_SIDE_*`에 다음 항목을 추가했다.
+
+| 항목 | 기본값 | 의미 |
+|---|---|---|
+| `DIRECTION_AXIS` | `y` | bbox 중심에서 분석할 축 `x` 또는 `y` |
+| `RETURN_DIRECTION` | `increasing` | 선택 좌표가 증가하면 반납 후보. `decreasing`이면 반대로 해석 |
+| `DIRECTION_MIN_DISPLACEMENT_PX` | `20.0` | 해당 시점의 최소 이동량 |
+| `RETURN_BOUNDARY_PX` | 미설정 | 해당 시점의 선택 축에서 동작 경계 통과 진단 |
+
+공통 `MODEL__VISION__FREEZER_DIRECTION_MIN_OBSERVATIONS=3`과
+`MODEL__VISION__FREEZER_DIRECTION_BOUNDARY_MARGIN_PX=10.0`도 추가했다.
+예를 들어 경계240/여유10/반납 increasing이면 중심 좌표가 230 이하에서
+250 이상으로 이동한 구간에 `boundary_crossed=true`가 기록된다.
+반대로 이동하면 취출 통과다. 경계 미설정은 통과 여부 `null`이며 방향 관측은 계속한다.
+방향 후보는 충분히 움직였으면 경계 미통과(`false`)여도 기록될 수 있다.
+
+새 냉동 예시는 top 경계를 `240.0`으로 두고 side 경계는 빈 값으로 남겼다.
+240은 초기 검증 후보이며 실측으로 확정한 값이 아니다. side 영상에서 동일한
+반납이 Y 감소로 보이면 `SIDE_RETURN_DIRECTION=decreasing`으로 조정하고,
+주 이동이 X축일 때만 `SIDE_DIRECTION_AXIS=x`를 쓴다. 장착 각도만 보고 선택하지 않는다.
+
+방향/경계 진단은 투표·상품 판정·반납 정산·결제 수량에 사용하지 않는다.
+기존 무게 기반 반납 상쇄는 계속 사용한다. 다품종의 유사 무게 문제와 손·상품
+동행/놓임을 이용한 반납 확정은 이 변경으로 해결됐다고 간주하지 않는다.
+
+## 시점별 ROI
+
+`FREEZER_TOP_ROI_VERTICAL_REGION`, `FREEZER_SIDE_ROI_VERTICAL_REGION`과
+각각의 `ROI_Y_SPLIT`을 추가했다. 모두 `MODEL__VISION__` 접두사를 붙인다.
+기본 `inherit`/빈 값이면 기존 공통 `FREEZER_ROI_VERTICAL_REGION=upper`,
+`FREEZER_ROI_Y_SPLIT=350.0`을 상속한다. 따라서 새 override를 설정하지 않으면
+상품 검출을 남기는 영역은 기존과 같다.
+
+카메라별 region은 `upper/lower/off`로 바꿀 수 있다. side 수직 ROI가 켜져
+있으면 기존처럼 side X ROI는 생략한다. side 수직 ROI를 off로 바꾸면
+`SIDE_ROI_MAX_CENTER_X`가 다시 적용된다(냉동 예시값 480).
+이 기능은 냉동 `dual_top_proxy`에서만 적용하며 냉장 ROI 경로는 유지한다.
+
+**ROI 경계는 검출을 제거하고, RETURN_BOUNDARY는 이동 구간을 진단한다.**
+ROI를 좁히면 방향 분석 전에 필요한 궤적이 사라질 수 있으므로 각각 조정해야 한다.
+
+## side 손 추론과 기록
+
+냉동 예시의 `MODEL__VISION__SIDE_HAND_ENABLED=1`로 side에서도 손을 추론한다.
+이 옵션은 기존 손 래치와 손 근접 `hand_path` 필터도 활성화하므로, 방향 진단과
+달리 검출 후보/판정에 영향을 줄 수 있다. 손 가림·오검출 시 상품 누락 여부를
+영상으로 확인하고 필요하면 `0`으로 되돌린다. 코드의 기본값은 기존 `False`다.
+
+Y축 기록은 기존 `track_detail[].y_direction`을 유지하고, X축은
+`track_detail[].motion_direction`에 기록한다. `analyze-sessions` 기본 출력은
+선택 축·반납 방향·경계·구간 변위·경계 통과를 표시한다. JSON 리포트의
+`y_direction.records` 키는 기존 소비자 호환을 위해 유지하며 내부 `axis`로 X/Y를 구분한다.
+양쪽 시점의 관측은 물리 상품 개수로 사용하지 않는다.
+
+## 검증
+
+합성 장면에서 top의 Y 증가와 side의 X 감소를 같은 반납 후보로 인식하고,
+각 경계를 통과하는지 확인했다. env → Settings → ModelService → 필터/트랙
+전체 배선, 양 카메라 추론과 side 손 기록, 시점별 ROI/임계/방향, 경계 여유,
+냉장 경로 보존, 잘못된 설정 기동 실패, 방향 설정 변경의 판정 무영향을 검증했다.
+
+```text
+534 passed, 24 skipped
+변경 코드 ruff 검사 통과
+git diff --check 통과
+```
+
+실제 장치 영상으로 side 축·반납 방향·경계·ROI를 보정한 결과는 아니다.
+장치 배포와 원격 실행은 수행하지 않았다.
+
+## 설정 간소화 — 기존 ROI와 반납 경계 구분
+
+카메라 보정용 신규 env를 14개에서 6개로 줄였다. 각 항목 바로 위에 적용 시점,
+축·단위, 빈 값 의미와 예시를 주석으로 적었다. 기존 설정과의 차이는 다음과 같다.
+
+| 변수 | 하는 일 | 현재 냉동 예시에서 적용 |
+|---|---|---|
+| `FREEZER_ROI_Y_SPLIT` | 냉동 상품 검출의 공통 Y 영역 제한 | upper/350으로 top·side의 중심 Y ≤ 350 유지 |
+| `TOP_ROI_Y_SPLIT` | TOP_ROI_ENABLED이고 무게 변화가 0이 아닐 때 top 중심 Y ≥ 경계만 유지 | TOP ROI가 꺼져 있고 냉동 ROI가 우선하므로 미사용 |
+| `SIDE_ROI_MAX_CENTER_X` | side 중심 X ≥ 경계인 상품 검출 제외 | 냉동 side 수직 ROI가 켜져 있어 미사용. 수직 ROI off 시 대체값480 유지 |
+| 새 `FREEZER_SIDE_ROI_Y_SPLIT` | side 검출 Y 경계만 따로 보정 | 빈 값이면 공통350 사용 |
+| 새 `FREEZER_*_RETURN_BOUNDARY_PX` | 추적 구간의 반납/취출 경계 통과 진단 | 검출을 제거하지 않으며 결제에도 미사용 |
+
+모든 변수에는 `MODEL__VISION__` 접두사가 붙는다.
+
+남긴 신규 설정:
+
+```text
+FREEZER_SIDE_ROI_Y_SPLIT
+FREEZER_SIDE_DIRECTION_AXIS
+FREEZER_SIDE_RETURN_DIRECTION
+FREEZER_SIDE_DIRECTION_MIN_DISPLACEMENT_PX
+FREEZER_TOP_RETURN_BOUNDARY_PX
+FREEZER_SIDE_RETURN_BOUNDARY_PX
+```
+
+제거한 신규 env 8개는 top/side 각각의 `ROI_VERTICAL_REGION`, top의 `ROI_Y_SPLIT`,
+top의 `DIRECTION_AXIS`·`RETURN_DIRECTION`·`DIRECTION_MIN_DISPLACEMENT_PX`, 공통
+`FREEZER_DIRECTION_MIN_OBSERVATIONS`·`FREEZER_DIRECTION_BOUNDARY_MARGIN_PX`다.
+env 로더·Settings·서비스 배선에서도 제거했다. top은 기존 공통 ROI와 Y축 증가=반납,
+최소 이동20px를 사용한다. 3회 관측과 경계 여유10px는 `MotionDirectionConfig`의
+코드 기본값으로 관리한다. side ROI 유지 방향은 기존 공통 upper/lower/off를 사용한다.
+
+냉동 예시에서 꺼져 있어 사용하지 않는 `TOP_ROI_Y_SPLIT` 할당도 제거했다.
+기존 TOP ROI 기능과 냉장 `.env.example`의 해당 변수는 유지했다. side X ROI는
+냉동 수직 ROI off 시의 기존 대체 동작을 보존하기 위해 예시값480을 유지했다.
+예시만 바꿔도 기기 설정이 바뀌지는 않으므로, 기존 기기 `.env`에 제거한 신규
+변수가 있다면 함께 정리해야 한다.
+
+간소화 후 전체 검증은 `532 passed, 24 skipped`다. 제거한 env 항목의 검증 사례를
+정리했고, 코드의 방향/경계 검증은 유지했다. 냉장·냉동 env 예시를 각각 읽어
+서비스가 초기화되는지 확인했으며, side ROI만 200으로 바꾸면 top은 유지하고
+side만 해당 영역 검출을 제외하는 것도 확인했다. 변경 코드 ruff와
+`git diff --check`가 통과했다.
+
+# 2026-11-12 냉동 반납 상품 추론과 행동별 정산 연결
+
+이 절이 현재 구현 기준이다. 위의 방향 진단 전용/무게 반납 매칭 설명은 이전 단계의 기록이다.
+
+## 변경한 처리
+
+- 반납 방향으로 이동한 상품 영상에서 종류를 판정하고, 안정된 무게 증가로 수량을 검증한다.
+- 같은 물체에서 클래스가 깜빡이는 것을 별도 상품으로 세지 않도록 클래스 무관 튜브의
+  구간별 종류 우세를 확인한다. 기본 관측 3회와 2:1 우세를 코드에서 관리한다.
+- 카메라 경계가 지정돼 있으면 실제 경계 통과를 요구한다. top/side는 정체성 증거를
+  함께 제공하며 두 카메라/트랙 수를 상품 수량으로 세지 않는다.
+- 여러 종류 취출이 경계 통과로 확인되면 각 종류를 포함해 수량을 검증한다.
+  A100g+B105g를 A×2로 축약하지 않는다. 가능한 수량 배분이 여럿이면 보류한다.
+- `FreezerAction`에 부호별 무게와 판정을 보존한다. CLOSE는 시간순 취출 이력에서
+  같은 SKU만 차감한다. 같은 층의 다른 SKU를 무게로 대신 차감하지 않는다.
+- 다품목/3개 이상 반납과 여러 출발 층에 나뉜 같은 SKU의 반납을 처리한다.
+  반납한 SKU가 취출 이력에 없으면 다른 상품을 지우지 않는다.
+- 상품별로 정산한 층은 뒤의 net-delta/냉동 재solve가 종류·수량을 뒤집지 못하게 한다.
+  미확정 반납은 영향을 받을 수 있는 기존 냉동 층도 보호한다.
+- 냉동은 순무게 0도 영상 분석한다. plateau/운영 기본 BOCPD 모두 왕복 구간을 보존하고,
+  순변화 0/음수인 혼합 에피소드에도 반납 안정화를 확인한다. 냉장 경로는 기존대로다.
+- 저널과 세션 YAML에 행동별 판정과 방향별 후보를 저장해 재생/사후 검증을 지원한다.
+
+## 보류하는 경우와 한계
+
+한 영상의 취출→반납/반납→취출은 양쪽 경계 증거와 안정된 부호별 무게 구간이 모두
+필요하다. 무게 구간 누락, 반대 부호 구간 겹침, 여러 번 교대하는 복잡한 왕복,
+카메라 종류 충돌, 같은 영상 쌍의 여러 층 공유는 행동을 임의 확정하지 않는다.
+이 경우 notes와 `review` 또는 `partial`로 표시한다. 이 상태는 자동 결제 차단을
+의미하지 않는다. 실제 손 놓임이나 미등록 외부 상품 종류를 직접 인식하는 기능도 아니다.
+
+같은 SKU가 여러 층에서 취출되면 물리 인스턴스의 원래 층은 확정할 수 없다.
+같은 SKU 안에서 동일 층 이력을 먼저 소비하고 세션 전체 잔여 수량을 보존한다.
+행동 필드가 없는 구 저널은 기존 정산을 유지하며, 기록되지 않은 반납 종류를 새로
+복원하지 않는다. 단방향 일반 취출은 기존 라우터/정산 경로를 유지한다.
+
+## env와 검증
+
+기존에 간소화한 카메라 보정용 신규 env 6개를 유지하고 이번 기능용 env는 추가하지 않았다.
+관측 수, 경계 여유, 정체성 우세, 매칭 규칙은 코드 기본값이다. `freezer.env.example`의
+주석을 실제 반납 판정에 사용한다는 설명으로 갱신했다. 예시 경계240px는 현장 영상에서
+보정해야 하며 실제 기기 `.env`는 수정하지 않았다.
+
+새 회귀 사례 38개를 포함한 전체 결과: `570 passed, 24 skipped`.
+유사 무게/다품목/층간/초과·선행 반납, 재취출, 왕복·동일 무게 교환, 두 카메라 합치기와
+충돌, 경사 side의 X축 반납, 클래스 플리커, 경계 미통과, 공유 영상, 안정화,
+두 로드셀 분석기, 저널 재생과 YAML 직렬화를 검증했다. 변경 코드 ruff와
+`git diff --check`가 통과했다. 합성 입력 검증이며 실제 장치 영상 재생은 아직 하지 않았다.

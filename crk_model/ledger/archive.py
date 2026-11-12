@@ -34,6 +34,7 @@ from typing import TYPE_CHECKING
 
 from crk_model.core.types import FinalizedSettlement, ZoneBasket
 from crk_model.ledger.events import TriggerEvent
+from crk_model.ledger.journal import action_to_dict
 
 if TYPE_CHECKING:
     # 지연 임포트 (순환 회피): crk_model.service.__init__ -> model_service ->
@@ -84,6 +85,17 @@ def _trace_to_dict(trace: TriggerTrace | None) -> dict:
             out["camera_crops"] = dict(trace.camera_crops)
     if trace.loadcell_terminal_levels is not None:
         out["loadcell_terminal_levels"] = trace.loadcell_terminal_levels
+    if trace.directional_candidates:
+        out["directional_candidates"] = {
+            action: [
+                {"class_id": c.class_id, "confidence": c.confidence,
+                 "vote_count": c.vote_count, "vote_ratio": c.vote_ratio}
+                for c in candidates
+            ]
+            for action, candidates in trace.directional_candidates.items()
+        }
+        out["uncertain_directions"] = trace.uncertain_directions
+        out["crossed_directions"] = trace.crossed_directions
     return out
 
 
@@ -138,6 +150,10 @@ def _event_to_dict(
         "video_paths": dict(event.video_paths),
         # 0711 교차존 오염 (Phase 1 계측): 에피소드 내 서브이벤트 앵커
         "change_timestamps": list(event.change_timestamps),
+        "freezer_actions": (
+            [action_to_dict(a) for a in event.freezer_actions]
+            if event.freezer_actions is not None else None
+        ),
         "trace": _trace_to_dict(trace),
         "processing_time_ms": processing_time_ms,
     }

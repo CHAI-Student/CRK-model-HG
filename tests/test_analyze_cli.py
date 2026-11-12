@@ -9,7 +9,11 @@ from copy import deepcopy
 
 from crk_model.adapters.analyze_cli import analyze, load_documents, main, render, render_session
 from crk_model.perception.detector import Detection
-from crk_model.perception.motion_direction import YDirectionConfig
+from crk_model.perception.motion_direction import (
+    MotionDirectionConfig,
+    YDirectionConfig,
+    summarize_direction,
+)
 from crk_model.perception.motion_evidence import MotionEvidence
 
 
@@ -353,7 +357,7 @@ class TestYDirectionReport:
         assert (row["session"], row["zone"], row["ts"]) == ("ses-1", 2, 123.0)
         assert row["video_path"] == "/device/episode.avi"
         assert [s["direction"] for s in row["y_direction"]["segments"]] == ["take", "return"]
-        assert "Y축 방향 (진단·결제 미반영)" in render(report)
+        assert "카메라별 취출·반납 방향 (진단·결제 미반영)" in render(report)
         out = render_session(doc)
         assert "top/c1/track0 mixed" in out
         assert "take: pos 0~3 y 240.0->50.0 Δy=-190.0px obs=4" in out
@@ -366,6 +370,26 @@ class TestYDirectionReport:
         assert yd["triggers"] == 1 and yd["unrecorded_triggers"] == 1
         assert yd["by_camera"] == {"top": {"unknown": 1}}
         assert "미기록은 정지/빈손 판정이 아님" in render(report)
+
+    def test_oblique_side_axis_and_boundary_rendered(self):
+        direction = summarize_direction(
+            [(0, 240), (1, 200), (2, 160)],
+            MotionDirectionConfig(axis="x", return_direction="decreasing", boundary_px=200),
+        )
+        trigger = _trigger(trace={"vote_summary": {"motion_evidence": {
+            "side": {1: {"track_detail": [{
+                "first": 0, "last": 2, "obs": 3, "motion_direction": direction,
+            }]}},
+        }}})
+        doc = _doc(triggers=[trigger])
+        report = analyze([doc])
+        assert report["y_direction"]["by_camera"] == {"side": {"return_candidate": 1}}
+        assert report["y_direction"]["records"][0]["y_direction"]["axis"] == "x"
+        out = render_session(doc)
+        assert "X축 후보: side/c1/track0 return_candidate" in out
+        assert "x 240->160 Δx=-80px" in out
+        assert "경계통과=True" in out
+        assert "반납 방향=decreasing 경계=200px" in out
 
     def test_shared_video_is_explicitly_counted_as_trigger_observations(self):
         report = analyze([_doc(triggers=[self.trigger(), self.trigger(zone=3)])])

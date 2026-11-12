@@ -40,6 +40,7 @@ from crk_model.ledger.journal import EventJournal
 from crk_model.ledger.settler import CloseSettler
 from crk_model.perception.detector import Detector
 from crk_model.perception.filters import DetectionFilterChain
+from crk_model.perception.motion_direction import MotionDirectionConfig
 from crk_model.service.pipeline import TriggerPipeline, TriggerRequest
 from crk_model.service.snapshot import ActiveProductStore
 from crk_model.service.worker import SerialTriggerWorker
@@ -179,6 +180,20 @@ class ModelService:
             on_finalize=self._on_session_finalize,
             default_profile=self._default_profile,
         )
+        freezer_direction_configs = {
+            "top": MotionDirectionConfig(boundary_px=self.settings.freezer_top_return_boundary_px),
+            "side": MotionDirectionConfig(
+                axis=self.settings.freezer_side_direction_axis,
+                return_direction=self.settings.freezer_side_return_direction,
+                min_displacement_px=self.settings.freezer_side_direction_min_displacement_px,
+                boundary_px=self.settings.freezer_side_return_boundary_px,
+            ),
+        }
+        freezer_roi_overrides = {}
+        if self.settings.freezer_side_roi_y_split is not None:
+            freezer_roi_overrides["side"] = (
+                self.settings.freezer_roi_vertical_region, self.settings.freezer_side_roi_y_split
+            )
         self.pipeline = TriggerPipeline(
             detector, self._profiles, self.snapshots, default_profile=self._default_profile,
             # I-V 판정 노브 (MODEL__JUDGMENT__*, 이슈 #15) — env로 주입된
@@ -211,6 +226,7 @@ class ModelService:
             ), count_unit_slack=self.settings.judgment_count_unit_slack),
             early_termination_enabled=self.settings.early_termination_enabled,
             motion_evidence_enabled=self.settings.motion_evidence_enabled,
+            freezer_direction_configs=freezer_direction_configs,
             motion_evidence_floor_px=self.settings.motion_evidence_floor_px,
             motion_unmeasurable_policy=self.settings.motion_unmeasurable_policy,
             motion_measurable_min_obs=self.settings.motion_measurable_min_obs,
@@ -240,7 +256,7 @@ class ModelService:
             # 현장 카메라/조명에 따라 env로 조정한다 (.env.example 참조).
             filters=DetectionFilterChain(
                 side_roi_max_center_x=self.settings.side_roi_max_center_x,
-                # 수직 ROI (P1-5): 냉동 dual-top에서만 두 카메라 공통 적용 —
+                # 수직 ROI (P1-5): 냉동 상단+경사 side에 공통값/카메라별 보정 적용 —
                 # 냉장 기기는 camera_layout이 dual_top_proxy여도 켜지 않는다
                 # (원본 _uses_freezer_dual_top_profile: freezer ∧ dual_top).
                 vertical_roi_region=(
@@ -252,6 +268,12 @@ class ModelService:
                     else "off"
                 ),
                 vertical_roi_y_split=self.settings.freezer_roi_y_split,
+                vertical_roi_by_camera=(
+                    freezer_roi_overrides
+                    if self.settings.cabinet_type == "freezer"
+                    and self.settings.camera_layout == "dual_top_proxy"
+                    else None
+                ),
                 top_roi_enabled=self.settings.top_roi_enabled,
                 top_roi_y_split=self.settings.top_roi_y_split,
                 hand_conf_floor=self.settings.hand_confidence_threshold,

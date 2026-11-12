@@ -136,7 +136,7 @@ CLOSE 재폴링이 재계산돼 다른 결과를 낼 수 있어, 현재+최근 �
 | 스냅샷이 `last_valid` 폴백 | 계속 진행하되 사실을 기록 | `snapshot_source=last_valid` |
 | 로드셀 신뢰 불가 (`insufficient_samples` / `insufficient_stable_regions`) | `vision_only=True` 강제 | `loadcell_<사유>` |
 | 재수집 대기 (`needs_return_stabilization`) | 구간화 보류 사실만 기록 (재수집은 장치측 훅) | `return_stabilization_pending` |
-| `abs(delta) < profile.min_weight_change_grams` (vision_only 아닐 때) | vision 전체 생략, YOLO 0회 | `low_weight_skip` |
+| 냉장 & `abs(delta) < profile.min_weight_change_grams` (vision_only 아닐 때) | vision 전체 생략, YOLO 0회. 냉동은 순무게 0인 교환도 영상 분석 | `low_weight_skip` |
 | 매핑된 class_id가 0개 | allowlist가 hand만 남음 | `no_mapped_class_ids` |
 | 채택된 비전 1위가 과금 목록에 없음 | 관측만 (판정 무변경) | `vision_top_not_billed:class<N>` |
 
@@ -311,10 +311,23 @@ sequenceDiagram
 | `MODEL__SESSION__SAVE_DETECTIONS` | `false` | 프레임별 bbox 기록 (아카이브 용량↑, 판정 무변경) |
 | `MODEL__VISION__SIDE_HAND_ENABLED` | `false` | side allowlist에 hand(0) 포함 |
 | `MODEL__VISION__MOTION_EVIDENCE` | `true` | 변위 증거 활성 (라이브러리 기본값은 `False` — 직접 생성 테스트 하위호환) |
+| `MODEL__VISION__FREEZER_SIDE_ROI_Y_SPLIT` | 미설정 | 경사 side의 검출 Y 경계만 보정. 미설정이면 공통 `FREEZER_ROI_Y_SPLIT` 사용. top은 항상 공통 경계 사용 |
+| `MODEL__VISION__FREEZER_SIDE_DIRECTION_AXIS` | `y` | side 방향 진단의 축 `x/y`. top은 Y축 고정 |
+| `MODEL__VISION__FREEZER_SIDE_RETURN_DIRECTION` | `increasing` | side 반납 방향 `increasing/decreasing`. top은 증가=반납 고정 |
+| `MODEL__VISION__FREEZER_SIDE_DIRECTION_MIN_DISPLACEMENT_PX` | `20` | side 최소 이동량. 10px 이상. top은 20px 코드 기본값 |
+| `MODEL__VISION__FREEZER_{TOP,SIDE}_RETURN_BOUNDARY_PX` | 미설정 | 선택 축의 동작 경계 진단. ROI처럼 검출을 제거하지 않음 |
 | `MODEL__WEIGHT__SEGMENT_RETRY_GAP_GRAMS` | `5.0` | `_segment_target_retry` 발동 임계 |
 | `MODEL__TRIGGER__IDEMPOTENCY_TTL_S` | `5.0` | 중복 트리거 드롭 창 |
 | `MODEL__TRIGGER__OUTCOMES_KEEP` | `256` | 워커 outcomes deque 상한 |
 | `MODEL__LEDGER__KEEP_SESSIONS` | `4` | OPEN 시 prune에서 보존할 최근 세션 수 |
+
+동작 방향 진단의 3회 관측·경계 양쪽 여유 10px는 코드 기본값으로 관리한다.
+top의 축/방향/최소 이동량, 카메라별 ROI 유지 방향, 위 공통 진단 임계는 별도 env로
+노출하지 않는다. 냉동 반납은 방향별 영상 후보로 종류를 추론하고 무게로 수량을
+검증한다. 경계가 있으면 실제 통과를 요구한다. 왕복/교환의 분리는 취출·반납 양쪽
+경계 증거와 안정된 부호별 무게 구간이 필요하며, 여러 차례 번갈아 움직이는 복잡한
+에피소드는 검토 대상으로 보존한다. 확정한 행동은 `TriggerEvent.freezer_actions`에
+저장한다. 모션 증거가 꺼져 있으면 반납 종류를 확정하지 않는다.
 
 ## 6. 테스트
 

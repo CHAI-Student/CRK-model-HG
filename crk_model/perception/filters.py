@@ -23,8 +23,9 @@
 """
 from __future__ import annotations
 
+import math
 from collections import defaultdict, deque
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
 from crk_model.perception.detector import Detection
 
@@ -53,9 +54,10 @@ class DetectionFilterChain:
         vertical_roi_region: str = "off",
         # 냉동 dual-top 수직 ROI (원본 freezer_roi_vertical_region, P1-5 이식):
         # "upper"|"lower"면 **두 카메라 모두** center_y 기준 해당 절반만 유지
-        # (dual_top_proxy — side 스트림도 실제로는 top 뷰). 이때 side x-ROI는
-        # 원본과 동일하게 생략된다. "off"(기본) = 기존 동작.
+        # (dual_top_proxy — 냉동 상단과 경사 시점). side 수직 ROI가 켜져 있으면
+        # side x-ROI는 생략한다. "off"(기본) = 기존 동작.
         vertical_roi_y_split: float = 300.0,
+        vertical_roi_by_camera: Mapping[str, tuple[str, float]] | None = None,
         # center-crop 480×480 좌표계의 분할선(세로축, crop 원점 이동 영향 없음)
         # — 원본 freezer_roi_y_split(원본 운영값 240 → 300, 2026-07-24).
         top_roi_enabled: bool = False,
@@ -80,6 +82,12 @@ class DetectionFilterChain:
         self._side_max_cx = side_roi_max_center_x
         self._vertical_region = vertical_roi_region
         self._vertical_split = vertical_roi_y_split
+        self._vertical_by_camera = dict(vertical_roi_by_camera or {})
+        for camera, (region, split) in self._vertical_by_camera.items():
+            if region not in ("off", "upper", "lower"):
+                raise ValueError(f"Invalid vertical ROI for {camera}: {region}")
+            if not math.isfinite(split) or not 0 <= split <= 480:
+                raise ValueError(f"Vertical ROI for {camera} must be within the 480px crop")
         self._top_roi_enabled = top_roi_enabled
         self._top_roi_split = top_roi_y_split
         self._hand_conf_floor = hand_conf_floor
@@ -120,14 +128,18 @@ class DetectionFilterChain:
         None/0이면 top ROI 미적용. pipeline이 reset 직후 호출한다."""
         self._trigger_delta = delta
 
+    def _vertical_roi(self, camera: str) -> tuple[str, float]:
+        return self._vertical_by_camera.get(camera, (self._vertical_region, self._vertical_split))
+
     def _vertical_roi_rejects(self, camera: str, d: Detection) -> bool:
         """수직 ROI (P1-5): dual-top 수직 ROI가 켜져 있으면 두 카메라 공통,
         아니면 top 카메라 한정 top ROI(delta 있을 때 하단 절반 유지)."""
         cy = (d.bbox[1] + d.bbox[3]) / 2
-        if self._vertical_region != "off":
-            if self._vertical_region == "lower":
-                return cy < self._vertical_split
-            return cy > self._vertical_split  # upper: center_y <= split 유지
+        region, split = self._vertical_roi(camera)
+        if region != "off":
+            if region == "lower":
+                return cy < split
+            return cy > split  # upper: center_y <= split 유지
         if (
             self._top_roi_enabled
             and camera == "top"
@@ -169,9 +181,9 @@ class DetectionFilterChain:
                     self.drop_stats["vertical_roi"][camera] += 1
                     continue
                 # Side ROI: 존 바깥(오른쪽) 검출 제거 — dual-top 수직 ROI가
-                # 켜져 있으면 side 스트림도 top 뷰이므로 생략 (원본 동형)
+                # side에서 켜져 있으면 생략. 카메라별 off면 x-ROI가 다시 적용됨.
                 if (
-                    self._vertical_region == "off"
+                    self._vertical_roi(camera)[0] == "off"
                     and camera == "side"
                     and _center_x(d.bbox) >= self._side_max_cx
                 ):
