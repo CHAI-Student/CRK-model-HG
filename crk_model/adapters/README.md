@@ -265,6 +265,9 @@ conf가 떨어지고 bbox 좌표계가 왜곡돼 ROI·hand_margin 상수가 전�
 - **크롭 기하 재현**: 아카이브의 `camera_crops` 스탬프를 읽어 기록 당시와 동일한
   크롭으로 디코드한다(스탬프 없는 구 아카이브는 center). 좌표계 무변환 계약의
   유지 장치다.
+- **냉동 판단 좌표**: `decision_coordinate_origin=bottom_left` 스탬프가 있으면
+  라벨에 아래 원점 상품/손 중심 `XY`를 표시하고 프레임 아래에 `(0,0) Y+ UP`을 적는다.
+  bbox는 원본 영상 위치에 그린다. 스탬프 없는 과거 세션은 기존 표시를 유지한다.
 - **cv2를 쓰지 않는다** (런타임 의존성 0 원칙): 디코드는 `avi_frames.decode_avi`
   (운영과 동일 기하), 그리기는 numpy 슬라이싱 + 내장 5×7 비트맵 폰트, 인코드는
   ffmpeg rawvideo 파이프. 디코더는 `MODEL__VIDEO__DECODER=ffmpeg`를 `setdefault`로

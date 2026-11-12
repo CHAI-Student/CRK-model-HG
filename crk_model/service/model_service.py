@@ -274,6 +274,9 @@ class ModelService:
                     and self.settings.camera_layout == "dual_top_proxy"
                     else None
                 ),
+                vertical_roi_coordinate_origin=(
+                    "bottom_left" if self.settings.cabinet_type == "freezer" else "top_left"
+                ),
                 top_roi_enabled=self.settings.top_roi_enabled,
                 top_roi_y_split=self.settings.top_roi_y_split,
                 hand_conf_floor=self.settings.hand_confidence_threshold,

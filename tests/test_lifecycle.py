@@ -481,15 +481,15 @@ class TestCabinetTypeDefaultProfile:
 
     def test_freezer_dual_top_layout_applies_vertical_roi(self, cola):
         # P1-5 배선: cabinet_type=freezer ∧ camera_layout=dual_top_proxy면
-        # 두 카메라 모두 상단 절반(center_y <= 240)만 유지 — 하단(진열 선반)
-        # 검출은 vertical_roi 단계에서 몰수돼 후보가 되지 못한다.
+        # 두 카메라 모두 아래 원점 Y <= 350(영상 중심 Y >= 130)만 유지한다.
+        # 맨 위 130px 검출은 vertical_roi 단계에서 몰수돼 후보가 되지 못한다.
         settings = Settings(
             cabinet_type="freezer", camera_layout="dual_top_proxy",
             close_grace_s=0.0,
         )
         svc = ModelService(
             FakeDetector(detections=[
-                Detection(1, 0.9, bbox=(50.0, 300.0, 100.0, 400.0))  # cy=350
+                Detection(1, 0.9, bbox=(50.0, 30.0, 100.0, 90.0))  # 영상 cy=60, 아래 Y=420
             ]),
             clock=FakeClock(),
             settings=settings,

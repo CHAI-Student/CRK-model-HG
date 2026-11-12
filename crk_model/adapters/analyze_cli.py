@@ -844,6 +844,8 @@ def render_session(doc: dict, *, full: bool = False) -> str:
                         f"경계={direction.get('boundary_px')}px "
                         f"여유={direction.get('boundary_margin_px')}px"
                     )
+                if direction.get("coordinate_origin"):
+                    lines.append(f"     좌표 원점={direction['coordinate_origin']}")
                 segments = direction.get("segments") or []
                 for seg in segments:
                     if not isinstance(seg, dict):

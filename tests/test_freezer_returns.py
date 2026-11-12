@@ -16,11 +16,12 @@ from crk_model.core.types import (
 from crk_model.ingest.bocpd import BocpdLoadcellAnalyzer
 from crk_model.ingest.loadcell import LoadcellAnalysis, LoadcellAnalyzer, LoadcellSample
 from crk_model.judgment.freezer_actions import infer_freezer_action
-from crk_model.ledger.archive import _event_to_dict
+from crk_model.ledger.archive import _event_to_dict, _trace_to_dict
 from crk_model.ledger.events import FreezerAction, TriggerEvent
 from crk_model.ledger.journal import event_from_dict, event_to_dict
 from crk_model.ledger.settler import CloseSettler
 from crk_model.perception.detector import Detection
+from crk_model.perception.filters import DetectionFilterChain
 from crk_model.perception.motion_direction import MotionDirectionConfig
 from crk_model.service.pipeline import TriggerPipeline, TriggerRequest
 from crk_model.service.snapshot import ActiveProductStore
@@ -147,13 +148,17 @@ class Scene:
         return next(self.scenes["top" if frame[0][0] in (10, 200) else "side"])
 
 
-def pipeline_event(top, levels, side=(), side_config=None, analyzer=LoadcellAnalyzer):
+def pipeline_event(
+    top, levels, side=(), side_config=None, analyzer=LoadcellAnalyzer,
+    filters=None, save_detections=False,
+):
     store = ActiveProductStore()
     store.update([A, B, C])
     detector = Scene(top, side)
     pipeline = TriggerPipeline(
         detector, PROFILES, store, motion_evidence_enabled=True,
         analyzer_factory=analyzer,
+        filters=filters, save_detections=save_detections,
         voting_params={"conf_floor": 0, "min_vote_ratio": 0},
         freezer_direction_configs={
             "top": MotionDirectionConfig(boundary_px=240),
@@ -184,6 +189,27 @@ def test_downward_motion_is_not_a_return_with_new_camera_orientation():
     result = settle([take(1, 1, (A, 1), (B, 1)), outcome.event])
     assert counts(result) == {"a": 1, "b": 1}
     assert result.zones[0].status in ("review", "partial")
+
+
+def test_bottom_origin_roi_and_return_use_same_coordinates_without_flipping_bbox():
+    scene = [[detection(1, 50, 100), detection(2, 350, y)] for y in [300, 260, 220]]
+    filters = DetectionFilterChain(
+        vertical_roi_region="lower", vertical_roi_y_split=350,
+        vertical_roi_coordinate_origin="bottom_left",
+    )
+    outcome, _ = pipeline_event(scene, [500, 605], filters=filters, save_detections=True)
+    assert outcome.event.freezer_actions[0].judgment.products == (ProductCount(B, 1),)
+    assert outcome.trace.decision_coordinate_origin == "bottom_left"
+    assert filters.drop_stats["vertical_roi"]["top"] == 3  # 영상 Y=100은 아래 Y=380
+    first = outcome.trace.frame_detections[0]["detections"][0]
+    assert first["bbox"] == [340, 290, 360, 310]  # 원본 영상 좌표 그대로
+    tracks = outcome.trace.vote_summary["motion_evidence"]["top"][2]["track_detail"]
+    direction = tracks[0]["y_direction"]
+    segment, = direction["segments"]
+    assert (segment["start_y"], segment["end_y"], segment["delta_y"]) == (180, 260, 80)
+    archived = _trace_to_dict(outcome.trace)
+    assert archived["decision_coordinate_origin"] == "bottom_left"
+    assert archived["frame_detections"][0]["detections"][0]["bbox"] == [340, 290, 360, 310]
 
 
 def test_both_cameras_support_one_return_without_double_counting():

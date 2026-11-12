@@ -27,6 +27,7 @@ import math
 from collections import defaultdict, deque
 from collections.abc import Mapping, Sequence
 
+from crk_model.perception.coordinates import COORDINATE_ORIGINS, y_from_image
 from crk_model.perception.detector import Detection
 
 _ZERO_BBOX = (0.0, 0.0, 0.0, 0.0)
@@ -53,16 +54,17 @@ class DetectionFilterChain:
         hand_margin_px: float = 40.0,
         vertical_roi_region: str = "off",
         # 냉동 dual-top 수직 ROI (원본 freezer_roi_vertical_region, P1-5 이식):
-        # "upper"|"lower"면 **두 카메라 모두** center_y 기준 해당 절반만 유지
+        # "upper"|"lower"면 **두 카메라 모두** 상품 중심 기준 해당 영역만 유지
         # (dual_top_proxy — 냉동 상단과 경사 시점). side 수직 ROI가 켜져 있으면
         # side x-ROI는 생략한다. "off"(기본) = 기존 동작.
         vertical_roi_y_split: float = 300.0,
         vertical_roi_by_camera: Mapping[str, tuple[str, float]] | None = None,
-        # center-crop 480×480 좌표계의 분할선(세로축, crop 원점 이동 영향 없음)
-        # — 원본 freezer_roi_y_split(원본 운영값 240 → 300, 2026-07-24).
+        # 냉동 서비스는 bottom_left: Y=480-영상 중심 Y, lower는 Y<=split.
+        # 기본 top_left는 기존 필터 호출의 영상 좌표(lower는 Y>=split)를 보존.
+        vertical_roi_coordinate_origin: str = "top_left",
         top_roi_enabled: bool = False,
         # 냉장(top+side) 레이아웃의 top 카메라 수직 ROI (원본 top_roi_enabled):
-        # 트리거 delta가 0이 아닐 때 center_y >= split(하단 절반)만 유지.
+        # 트리거 delta가 0이 아닐 때 영상 center_y >= split(하단 영역)만 유지.
         # 수직 ROI(dual-top)가 켜져 있으면 그쪽이 우선한다.
         top_roi_y_split: float = 240.0,
         hand_conf_floor: float = 0.0,
@@ -83,6 +85,11 @@ class DetectionFilterChain:
         self._vertical_region = vertical_roi_region
         self._vertical_split = vertical_roi_y_split
         self._vertical_by_camera = dict(vertical_roi_by_camera or {})
+        if vertical_roi_coordinate_origin not in COORDINATE_ORIGINS:
+            raise ValueError(
+                f"Invalid vertical ROI coordinate origin: {vertical_roi_coordinate_origin}"
+            )
+        self._vertical_origin = vertical_roi_coordinate_origin
         for camera, (region, split) in self._vertical_by_camera.items():
             if region not in ("off", "upper", "lower"):
                 raise ValueError(f"Invalid vertical ROI for {camera}: {region}")
@@ -134,19 +141,20 @@ class DetectionFilterChain:
     def _vertical_roi_rejects(self, camera: str, d: Detection) -> bool:
         """수직 ROI (P1-5): dual-top 수직 ROI가 켜져 있으면 두 카메라 공통,
         아니면 top 카메라 한정 top ROI(delta 있을 때 하단 절반 유지)."""
-        cy = (d.bbox[1] + d.bbox[3]) / 2
+        image_cy = (d.bbox[1] + d.bbox[3]) / 2
         region, split = self._vertical_roi(camera)
         if region != "off":
+            cy = y_from_image(image_cy, self._vertical_origin)
             if region == "lower":
-                return cy < split
-            return cy > split  # upper: center_y <= split 유지
+                return cy > split if self._vertical_origin == "bottom_left" else cy < split
+            return cy < split if self._vertical_origin == "bottom_left" else cy > split
         if (
             self._top_roi_enabled
             and camera == "top"
             and self._trigger_delta is not None
             and self._trigger_delta != 0.0
         ):
-            return cy < self._top_roi_split  # 원본: center_y >= split 유지
+            return image_cy < self._top_roi_split  # 냉장: 영상 center_y >= split 유지
         return False
 
     def apply(self, camera: str, detections: Sequence[Detection]) -> list[Detection]:

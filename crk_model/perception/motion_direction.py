@@ -1,13 +1,15 @@
 """카메라별 취출·반납 방향 구간. 냉동 행동 판정과 트랙 진단에서 공유한다.
 
-좌표는 디코더 크롭의 bbox 중심이다. 카메라 장착 각도로 영상의 회전을 추정하지
-않는다. 관측된 X/Y 이동 축·방향·경계를 카메라별로 설정한다.
+입력은 디코더 크롭의 bbox 중심이며, 냉동 Y 판단은 아래 원점으로 변환한다.
+카메라 장착 각도로 영상 회전을 추정하지 않는다. X/Y 축·방향·경계를 카메라별로 설정한다.
 """
 from __future__ import annotations
 
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass
+
+from crk_model.perception.coordinates import COORDINATE_ORIGINS, y_from_image
 
 
 @dataclass(frozen=True)
@@ -18,7 +20,8 @@ class MotionDirectionConfig:
     reversal_px: float = 10.0
     max_gap_frames: int = 12  # 게이트 스킵 포함 디코드 위치 기준
     axis: str = "y"
-    return_direction: str = "decreasing"  # 현 카메라: 위쪽(Y 감소)=반납, 아래쪽=취출
+    return_direction: str = "increasing"  # 아래 원점: 위쪽(Y 증가)=반납, 아래쪽=취출
+    coordinate_origin: str = "bottom_left"
     boundary_px: float | None = None
     boundary_margin_px: float = 10.0
 
@@ -34,6 +37,8 @@ class MotionDirectionConfig:
             raise ValueError(f"Invalid motion direction axis: {self.axis}")
         if self.return_direction not in ("increasing", "decreasing"):
             raise ValueError(f"Invalid return direction: {self.return_direction}")
+        if self.coordinate_origin not in COORDINATE_ORIGINS:
+            raise ValueError(f"Invalid coordinate origin: {self.coordinate_origin}")
         if not math.isfinite(self.boundary_margin_px) or self.boundary_margin_px < 0:
             raise ValueError("Motion boundary margin must be finite and nonnegative")
         if self.boundary_px is not None and (
@@ -46,7 +51,9 @@ def summarize_direction(
     observations: Sequence[tuple[int, float]], config: MotionDirectionConfig,
     *, segment_limit: int | None = 8,
 ) -> dict:
-    """(디코드 위치, 선택 축의 중심 좌표) 관측에서 방향 구간을 추출한다.
+    """(디코드 위치, 영상 축 좌표)를 판단 좌표로 바꾸어 방향 구간을 추출한다.
+
+    bbox 입력은 위쪽 원점 영상 좌표다. 출력의 Y 좌표와 경계는 설정한 원점 기준이다.
 
     시작점 대비 변위와 관측 수를 함께 요구한다. 작은 역방향 흔들림은 허용하되
     극점에서 reversal_px 이상 되돌아오면 극점을 공유하는 별도 구간을 만든다.
@@ -85,7 +92,11 @@ def summarize_direction(
             "boundary_crossed": crossed,
         })
 
-    for pos, cy in observations:
+    for pos, image_coordinate in observations:
+        cy = (
+            y_from_image(image_coordinate, config.coordinate_origin)
+            if config.axis == "y" else image_coordinate
+        )
         if run and (pos <= run[-1][0] or pos - run[-1][0] > config.max_gap_frames):
             emit(run[:peak + 1])
             run, direction, peak = [], 0, 0
@@ -116,6 +127,7 @@ def summarize_direction(
         "status": status,
         "axis": config.axis,
         "return_direction": config.return_direction,
+        "coordinate_origin": config.coordinate_origin,
         "boundary_px": config.boundary_px,
         "boundary_margin_px": config.boundary_margin_px,
         "min_observations": config.min_observations,

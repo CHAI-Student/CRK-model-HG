@@ -82,7 +82,7 @@ flowchart LR
 | 단 | 대상 | 규칙 | 왜 |
 |---|---|---|---|
 | ① 손 conf | hand 검출 | `conf < floor`면 제거 (side는 전용 floor 우선) | 유령 손이 손 래치(I16)와 손 경로 기준을 오염시키는 것 차단 |
-| ② 수직 ROI | 상품 검출 | 냉동 dual-top이면 **두 카메라** 공통으로 상/하 절반만 유지, 아니면 top 한정(트리거 delta≠0일 때 하단 절반) | 존 밖 진열장이 프레임에 함께 들어오는 실기 레이아웃 |
+| ② 수직 ROI | 상품 검출 | 냉동 dual-top 기본은 **두 카메라** 모두 아래 원점 Y≤350 유지. 냉장 top ROI는 영상 위 원점 Y≥split 유지(delta≠0일 때) | 존 밖 진열장이 프레임에 함께 들어오는 실기 레이아웃 |
 | ③ side ROI | side 상품 검출 | `center_x ≥ 400`이면 제거 (수직 ROI가 켜져 있으면 **생략**) | side 화면 오른쪽은 다른 존 |
 | ④ 손 경로 | 상품 검출 | 최근 손 bbox 궤적(기본 30프레임) ±40px와 교차하지 않으면 제거 | 손이 닿지도 않은 위치의 검출은 이 트리거의 취출이 아니다 |
 
@@ -109,6 +109,11 @@ conf 하한(`side_hand_conf_floor`, 미설정 시 공용 하한 상속)을 분�
 오타는 `ValueError` — 조용히 `off`가 되면 ROI 없이 운영 중임을 알 수 없다
 (fail-closed, `cabinet_type`과 동일 원칙).
 
+냉동의 판단 좌표는 480×480 크롭의 왼쪽 아래가 `(0,0)`이며,
+`Y = 480 - 영상 bbox 중심 Y`다. `lower/350`은 아래 원점 `0≤Y≤350`을 유지하므로
+영상 맨 위 130px를 제외한다. `upper`는 `Y≥split`을 유지한다. side 경계만 따로
+보정할 수 있다. 원본 상품/손 bbox는 영상 위 원점 좌표를 보존해 손 교차·추적·렌더에 쓴다.
+
 ### `motion_evidence.py`
 
 **물리 원칙: 집어간 상품은 움직이고, 진열 상품은 안 움직인다.**
@@ -117,7 +122,7 @@ conf 하한(`side_hand_conf_floor`, 미설정 시 공용 하한 상속)을 분�
 위치는 `vote_summary.motion_evidence.<camera>.<class_id>.track_detail[]` 아래의
 `y_direction`(Y축, 기존 키 유지) 또는 `motion_direction`(X축)이다.
 `take_candidate`, `return_candidate`, `mixed`(양방향), `unknown`을 구분한다.
-현재 카메라에서 top은 Y 감소=반납·증가=취출이며, 경사 side도 기본은 같다.
+아래 원점에서 top은 Y 증가(위쪽)=반납·감소(아래쪽)=취출이며, 경사 side도 기본은 같다.
 side는 env에서 축(X/Y)과 반납 방향을 별도로 보정할 수 있다.
 기본은 3관측 이상·20px 이상 이동이며, 3px 흔들림을 허용하고 극점에서 10px 역행하면
 새 구간을 시작한다. 관측 공백이 디코드 위치 기준 12프레임을 넘으면 구간을 끊는다.
@@ -125,7 +130,7 @@ side는 env에서 축(X/Y)과 반납 방향을 별도로 보정할 수 있다.
 모션 증거 기능이 꺼져 있으면 이 진단도 없다. 냉동은 순무게가 0이어도 영상 분석한다.
 
 카메라별 `RETURN_BOUNDARY_PX`가 설정되면 구간에 `boundary_crossed`를 기록한다.
-경계240/여유10/반납 decreasing이면 250 이상에서 230 이하로 이동해야 통과다.
+아래 원점 경계240/여유10/반납 increasing이면 230 이하에서 250 이상으로 이동해야 통과다.
 같은 구간을 반대로 이동하면 취출 통과이며, 경계가 없으면 `null`이다. 3회 관측과
 경계 여유10px는 코드 기본값으로 관리하고, side 최소 이동량만 env에서 별도 보정한다. 방향 후보는
 경계를 통과하지 않아도 기록될 수 있으므로 반납 확정과 혼동하지 않는다.
@@ -309,7 +314,7 @@ opt-in).
 | `CONF_WEIGHT_TOP` / `_SIDE` / `_TOP_ONLY` / `_SIDE_ONLY` | 0.60 / 0.40 / 0.60 / 0.40 | conf 결합 가중 |
 | `CONF_COMMON_CLASS_BONUS` | 0.2 | 양 카메라 동시 검출 보너스 계수 |
 | `SIDE_ROI_MAX_CENTER_X` | 400.0 | side 상품 유효 영역 경계 (center-crop 좌표) |
-| `FREEZER_ROI_VERTICAL_REGION` / `FREEZER_ROI_Y_SPLIT` | `upper` / 300.0 | 냉동 dual-top 수직 ROI (freezer ∧ `dual_top_proxy`일 때만 적용) |
+| `FREEZER_ROI_VERTICAL_REGION` / `FREEZER_ROI_Y_SPLIT` | `lower` / 350.0 | 냉동 아래 원점 Y≤350 유지 (freezer ∧ `dual_top_proxy`일 때만 적용) |
 | `TOP_ROI_ENABLED` / `TOP_ROI_Y_SPLIT` | false / 240.0 | 냉장 top 카메라 수직 ROI (delta≠0일 때) |
 | `HAND_CONFIDENCE_THRESHOLD` | 0.30 | 손 검출 conf 하한 |
 | `SIDE_HAND_ENABLED` | false | side allowlist에 hand 포함 (opt-in) |

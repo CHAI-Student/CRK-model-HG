@@ -109,6 +109,7 @@ class TriggerTrace:
     camera_crops: dict[str, str] | None = None
     # 냉동 final delta의 시작/종료 안정값. 불안정 판정의 사후 원인 확인용.
     loadcell_terminal_levels: list[dict] | None = None
+    decision_coordinate_origin: str | None = None  # bbox는 항상 위 원점, 냉동 판단 Y는 아래 원점
     directional_candidates: dict[str, tuple[VisionCandidate, ...]] = field(default_factory=dict)
     uncertain_directions: list[str] = field(default_factory=list)
     crossed_directions: list[str] = field(default_factory=list)
@@ -252,7 +253,11 @@ class TriggerPipeline:
     def _process(self, session_id: str, req: TriggerRequest) -> TriggerOutcome:
         profile = self._profiles.get(req.zone, self._default_profile)
         snapshot = self._snapshots.snapshot()
-        trace = TriggerTrace()
+        trace = TriggerTrace(
+            decision_coordinate_origin=(
+                "bottom_left" if not profile.weight_is_discriminative else None
+            )
+        )
         if snapshot.source == "last_valid":
             trace.reason_codes.append("snapshot_source=last_valid")  # I2 폴백 기록
 

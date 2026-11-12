@@ -18,6 +18,7 @@ preview와 달리 **운영 파이프라인이 그 순간 실제로 본 검출**�
   투표 진입 conf 이상 — 파이프라인 기록 시점에 걸러짐). 렌더는 그것만 그린다
   (구 스키마의 kept=False 항목은 무시).
 - 상품: 클래스별 고정 색 실선 + "id conf" 라벨 / hand: 흰색
+- 냉동 아래 원점 스탬프가 있으면 중심 XY와 `(0,0) Y+ UP` 표시. bbox 위치는 원본 영상 그대로.
 - 캔버스 여백: 카메라 480×480 프레임을 여백 있는 캔버스 가운데 두고, 실험
   정보 헤더는 프레임 **밖** 상단 밴드에 그린다 — bbox 라벨이 프레임 경계를
   넘어도 여백에서 보이고, 헤더가 bbox 라벨을 가리지 않는다. 프레임 경계는
@@ -44,6 +45,7 @@ from pathlib import Path
 
 from crk_model.adapters.avi_frames import decode_avi
 from crk_model.ledger.archive import SessionArchive, _load_document
+from crk_model.perception.coordinates import y_from_image
 
 FRAME_SIZE = 480
 # 캔버스 레이아웃: 헤더 밴드(프레임 밖) + 프레임 주위 여백 — bbox 라벨이
@@ -311,7 +313,7 @@ def _influential(record: dict | None) -> list[dict]:
     ]
 
 
-def _canvas_template(header: list[str]):
+def _canvas_template(header: list[str], decision_coordinate_origin: str | None = None):
     """트리거×카메라당 1회 생성하는 캔버스 템플릿 — 배경·프레임 테두리·
     **정적 헤더**(세션/판정/카메라 줄)를 미리 그려 둔다. 프레임마다 바뀌는
     것은 카메라 프레임·bbox·상태줄뿐이므로 per-frame 작업이 template.copy()
@@ -333,10 +335,23 @@ def _canvas_template(header: list[str]):
     for line in header:
         _text(canvas, 3, y, line, (0, 255, 255), scale=2)
         y += 18
+    if decision_coordinate_origin == "bottom_left":
+        _text(canvas, FRAME_X, FRAME_Y + FRAME_SIZE + 6, "(0,0) Y+ UP", (0, 255, 255), scale=2)
     return canvas, y
 
 
-def _compose_frame(template, status_y: int, frame, record: dict | None, pos: int):
+def _decision_center_label(bbox, origin: str | None) -> str:
+    if origin != "bottom_left":
+        return ""
+    cx = (bbox[0] + bbox[2]) / 2
+    cy = y_from_image((bbox[1] + bbox[3]) / 2, origin)
+    return f" XY {cx:.0f},{cy:.0f}"
+
+
+def _compose_frame(
+    template, status_y: int, frame, record: dict | None, pos: int,
+    decision_coordinate_origin: str | None = None,
+):
     """카메라 프레임 1장을 템플릿 위에 얹고 bbox + 상태줄을 그린다.
 
     헤더는 프레임 밖 상단 밴드(HEADER_H, 템플릿에 사전 렌더), 프레임은
@@ -360,6 +375,7 @@ def _compose_frame(template, status_y: int, frame, record: dict | None, pos: int
         else:
             color = _class_color(int(d.get("class_id", 0)))
             label = f"{d.get('class_id')} {d.get('conf', 0):.2f}"
+        label += _decision_center_label(bbox, decision_coordinate_origin)
         _rect(canvas, cb, color, thickness=2)
         # 라벨은 박스 위 — 여백 덕에 프레임 밖으로 나가도 보인다. 헤더
         # 밴드 아래로는 클램프해 실험 정보와 절대 겹치지 않는다.
@@ -409,6 +425,7 @@ def render_trigger(
     # 좌표계 계약: 기록 당시의 크롭 원점(냉장 side=left 등)으로 디코드해야
     # bbox가 맞는다. 스탬프 없는 구 아카이브는 center (구 동작).
     crops = trace.get("camera_crops") or {}
+    decision_origin = trace.get("decision_coordinate_origin")
     by_camera: dict[str, dict[int, dict]] = {}
     for r in records:
         by_camera.setdefault(r["camera"], {})[int(r["pos"])] = r
@@ -434,7 +451,7 @@ def render_trigger(
         sink = FfmpegSink(dest, fmt, cam_fps)
         crop = crops.get(camera, "center")
         template, status_y = _canvas_template(
-            header_base + [f"CAM {camera} ({crop})"]
+            header_base + [f"CAM {camera} ({crop})"], decision_origin,
         )
         ok = False
         try:
@@ -442,6 +459,7 @@ def render_trigger(
                 canvas = _compose_frame(
                     template, status_y, bundle.full,
                     by_camera.get(camera, {}).get(pos), pos,
+                    decision_origin,
                 )
                 sink.write(canvas)
             ok = True

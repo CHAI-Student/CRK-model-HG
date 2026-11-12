@@ -194,22 +194,22 @@ class Settings:
     #   dual_top_proxy + cabinet_type=freezer면 freezer 수직 ROI를 적용한다.
     #   기본은 공통 경계를 쓰며 side 경계만 별도로 보정 가능. side 수직 ROI가 켜져
     #   있으면 side x-ROI는 생략한다.
-    # freezer_roi_vertical_region/y_split: 유지할 절반과 분할선 (center-crop
-    #   480×480 좌표계 — y_split은 세로축이라 crop 원점 이동(가로) 영향 없음).
-    #   원본 운영값은 upper/240이었으나 300으로 상향(2026-07-24, 사용자 결정).
+    # freezer_roi_vertical_region/y_split: 480×480 크롭의 아래 원점 판단 좌표.
+    #   Y = 480 - 영상 bbox 중심 Y. lower/350은 아래 Y=0~350을 유지한다.
+    #   upper는 Y >= split 유지. 검출/손 bbox 자체는 영상 좌표를 보존한다.
     # top_roi_enabled/y_split: 냉장(dual) 레이아웃 top 카메라 전용 —
-    #   delta가 0이 아닐 때 하단 절반(center_y >= split)만 유지. 원본 기본은
+    #   delta가 0이 아닐 때 영상 중심 Y >= split(위 원점)만 유지. 원본 기본은
     #   true지만 HG는 냉동 dual-top 실기가 우선이라 보수적으로 off — 냉장
     #   레이아웃 투입 시 켠다.
     camera_layout: str = "dual"
-    freezer_roi_vertical_region: str = "upper"
-    freezer_roi_y_split: float = 300.0
+    freezer_roi_vertical_region: str = "lower"
+    freezer_roi_y_split: float = 350.0
     # 경사 side의 검출 영역만 별도 보정. None이면 위 공통 Y 경계 사용.
     freezer_side_roi_y_split: float | None = None
-    # top은 Y축/감소=반납/20px 기본값. 경사 side만 시점에 맞춰 보정.
+    # 냉동은 아래 원점: top Y축/증가=반납/20px. 경사 side만 시점에 맞춰 보정.
     # ROI와 별개인 행동 경계. 지정하면 통과한 구간만 반납 상품 판정에 사용한다.
     freezer_side_direction_axis: str = "y"
-    freezer_side_return_direction: str = "decreasing"
+    freezer_side_return_direction: str = "increasing"
     freezer_side_direction_min_displacement_px: float = 20.0
     freezer_top_return_boundary_px: float | None = None
     freezer_side_return_boundary_px: float | None = None
@@ -422,10 +422,10 @@ class Settings:
             ),
             freezer_roi_vertical_region=_env_choice(
                 "MODEL__VISION__FREEZER_ROI_VERTICAL_REGION",
-                "upper",
+                "lower",
                 ("upper", "lower", "off"),
             ),
-            freezer_roi_y_split=_env_float("MODEL__VISION__FREEZER_ROI_Y_SPLIT", 300.0),
+            freezer_roi_y_split=_env_float("MODEL__VISION__FREEZER_ROI_Y_SPLIT", 350.0),
             freezer_side_roi_y_split=_env_opt_float(
                 "MODEL__VISION__FREEZER_SIDE_ROI_Y_SPLIT"
             ),
@@ -434,7 +434,7 @@ class Settings:
             ),
             freezer_side_return_direction=_env_choice(
                 "MODEL__VISION__FREEZER_SIDE_RETURN_DIRECTION",
-                "decreasing", ("increasing", "decreasing"),
+                "increasing", ("increasing", "decreasing"),
             ),
             freezer_side_direction_min_displacement_px=_env_float(
                 "MODEL__VISION__FREEZER_SIDE_DIRECTION_MIN_DISPLACEMENT_PX", 20.0

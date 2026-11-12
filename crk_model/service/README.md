@@ -194,6 +194,7 @@ CLOSE 재폴링이 재계산돼 다른 결과를 낼 수 있어, 현재+최근 �
 | `vote_summary` | `classes`(클래스별 득표·탈락 사유), `filtered_out_by_camera`, `filter_drops_by_stage`, `entry_dropped_by_camera`, `motion_evidence`, `held_shadow`, `tube_diag`(+`tubes`), `ratio_denominator`(기본 `gate`가 아닐 때만) |
 | `frame_detections` | `save_detections` 시 프레임별 bbox (아래) |
 | `camera_crops` | `frame_detections`의 좌표계 스탬프 |
+| `decision_coordinate_origin` | 냉동 판단 좌표 `bottom_left`. bbox는 영상 위 원점 좌표를 보존 |
 
 `vote_summary`가 있어야 "후보 0"이 **모델 미검출/필터/투표 진입 컷/결합 임계**
 어디에서 죽었는지 사후에 구분할 수 있다.
@@ -313,7 +314,8 @@ sequenceDiagram
 | `MODEL__VISION__MOTION_EVIDENCE` | `true` | 변위 증거 활성 (라이브러리 기본값은 `False` — 직접 생성 테스트 하위호환) |
 | `MODEL__VISION__FREEZER_SIDE_ROI_Y_SPLIT` | 미설정 | 경사 side의 검출 Y 경계만 보정. 미설정이면 공통 `FREEZER_ROI_Y_SPLIT` 사용. top은 항상 공통 경계 사용 |
 | `MODEL__VISION__FREEZER_SIDE_DIRECTION_AXIS` | `y` | side 방향 진단의 축 `x/y`. top은 Y축 고정 |
-| `MODEL__VISION__FREEZER_SIDE_RETURN_DIRECTION` | `decreasing` | side 반납 방향 `increasing/decreasing`. 현재 top은 Y 감소=반납 고정 |
+| `MODEL__VISION__FREEZER_ROI_VERTICAL_REGION` / `FREEZER_ROI_Y_SPLIT` | `lower` / `350` | 냉동 아래 원점 Y≤350의 상품 중심만 유지. freezer ∧ dual_top_proxy 전용 |
+| `MODEL__VISION__FREEZER_SIDE_RETURN_DIRECTION` | `increasing` | side 반납 방향 `increasing/decreasing`. top은 아래 원점 Y 증가(위쪽)=반납 고정 |
 | `MODEL__VISION__FREEZER_SIDE_DIRECTION_MIN_DISPLACEMENT_PX` | `20` | side 최소 이동량. 10px 이상. top은 20px 코드 기본값 |
 | `MODEL__VISION__FREEZER_{TOP,SIDE}_RETURN_BOUNDARY_PX` | 미설정 | 선택 축의 동작 경계 진단. ROI처럼 검출을 제거하지 않음 |
 | `MODEL__WEIGHT__SEGMENT_RETRY_GAP_GRAMS` | `5.0` | `_segment_target_retry` 발동 임계 |
@@ -322,6 +324,8 @@ sequenceDiagram
 | `MODEL__LEDGER__KEEP_SESSIONS` | `4` | OPEN 시 prune에서 보존할 최근 세션 수 |
 
 동작 방향 진단의 3회 관측·경계 양쪽 여유 10px는 코드 기본값으로 관리한다.
+냉동의 Y 경계는 아래 원점 `Y=480-영상 중심 Y`이며, 위로 갈수록 증가한다.
+기본 ROI는 `0≤Y≤350`(영상 아래쪽 350px)이고, 손·상품 bbox는 원본 영상 좌표를 유지한다.
 top의 축/방향/최소 이동량, 카메라별 ROI 유지 방향, 위 공통 진단 임계는 별도 env로
 노출하지 않는다. 냉동 반납은 방향별 영상 후보로 종류를 추론하고 무게로 수량을
 검증한다. 경계가 있으면 실제 통과를 요구한다. 왕복/교환의 분리는 취출·반납 양쪽

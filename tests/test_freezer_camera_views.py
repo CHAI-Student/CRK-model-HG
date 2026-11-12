@@ -42,7 +42,7 @@ def test_env_reaches_both_camera_direction_and_roi_without_changing_judgment(mon
     monkeypatch.setenv("MODEL__MACHINE__CABINET_TYPE", "freezer")
     for key, value in {
         "CAMERA_LAYOUT": "dual_top_proxy", "FREEZER_ROI_Y_SPLIT": "260",
-        "FREEZER_SIDE_ROI_Y_SPLIT": "220",
+        "FREEZER_SIDE_ROI_Y_SPLIT": "300",
         "FREEZER_TOP_RETURN_BOUNDARY_PX": "240", "FREEZER_SIDE_RETURN_BOUNDARY_PX": "200",
         "FREEZER_SIDE_DIRECTION_AXIS": "x", "FREEZER_SIDE_RETURN_DIRECTION": "decreasing",
         "FREEZER_SIDE_DIRECTION_MIN_DISPLACEMENT_PX": "30", "SIDE_HAND_ENABLED": "1",
@@ -153,9 +153,12 @@ def test_default_freezer_orientation_is_upward_return(monkeypatch, source):
     monkeypatch.delenv("MODEL__VISION__FREEZER_SIDE_DIRECTION_AXIS", raising=False)
     monkeypatch.delenv("MODEL__VISION__FREEZER_SIDE_RETURN_DIRECTION", raising=False)
     settings = Settings(cabinet_type="freezer") if source == "defaults" else Settings.from_env()
-    assert settings.freezer_side_return_direction == "decreasing"
+    assert settings.freezer_side_return_direction == "increasing"
+    assert settings.freezer_roi_vertical_region == "lower"
+    assert settings.freezer_roi_y_split == 350
     pipeline = ModelService(CameraScene(), settings=settings).pipeline
-    assert {camera: (config.axis, config.return_direction)
+    assert {camera: (config.axis, config.return_direction, config.coordinate_origin)
             for camera, config in pipeline._freezer_direction_configs.items()} == {
-        "top": ("y", "decreasing"), "side": ("y", "decreasing"),
+        "top": ("y", "increasing", "bottom_left"),
+        "side": ("y", "increasing", "bottom_left"),
     }

@@ -360,8 +360,9 @@ class TestYDirectionReport:
         assert "카메라별 취출·반납 방향 (진단·결제 미반영)" in render(report)
         out = render_session(doc)
         assert "top/c1/track0 mixed" in out
-        assert "return: pos 0~3 y 240.0->50.0 Δy=-190.0px obs=4" in out
-        assert "take: pos 3~6 y 50.0->240.0 Δy=190.0px obs=4" in out
+        assert "return: pos 0~3 y 240.0->430.0 Δy=190.0px obs=4" in out
+        assert "take: pos 3~6 y 430.0->240.0 Δy=-190.0px obs=4" in out
+        assert "좌표 원점=bottom_left" in out
         assert doc == original  # 보고서와 상세 출력은 아카이브를 바꾸지 않는다.
 
     def test_missing_diagnostic_differs_from_observed_unknown(self):

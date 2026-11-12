@@ -72,6 +72,7 @@ class _Track:
     last_pos: int = -1
     head_obs: int = 0  # pos < head_frames 관측 수
     head_path: float = 0.0  # head 구간 내 누적 이동 (held 오인 방지 — 10차)
+    # 영상 원점 좌표를 보관한다. 방향 요약 시에만 냉동 아래 원점 Y로 변환.
     axis_observations: list[tuple[int, float]] = field(default_factory=list)
 
     def observe(self, cx: float, cy: float, size: float, frame_idx: int) -> float:

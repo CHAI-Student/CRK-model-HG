@@ -81,6 +81,8 @@ def _trace_to_dict(trace: TriggerTrace | None) -> dict:
         "reason_codes": list(trace.reason_codes),
         "vote_summary": dict(trace.vote_summary) if trace.vote_summary else {},
     }
+    if trace.decision_coordinate_origin is not None:
+        out["decision_coordinate_origin"] = trace.decision_coordinate_origin
     # 프레임별 bbox 기록 (MODEL__SESSION__SAVE_DETECTIONS opt-in) — off일 때는
     # 키 자체를 넣지 않아 기존 아카이브 포맷을 그대로 유지한다. 판정 기여
     # 검출(진입 conf 통과)만 담긴다 — render-session CLI가 video_paths의
