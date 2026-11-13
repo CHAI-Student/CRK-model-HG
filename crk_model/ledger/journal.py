@@ -28,7 +28,7 @@ from crk_model.core.types import (
     VisionCandidate,
     WeightSegment,
 )
-from crk_model.ledger.events import FreezerAction, TriggerEvent
+from crk_model.ledger.events import FreezerAction, FreezerReturnEvidence, TriggerEvent
 
 
 def _judgment_from_dict(j: dict) -> JudgmentResult:
@@ -77,6 +77,11 @@ def event_to_dict(e: TriggerEvent) -> dict:
             [action_to_dict(a) for a in e.freezer_actions]
             if e.freezer_actions is not None else None
         ),
+        "freezer_return": (
+            {"candidates": [asdict(c) for c in e.freezer_return.candidates],
+             "stabilized": e.freezer_return.stabilized, "source": e.freezer_return.source}
+            if e.freezer_return is not None else None
+        ),
     }
 
 
@@ -101,6 +106,12 @@ def event_from_dict(d: dict) -> TriggerEvent:
             tuple(FreezerAction(a["delta_weight"], _judgment_from_dict(a["judgment"]))
                   for a in d["freezer_actions"])
             if d.get("freezer_actions") is not None else None
+        ),
+        freezer_return=(
+            FreezerReturnEvidence(
+                tuple(VisionCandidate(**c) for c in d["freezer_return"]["candidates"]),
+                d["freezer_return"]["stabilized"], d["freezer_return"]["source"],
+            ) if d.get("freezer_return") is not None else None
         ),
     )
 

@@ -4,7 +4,7 @@
 경로 분기 (다이어그램 4):
 - I2: 빈 allowlist → 추론 차단 (YOLO 호출 0, fail-closed)
 - 저무게 스킵: |delta| < 프로파일 게이트 → vision 생략 (QA Q8)
-- 취출/반납과 수량은 기존 무게 판정 경로 사용. 영상 방향은 진단 전용
+- 취출/반납과 수량은 기존 무게 경로. 냉동 반납 영상은 이전 취출 상품과 연결
 - 로드셀 신뢰 불가 → vision_only 강제 (원본 _should_force_vision_only)
 - I1: 처리 예외 → status="error" 이벤트로 전파 (무검출로 조용히 바꾸지 않음)
 - L2: 조기 종료 시 추론만 중단 (I15 가드는 EarlyTerminator 내부)
@@ -33,7 +33,7 @@ from crk_model.ingest.loadcell import (
 )
 from crk_model.judgment.interfaces import JudgmentContext
 from crk_model.judgment.router import JudgmentRouter
-from crk_model.ledger.events import FreezerAction, TriggerEvent
+from crk_model.ledger.events import FreezerAction, FreezerReturnEvidence, TriggerEvent
 from crk_model.perception.detector import HAND_CLASS_ID, Detector
 from crk_model.perception.early_termination import EarlyTerminator
 from crk_model.perception.filters import DetectionFilterChain
@@ -114,6 +114,7 @@ class TriggerTrace:
     crossed_directions: list[str] = field(default_factory=list)
     # 이전 행동별 아카이브/저널 호환용. 신규 트리거는 기존 무게 경로(None)를 쓴다.
     freezer_actions: tuple[FreezerAction, ...] | None = None
+    freezer_return: FreezerReturnEvidence | None = None
 
 
 @dataclass(frozen=True)
@@ -308,6 +309,13 @@ class TriggerPipeline:
             return self._outcome(session_id, req, delta, analysis.segments, judgment, trace)
 
         candidates = self._run_vision(req, profile, snapshot, delta, trace)
+        if not profile.weight_is_discriminative and delta >= profile.min_weight_change_grams:
+            # 최종 양수 delta만 반납이다. 중간 양수 구간/경계 통과로 행동을 나누지 않는다.
+            returning = trace.directional_candidates.get("return", ())
+            trace.freezer_return = FreezerReturnEvidence(
+                tuple(returning or candidates), analysis.stabilized,
+                "return_direction" if returning else "video",
+            )
         ctx = JudgmentContext(
             zone=req.zone,
             profile=profile,
@@ -947,5 +955,6 @@ class TriggerPipeline:
             video_paths=tuple(req.video_paths.items()),
             change_timestamps=tuple(req.change_timestamps),
             freezer_actions=trace.freezer_actions,
+            freezer_return=trace.freezer_return,
         )
         return TriggerOutcome(event, trace)

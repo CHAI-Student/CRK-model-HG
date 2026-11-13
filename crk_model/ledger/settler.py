@@ -34,6 +34,7 @@ from crk_model.ledger.cross_zone import (
     apply_cross_zone_penalty,
 )
 from crk_model.ledger.events import EventLog, TriggerEvent
+from crk_model.ledger.freezer_returns import TakeLot, consume_take, match_return, record_take
 from crk_model.ledger.ghost_ledger import (
     GhostLedgerConfig,
     apply_ghost_demotion,
@@ -148,10 +149,45 @@ def _pass_returns(
     net_adjustments: dict[int, float] = defaultdict(float)
     protected: set[int] = set()
     review: set[int] = set()
+    take_lots: list[TakeLot] = []
     for e in sorted(events, key=lambda e: e.ts):
         b = baskets[e.zone]
         prof = _profile(profiles, e.zone, default_profile)
         tol = prof.tolerance_grams
+        if (e.freezer_return is not None and e.delta_weight > 0
+                and not prof.weight_is_discriminative):
+            eligible = [lot for lot in take_lots
+                        if freezer_cross_zone or lot.zone == e.zone]
+            allocation, reason = match_return(
+                e.freezer_return, e.delta_weight, e.zone, eligible, tol,
+            )
+            if not allocation:
+                affected = {z for z in baskets
+                            if not _profile(profiles, z, default_profile).weight_is_discriminative}
+                protected.update(affected)
+                review.update(affected)
+                if notes is not None:
+                    notes.append(f"zone{e.zone}:freezer_return_unresolved:{reason}")
+                # 비전 미확정 반납을 뒤의 무게 매칭/net 보정이 다른 SKU로 대신 차감하지 않는다.
+                continue
+            expected = sum(lot.unit_weight * count for lot, count in allocation)
+            protected.add(e.zone)
+            for lot, count in allocation:
+                for _ in range(count):
+                    baskets[lot.zone].remove_one(lot.product.product_id)
+                lot.remaining -= count
+                protected.add(lot.zone)
+                if lot.zone != e.zone:
+                    moved = e.delta_weight * (lot.unit_weight * count / expected)
+                    net_adjustments[lot.zone] += moved
+                    net_adjustments[e.zone] -= moved
+                if notes is not None:
+                    notes.append(
+                        f"zone{lot.zone}:freezer_vision_return:from_zone{e.zone}:"
+                        f"{lot.product.product_id}-{count}:"
+                        f"take={lot.unit_weight * count:.1f}g:return={e.delta_weight:.1f}g"
+                    )
+            continue
         if e.freezer_actions is not None and not prof.weight_is_discriminative:
             protected.add(e.zone)
             for action in e.freezer_actions:
@@ -170,6 +206,7 @@ def _pass_returns(
                 if action.delta_weight < 0:
                     for pc in judgment.products:
                         b.add(pc.product, pc.count)
+                    record_take(take_lots, e.zone, action.delta_weight, judgment.products)
                     continue
                 if action.delta_weight <= 0:
                     review.add(e.zone)
@@ -189,6 +226,7 @@ def _pass_returns(
                             continue
                         for _ in range(count):
                             origin_basket.remove_one(pc.product.product_id)
+                        consume_take(take_lots, origin, pc.product.product_id, count)
                         remaining -= count
                         protected.add(origin)
                         if origin != e.zone:
@@ -215,8 +253,10 @@ def _pass_returns(
         if e.delta_weight < 0:
             for pc in e.judgment.products:
                 b.add(pc.product, pc.count)
+            if not prof.weight_is_discriminative:
+                record_take(take_lots, e.zone, e.delta_weight, e.judgment.products)
         elif e.delta_weight > 0:
-            if _match_return(b, e.delta_weight, tol):
+            if _match_return(b, e.delta_weight, tol, take_lots=take_lots, zone=e.zone):
                 continue
             if freezer_cross_zone and not prof.weight_is_discriminative:
                 matched = False
@@ -231,6 +271,7 @@ def _pass_returns(
                         continue
                     for product in products:
                         origin_basket.remove_one(product.product_id)
+                        consume_take(take_lots, origin, product.product_id, 1)
                         if notes is not None:
                             notes.append(
                                 f"cross_zone_return:zone{e.zone}->zone{origin}:"
@@ -246,10 +287,14 @@ def _pass_returns(
     return baskets, unmatched, dict(net_adjustments), protected, review
 
 
-def _match_return(b: _Basket, ret_weight: float, tol: float) -> bool:
+def _match_return(
+    b: _Basket, ret_weight: float, tol: float,
+    *, take_lots: Sequence[TakeLot] = (), zone: int = 0,
+) -> bool:
     products = _return_products(b, ret_weight, tol)
     for product in products:
         b.remove_one(product.product_id)
+        consume_take(take_lots, zone, product.product_id, 1)
     return bool(products)
 
 

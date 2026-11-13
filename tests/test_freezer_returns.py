@@ -150,7 +150,7 @@ def pipeline_event(
 
 
 @pytest.mark.parametrize("analyzer", [LoadcellAnalyzer, BocpdLoadcellAnalyzer])
-@pytest.mark.parametrize("increase,net_take", [(80, 370), (235, 470)])
+@pytest.mark.parametrize("increase,net_take", [(80, 370), (235, 470), (100, 370)])
 def test_reported_contact_load_keeps_existing_pickup_without_boundary_crossing(
     analyzer, increase, net_take,
 ):
@@ -173,7 +173,7 @@ def test_reported_contact_load_keeps_existing_pickup_without_boundary_crossing(
 @pytest.mark.parametrize("analyzer", [LoadcellAnalyzer, BocpdLoadcellAnalyzer])
 @pytest.mark.parametrize("levels", [[500, 605], [500, 400, 605]])
 @pytest.mark.parametrize("ys", [[200, 240, 280], [300, 280, 260], []])
-def test_positive_net_uses_weight_return_with_opposite_missing_or_uncrossed_video(
+def test_positive_net_uses_identity_even_with_opposite_or_uncrossed_video(
     analyzer, levels, ys,
 ):
     scene = [[detection(2, 100, y)] for y in ys]
@@ -181,7 +181,9 @@ def test_positive_net_uses_weight_return_with_opposite_missing_or_uncrossed_vide
     assert outcome.event.delta_weight == 105
     assert outcome.event.freezer_actions is None
     result = settle([take(1, 1, (B, 1)), outcome.event])
-    assert counts(result) == {}
+    assert counts(result) == ({} if ys else {"b": 1})
+    if not ys:
+        assert any("missing_identity" in note for note in result.notes)
 
 
 def test_bottom_origin_roi_and_direction_diagnostics_preserve_original_bbox():
@@ -210,13 +212,15 @@ def test_two_cameras_do_not_double_weight_return():
     assert counts(settle([take(1, 1, (B, 2)), outcome.event])) == {"b": 1}
 
 
-def test_camera_identity_conflict_does_not_veto_existing_weight_return():
+def test_camera_identity_conflict_keeps_prior_take_for_review():
     top = [[detection(1, 100, y)] for y in [300, 260, 220]]
     side = [[detection(2, 100, y)] for y in [300, 260, 220]]
     outcome, _ = pipeline_event(top, [500, 605], side=side)
     assert "return" in outcome.trace.uncertain_directions
     assert outcome.event.freezer_actions is None
-    assert counts(settle([take(1, 1, (B, 1)), outcome.event])) == {}
+    result = settle([take(1, 1, (B, 1)), outcome.event])
+    assert counts(result) == {"b": 1}
+    assert any("ambiguous_identity" in note for note in result.notes)
 
 
 @pytest.mark.parametrize("analyzer", [LoadcellAnalyzer, BocpdLoadcellAnalyzer])

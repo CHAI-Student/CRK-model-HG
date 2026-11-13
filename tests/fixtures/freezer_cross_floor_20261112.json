@@ -1,0 +1,574 @@
+{
+  "note": "Saved judgments/candidates only; no video inference. Product metadata comes from archived zones. Full OPEN snapshot is absent; stock_qty=1 is a replay fixture bound. Return evidence is reconstructed from recorded directional candidates and non-pending weight segments.",
+  "products": [
+    {
+      "product_id": "P17937490727723480",
+      "name": "BAG_HARIM_HOTDOG_ORIGINAL_400G",
+      "class_id": 95,
+      "unit_weight": 490.0,
+      "unit_price": 5,
+      "stock_qty": 1
+    },
+    {
+      "product_id": "P17937491970057240",
+      "name": "BAG_HARIM_YONGGARI_CHICKEN_450G",
+      "class_id": 98,
+      "unit_weight": 475.0,
+      "unit_price": 5,
+      "stock_qty": 1
+    },
+    {
+      "product_id": "P17937490533806276",
+      "name": "BAG_HARIM_JOOWON_SLICED_SOYSAUCE_DUCK_BULGOGI_700G",
+      "class_id": 94,
+      "unit_weight": 745.0,
+      "unit_price": 5,
+      "stock_qty": 1
+    }
+  ],
+  "sessions": [
+    {
+      "source": "ses-1-1794472933.yaml",
+      "expected": {
+        "95": 1,
+        "98": 1
+      },
+      "events": [
+        {
+          "zone": 3,
+          "ts": 1794472934.281403,
+          "delta_weight": -485.0,
+          "segments": [
+            {
+              "start_ts": 1794472936.573827,
+              "end_ts": 1794472937.453137,
+              "delta_grams": 55.0
+            },
+            {
+              "start_ts": 1794472938.17383,
+              "end_ts": 1794472939.05227,
+              "delta_grams": 75.0
+            },
+            {
+              "start_ts": 1794472939.773686,
+              "end_ts": 1794472940.651421,
+              "delta_grams": -615.0
+            }
+          ],
+          "status": "ok",
+          "vision_candidates": [
+            {
+              "class_id": 95,
+              "confidence": 1.0,
+              "vote_count": 37,
+              "vote_ratio": 0.09536082474226804,
+              "head_votes": 0,
+              "span_ratio": 0.365,
+              "first_pos_ratio": 0.4526
+            },
+            {
+              "class_id": 98,
+              "confidence": 1.0,
+              "vote_count": 30,
+              "vote_ratio": 0.07731958762886598,
+              "head_votes": 0,
+              "span_ratio": 0.1434,
+              "first_pos_ratio": 0.6934
+            },
+            {
+              "class_id": 102,
+              "confidence": 1.0,
+              "vote_count": 9,
+              "vote_ratio": 0.023195876288659795,
+              "head_votes": 0,
+              "span_ratio": 0.0189,
+              "first_pos_ratio": 0.7153
+            }
+          ],
+          "video_paths": {
+            "top": "/data/app-data/Codes/Edge_Environment/20261112_174213/inference/zone_3/2026-11-12_08-42-17/top.avi",
+            "side": "/data/app-data/Codes/Edge_Environment/20261112_174213/inference/zone_3/2026-11-12_08-42-17/side.avi"
+          },
+          "change_timestamps": [
+            1794472937.453137,
+            1794472939.05227,
+            1794472940.651421
+          ],
+          "session_id": "ses-1-1794472933",
+          "seq": null,
+          "judgment": {
+            "status": "complete",
+            "strategy": "freezer_vision_first",
+            "reason": "freezer_vision_first_single",
+            "confidence": 1.0,
+            "products": [
+              {
+                "product": {
+                  "product_id": "P17937490727723480",
+                  "name": "BAG_HARIM_HOTDOG_ORIGINAL_400G",
+                  "class_id": 95,
+                  "unit_weight": 490.0,
+                  "unit_price": 5,
+                  "stock_qty": 1
+                },
+                "count": 1
+              }
+            ]
+          },
+          "freezer_actions": null
+        },
+        {
+          "zone": 5,
+          "ts": 1794472937.453137,
+          "delta_weight": -475.0,
+          "segments": [
+            {
+              "start_ts": 1794472939.773686,
+              "end_ts": 1794472940.651421,
+              "delta_grams": 95.0
+            },
+            {
+              "start_ts": 1794472941.374315,
+              "end_ts": 1794472942.254175,
+              "delta_grams": -566.6666666666667
+            }
+          ],
+          "status": "ok",
+          "vision_candidates": [
+            {
+              "class_id": 95,
+              "confidence": 1.0,
+              "vote_count": 37,
+              "vote_ratio": 0.09840425531914894,
+              "head_votes": 0,
+              "span_ratio": 0.4065,
+              "first_pos_ratio": 0.2439
+            },
+            {
+              "class_id": 98,
+              "confidence": 1.0,
+              "vote_count": 30,
+              "vote_ratio": 0.0797872340425532,
+              "head_votes": 0,
+              "span_ratio": 0.1551,
+              "first_pos_ratio": 0.5061
+            },
+            {
+              "class_id": 102,
+              "confidence": 1.0,
+              "vote_count": 9,
+              "vote_ratio": 0.023936170212765957,
+              "head_votes": 0,
+              "span_ratio": 0.0204,
+              "first_pos_ratio": 0.5347
+            }
+          ],
+          "video_paths": {
+            "top": "/data/app-data/Codes/Edge_Environment/20261112_174213/inference/zone_5/2026-11-12_08-42-20/top.avi",
+            "side": "/data/app-data/Codes/Edge_Environment/20261112_174213/inference/zone_5/2026-11-12_08-42-20/side.avi"
+          },
+          "change_timestamps": [
+            1794472940.651421,
+            1794472942.254175
+          ],
+          "session_id": "ses-1-1794472933",
+          "seq": null,
+          "judgment": {
+            "status": "complete",
+            "strategy": "freezer_vision_first",
+            "reason": "freezer_vision_first_single",
+            "confidence": 1.0,
+            "products": [
+              {
+                "product": {
+                  "product_id": "P17937490727723480",
+                  "name": "BAG_HARIM_HOTDOG_ORIGINAL_400G",
+                  "class_id": 95,
+                  "unit_weight": 490.0,
+                  "unit_price": 5,
+                  "stock_qty": 1
+                },
+                "count": 1
+              }
+            ]
+          },
+          "freezer_actions": null
+        }
+      ]
+    },
+    {
+      "source": "ses-2-1794472980.yaml",
+      "expected": {
+        "94": 1
+      },
+      "events": [
+        {
+          "zone": 3,
+          "ts": 1794472981.181671,
+          "delta_weight": -465.0,
+          "segments": [
+            {
+              "start_ts": 1794472983.46954,
+              "end_ts": 1794472984.348557,
+              "delta_grams": 115.0
+            },
+            {
+              "start_ts": 1794472985.069795,
+              "end_ts": 1794472985.948034,
+              "delta_grams": -580.0
+            }
+          ],
+          "status": "ok",
+          "vision_candidates": [
+            {
+              "class_id": 95,
+              "confidence": 1.0,
+              "vote_count": 88,
+              "vote_ratio": 0.22506393861892582,
+              "head_votes": 0,
+              "span_ratio": 0.473,
+              "first_pos_ratio": 0.527
+            },
+            {
+              "class_id": 94,
+              "confidence": 1.0,
+              "vote_count": 29,
+              "vote_ratio": 0.0741687979539642,
+              "head_votes": 0,
+              "span_ratio": 0.0726,
+              "first_pos_ratio": 0.7635
+            }
+          ],
+          "video_paths": {
+            "top": "/data/app-data/Codes/Edge_Environment/20261112_174300/inference/zone_3/2026-11-12_08-43-04/top.avi",
+            "side": "/data/app-data/Codes/Edge_Environment/20261112_174300/inference/zone_3/2026-11-12_08-43-04/side.avi"
+          },
+          "change_timestamps": [
+            1794472984.348557,
+            1794472985.948034
+          ],
+          "session_id": "ses-2-1794472980",
+          "seq": null,
+          "judgment": {
+            "status": "partial",
+            "strategy": "freezer_vision_first",
+            "reason": "freezer_vision_first_near_gate",
+            "confidence": 0.6,
+            "products": [
+              {
+                "product": {
+                  "product_id": "P17937490727723480",
+                  "name": "BAG_HARIM_HOTDOG_ORIGINAL_400G",
+                  "class_id": 95,
+                  "unit_weight": 490.0,
+                  "unit_price": 5,
+                  "stock_qty": 1
+                },
+                "count": 1
+              }
+            ]
+          },
+          "freezer_actions": null
+        },
+        {
+          "zone": 4,
+          "ts": 1794472984.348557,
+          "delta_weight": -742.5,
+          "segments": [
+            {
+              "start_ts": 1794472986.670756,
+              "end_ts": 1794472987.550402,
+              "delta_grams": -152.5
+            },
+            {
+              "start_ts": 1794472988.270938,
+              "end_ts": 1794472989.071917,
+              "delta_grams": -587.0
+            }
+          ],
+          "status": "ok",
+          "vision_candidates": [
+            {
+              "class_id": 95,
+              "confidence": 1.0,
+              "vote_count": 92,
+              "vote_ratio": 0.20087336244541484,
+              "head_votes": 0,
+              "span_ratio": 0.5021,
+              "first_pos_ratio": 0.2446
+            },
+            {
+              "class_id": 94,
+              "confidence": 1.0,
+              "vote_count": 34,
+              "vote_ratio": 0.07423580786026202,
+              "head_votes": 0,
+              "span_ratio": 0.2961,
+              "first_pos_ratio": 0.4893
+            }
+          ],
+          "video_paths": {
+            "top": "/data/app-data/Codes/Edge_Environment/20261112_174300/inference/zone_4/2026-11-12_08-43-07/top.avi",
+            "side": "/data/app-data/Codes/Edge_Environment/20261112_174300/inference/zone_4/2026-11-12_08-43-07/side.avi"
+          },
+          "change_timestamps": [
+            1794472987.550402,
+            1794472989.071917
+          ],
+          "session_id": "ses-2-1794472980",
+          "seq": null,
+          "judgment": {
+            "status": "complete",
+            "strategy": "freezer_vision_first",
+            "reason": "freezer_vision_first_single",
+            "confidence": 1.0,
+            "products": [
+              {
+                "product": {
+                  "product_id": "P17937490533806276",
+                  "name": "BAG_HARIM_JOOWON_SLICED_SOYSAUCE_DUCK_BULGOGI_700G",
+                  "class_id": 94,
+                  "unit_weight": 745.0,
+                  "unit_price": 5,
+                  "stock_qty": 1
+                },
+                "count": 1
+              }
+            ]
+          },
+          "freezer_actions": null
+        },
+        {
+          "zone": 2,
+          "ts": 1794472988.270938,
+          "delta_weight": 466.6666666666667,
+          "segments": [
+            {
+              "start_ts": 1794472990.671489,
+              "end_ts": 1794472991.550452,
+              "delta_grams": 466.6666666666667
+            }
+          ],
+          "status": "ok",
+          "vision_candidates": [
+            {
+              "class_id": 95,
+              "confidence": 1.0,
+              "vote_count": 63,
+              "vote_ratio": 0.18584070796460178,
+              "head_votes": 19,
+              "span_ratio": 0.3973,
+              "first_pos_ratio": 0.0365
+            },
+            {
+              "class_id": 94,
+              "confidence": 1.0,
+              "vote_count": 26,
+              "vote_ratio": 0.07669616519174041,
+              "head_votes": 0,
+              "span_ratio": 0.2982,
+              "first_pos_ratio": 0.1697
+            }
+          ],
+          "video_paths": {
+            "top": "/data/app-data/Codes/Edge_Environment/20261112_174300/inference/zone_2/2026-11-12_08-43-11/top.avi",
+            "side": "/data/app-data/Codes/Edge_Environment/20261112_174300/inference/zone_2/2026-11-12_08-43-11/side.avi"
+          },
+          "change_timestamps": [
+            1794472991.550452
+          ],
+          "session_id": "ses-2-1794472980",
+          "seq": null,
+          "judgment": {
+            "status": "no_detection",
+            "strategy": "forced_final",
+            "reason": "forced_final_no_match",
+            "confidence": 0.0,
+            "products": []
+          },
+          "freezer_actions": null,
+          "freezer_return": {
+            "candidates": [
+              {
+                "class_id": 95,
+                "confidence": 0.3915496587753296,
+                "vote_count": 54,
+                "vote_ratio": 0.9473684210526315
+              }
+            ],
+            "stabilized": true,
+            "source": "return_direction"
+          }
+        }
+      ]
+    },
+    {
+      "source": "ses-3-1794473065.yaml",
+      "expected": {},
+      "events": [
+        {
+          "zone": 2,
+          "ts": 1794473066.90116,
+          "delta_weight": -462.5,
+          "segments": [
+            {
+              "start_ts": 1794473069.182404,
+              "end_ts": 1794473070.061276,
+              "delta_grams": -462.5
+            }
+          ],
+          "status": "ok",
+          "vision_candidates": [
+            {
+              "class_id": 95,
+              "confidence": 1.0,
+              "vote_count": 87,
+              "vote_ratio": 0.2636363636363636,
+              "head_votes": 0,
+              "span_ratio": 0.2227,
+              "first_pos_ratio": 0.545
+            },
+            {
+              "class_id": 103,
+              "confidence": 1.0,
+              "vote_count": 35,
+              "vote_ratio": 0.10606060606060606,
+              "head_votes": 0,
+              "span_ratio": 0.3137,
+              "first_pos_ratio": 0.4853
+            }
+          ],
+          "video_paths": {
+            "top": "/data/app-data/Codes/Edge_Environment/20261112_174425/inference/zone_2/2026-11-12_08-44-30/top.avi",
+            "side": "/data/app-data/Codes/Edge_Environment/20261112_174425/inference/zone_2/2026-11-12_08-44-30/side.avi"
+          },
+          "change_timestamps": [
+            1794473070.061276
+          ],
+          "session_id": "ses-3-1794473065",
+          "seq": null,
+          "judgment": {
+            "status": "partial",
+            "strategy": "freezer_vision_first",
+            "reason": "freezer_vision_first_near_gate",
+            "confidence": 0.6,
+            "products": [
+              {
+                "product": {
+                  "product_id": "P17937490727723480",
+                  "name": "BAG_HARIM_HOTDOG_ORIGINAL_400G",
+                  "class_id": 95,
+                  "unit_weight": 490.0,
+                  "unit_price": 5,
+                  "stock_qty": 1
+                },
+                "count": 1
+              }
+            ]
+          },
+          "freezer_actions": null
+        },
+        {
+          "zone": 5,
+          "ts": 1794473071.661542,
+          "delta_weight": 465.0,
+          "segments": [
+            {
+              "start_ts": 1794473073.983921,
+              "end_ts": 1794473074.862603,
+              "delta_grams": 465.0
+            }
+          ],
+          "status": "ok",
+          "vision_candidates": [
+            {
+              "class_id": 95,
+              "confidence": 1.0,
+              "vote_count": 87,
+              "vote_ratio": 0.2871287128712871,
+              "head_votes": 29,
+              "span_ratio": 0.2156,
+              "first_pos_ratio": 0.0688
+            },
+            {
+              "class_id": 103,
+              "confidence": 1.0,
+              "vote_count": 35,
+              "vote_ratio": 0.11551155115511551,
+              "head_votes": 1,
+              "span_ratio": 0.2844,
+              "first_pos_ratio": 0.0089
+            }
+          ],
+          "video_paths": {
+            "top": "/data/app-data/Codes/Edge_Environment/20261112_174425/inference/zone_5/2026-11-12_08-44-34/top.avi",
+            "side": "/data/app-data/Codes/Edge_Environment/20261112_174425/inference/zone_5/2026-11-12_08-44-34/side.avi"
+          },
+          "change_timestamps": [
+            1794473074.862603
+          ],
+          "session_id": "ses-3-1794473065",
+          "seq": null,
+          "judgment": {
+            "status": "no_detection",
+            "strategy": "forced_final",
+            "reason": "forced_final_no_match",
+            "confidence": 0.0,
+            "products": []
+          },
+          "freezer_actions": null,
+          "freezer_return": {
+            "candidates": [
+              {
+                "class_id": 95,
+                "confidence": 0.39137432575225833,
+                "vote_count": 28,
+                "vote_ratio": 0.6666666666666666
+              },
+              {
+                "class_id": 103,
+                "confidence": 0.3862720727920532,
+                "vote_count": 16,
+                "vote_ratio": 0.38095238095238093
+              }
+            ],
+            "stabilized": true,
+            "source": "return_direction"
+          }
+        }
+      ]
+    },
+    {
+      "source": "ses-4-1794473128.yaml",
+      "expected": {},
+      "events": [
+        {
+          "zone": 5,
+          "ts": 1794473130.543644,
+          "delta_weight": 0.0,
+          "segments": [],
+          "status": "ok",
+          "vision_candidates": [],
+          "video_paths": {
+            "top": "/data/app-data/Codes/Edge_Environment/20261112_174528/inference/zone_5/2026-11-12_08-45-33/top.avi",
+            "side": "/data/app-data/Codes/Edge_Environment/20261112_174528/inference/zone_5/2026-11-12_08-45-33/side.avi"
+          },
+          "change_timestamps": [
+            1794473133.02496,
+            1794473136.229102
+          ],
+          "session_id": "ses-4-1794473128",
+          "seq": null,
+          "judgment": {
+            "status": "no_detection",
+            "strategy": "low_weight_skip",
+            "reason": "below_min_weight_change",
+            "confidence": 0.0,
+            "products": []
+          },
+          "freezer_actions": null
+        }
+      ]
+    }
+  ]
+}

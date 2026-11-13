@@ -20,6 +20,15 @@ class FreezerAction:
 
 
 @dataclass(frozen=True)
+class FreezerReturnEvidence:
+    """양수인 최종 delta의 반납 영상 증거. 종류 연결과 무게 안정 여부만 보존한다."""
+
+    candidates: tuple[VisionCandidate, ...]
+    stabilized: bool
+    source: str  # return_direction | video
+
+
+@dataclass(frozen=True)
 class TriggerEvent:
     session_id: str
     zone: int
@@ -42,6 +51,8 @@ class TriggerEvent:
     change_timestamps: tuple[float, ...] = ()
     # 신규 트리거는 None(기존 무게 경로). 행동별 값/빈 튜플은 이전 기록의 재생용.
     freezer_actions: tuple[FreezerAction, ...] | None = None
+    # None은 구 기록/냉장. 신규 냉동 반납은 영상 증거가 없어도 빈 후보를 명시한다.
+    freezer_return: FreezerReturnEvidence | None = None
 
 
 @dataclass

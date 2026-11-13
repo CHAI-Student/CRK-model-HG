@@ -207,7 +207,7 @@ class Settings:
     # 경사 side의 검출 영역만 별도 보정. None이면 위 공통 Y 경계 사용.
     freezer_side_roi_y_split: float | None = None
     # 냉동은 아래 원점: top Y축/증가=반납/20px. 경사 side만 시점에 맞춰 보정.
-    # ROI와 별개인 방향 진단 경계. 경계 통과는 기록만 하고 무게 판정을 바꾸지 않는다.
+    # ROI와 별개인 방향 후보 경계. 반납 SKU 확인을 돕되 최종 delta/일반 취출은 바꾸지 않는다.
     freezer_side_direction_axis: str = "y"
     freezer_side_return_direction: str = "increasing"
     freezer_side_direction_min_displacement_px: float = 20.0

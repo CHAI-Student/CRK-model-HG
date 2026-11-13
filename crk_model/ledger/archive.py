@@ -163,6 +163,15 @@ def _event_to_dict(
             [action_to_dict(a) for a in event.freezer_actions]
             if event.freezer_actions is not None else None
         ),
+        "freezer_return": (
+            {"candidates": [
+                {"class_id": c.class_id, "confidence": c.confidence,
+                 "vote_count": c.vote_count, "vote_ratio": c.vote_ratio}
+                for c in event.freezer_return.candidates
+             ], "stabilized": event.freezer_return.stabilized,
+             "source": event.freezer_return.source}
+            if event.freezer_return is not None else None
+        ),
         "trace": _trace_to_dict(trace),
         "processing_time_ms": processing_time_ms,
     }

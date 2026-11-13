@@ -39,7 +39,8 @@ baseline은 손 신호에 의존해 top(프리롤에 이미 손)에서는 무력
   이 판정으로 표를 몰수하던 경로(구 `TUBE_IDENTITY=active`)는 냉동 실측
   열세로 폐기됐다 (docs/07-rejected-and-retired.md). 트랙 상태의 단일
   소유자는 이 모듈이다. 냉동 action_frames()는 별도로 저장한 방향 구간의
-  관측에서 종류 우세를 확인해 방향별 진단 후보를 만든다. 무게 판정과 분리한다.
+  관측에서 종류 우세를 확인해 방향별 후보를 만든다. 냉동 반납 SKU 확인을 보조하며
+  최종 delta 계산과 분리한다.
 """
 from __future__ import annotations
 
@@ -404,7 +405,7 @@ class MotionEvidence:
 
         한 튜브의 종류가 2:1 이상 우세하고 3회 이상 관측돼야 정체성 증거다.
         경계가 설정된 카메라는 실제 통과 구간만 진단 후보에 포함한다.
-        경계 없는 side는 방향 후보만 남긴다. 이 결과로 무게 판정을 변경하지 않는다.
+        경계 없는 side는 방향 후보만 남긴다. 반납 SKU 확인을 돕되 delta를 변경하지 않는다.
         """
         frames: dict[str, dict[tuple[str, int], list[Detection]]] = {
             "take": defaultdict(list), "return": defaultdict(list),
