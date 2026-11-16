@@ -298,7 +298,14 @@ class TriggerPipeline:
         if analysis.reason == "final_delta_unstable":
             trace.reason_codes.append("loadcell_final_delta_unstable")
         delta = analysis.delta_weight
-        if not vision_only and abs(delta) < profile.min_weight_change_grams:
+        below_profile_gate = (
+            not vision_only and abs(delta) < profile.min_weight_change_grams
+        )
+        below_pilot_gate = (
+            profile.min_trigger_delta_grams is not None
+            and abs(delta) < profile.min_trigger_delta_grams
+        )
+        if below_profile_gate or below_pilot_gate:
             # 저무게 스킵: vision 전체 생략 = YOLO 호출 0 (QA Q8)
             trace.reason_codes.append("low_weight_skip")
             judgment = JudgmentResult(

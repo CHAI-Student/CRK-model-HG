@@ -35,6 +35,9 @@ class SensorProfile:
     motion_gate_keepalive: int
     # I15: freezer·반품에는 조기 종료 금지 (반품은 delta 부호로 별도 차단)
     early_termination_allowed: bool
+    # 파일럿용 최소 순 delta. 설정 시 이 값 미만이면 안정 여부와 무관하게
+    # 비전 추론을 건너뛴다.
+    min_trigger_delta_grams: float | None = None
     # 모션 변위 증거(원본 motion_min_displacement_px 대응, issue #16 후속):
     # 클래스 트랙의 누적 변위가 max(floor, bbox×0.10)을 넘어야 투표 유효.
     # "집어간 상품은 움직이고 진열 상품은 안 움직인다"의 직접 검사 —
@@ -75,6 +78,7 @@ FREEZER = SensorProfile(
     segment_step_grams=20.0,  # 컴프레서 사이클·드리프트 가짜 세그먼트 방지 (QA Q3 ②)
     motion_gate_threshold=0.005,  # 김서림/성에 → 스킵 이득이 0에 수렴해도 정확도 무손실 (fail-safe)
     motion_gate_keepalive=4,
+    min_trigger_delta_grams=50.0,  # 파일럿: 200g 이상 상품 구성에서 50g 미만 흔들림 추론 억제
     early_termination_allowed=False,  # I15
     motion_evidence_floor_px=12.0,  # 원본 FREEZER_MOTION_MIN_DISPLACEMENT_PX
 )

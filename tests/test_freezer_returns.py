@@ -275,12 +275,13 @@ def test_temporary_increase_does_not_add_return_wait_to_negative_net(analyzer):
     assert analysis.reason == ""
 
 
-def test_unstable_loadcell_keeps_original_vision_only_route():
+def test_unstable_loadcell_below_freezer_pilot_gate_skips_vision():
     scene = [[detection(1, 50, y)] for y in [200, 240, 280]]
     scene += [[detection(3, 350, y)] for y in [280, 240, 200]]
     outcome, _ = pipeline_event(scene, [500, 500])
-    assert outcome.event.judgment.strategy == "vision_only"
-    assert outcome.event.judgment.products
+    assert outcome.event.judgment.strategy == "low_weight_skip"
+    assert outcome.event.judgment.reason == "below_min_weight_change"
+    assert not outcome.event.judgment.products
     assert outcome.event.freezer_actions is None
 
 
