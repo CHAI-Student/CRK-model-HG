@@ -34,7 +34,14 @@ from crk_model.ledger.cross_zone import (
     apply_cross_zone_penalty,
 )
 from crk_model.ledger.events import EventLog, TriggerEvent
-from crk_model.ledger.freezer_returns import TakeLot, consume_take, match_return, record_take
+from crk_model.ledger.freezer_movements import resolve_mixed_movements
+from crk_model.ledger.freezer_returns import (
+    TakeLot,
+    consume_take,
+    match_return,
+    primary_return_delta,
+    record_take,
+)
 from crk_model.ledger.ghost_ledger import (
     GhostLedgerConfig,
     apply_ghost_demotion,
@@ -160,6 +167,9 @@ def _pass_returns(
                         if freezer_cross_zone or lot.zone == e.zone]
             allocation, reason = match_return(
                 e.freezer_return, e.delta_weight, e.zone, eligible, tol,
+                channel_deltas=(e.freezer_movement.channel_deltas
+                                if e.freezer_movement and e.freezer_movement.stabilized else ()),
+                min_channel_weight=prof.min_trigger_delta_grams,
             )
             if not allocation:
                 affected = {z for z in baskets
@@ -171,6 +181,23 @@ def _pass_returns(
                 # 비전 미확정 반납을 뒤의 무게 매칭/net 보정이 다른 SKU로 대신 차감하지 않는다.
                 continue
             expected = sum(lot.unit_weight * count for lot, count in allocation)
+            matched_delta = e.delta_weight
+            if reason.startswith("matched_channel"):
+                matched_delta = primary_return_delta(
+                    e.delta_weight, e.freezer_movement.channel_deltas,
+                    prof.min_trigger_delta_grams,
+                )
+                assert matched_delta is not None
+                review.add(e.zone)
+                if notes is not None:
+                    notes.append(
+                        f"zone{e.zone}:freezer_return_channel_residual:"
+                        f"{e.delta_weight - matched_delta:+.1f}g:total={e.delta_weight:+.1f}g"
+                    )
+            if "unique_refit" in reason:
+                review.add(e.zone)
+                if notes is not None:
+                    notes.append(f"zone{e.zone}:freezer_return_unique_refit")
             protected.add(e.zone)
             for lot, count in allocation:
                 for _ in range(count):
@@ -178,14 +205,14 @@ def _pass_returns(
                 lot.remaining -= count
                 protected.add(lot.zone)
                 if lot.zone != e.zone:
-                    moved = e.delta_weight * (lot.unit_weight * count / expected)
+                    moved = matched_delta * (lot.unit_weight * count / expected)
                     net_adjustments[lot.zone] += moved
                     net_adjustments[e.zone] -= moved
                 if notes is not None:
                     notes.append(
                         f"zone{lot.zone}:freezer_vision_return:from_zone{e.zone}:"
                         f"{lot.product.product_id}-{count}:"
-                        f"take={lot.unit_weight * count:.1f}g:return={e.delta_weight:.1f}g"
+                        f"take={lot.unit_weight * count:.1f}g:return={matched_delta:.1f}g"
                     )
             continue
         if e.freezer_actions is not None and not prof.weight_is_discriminative:
@@ -487,6 +514,11 @@ class CloseSettler:
             }
         )
         ok = sorted([*ok, *action_events], key=lambda e: e.ts)
+        ok = resolve_mixed_movements(
+            ok, profiles,
+            tuple(self._products_provider()) if self._products_provider else (),
+            self.default_profile, notes,
+        )
 
         baskets, unmatched, net_adjustments, protected, return_review = _pass_returns(
             ok, profiles, self.default_profile, freezer_cross_zone=True, notes=notes
@@ -555,7 +587,10 @@ class CloseSettler:
                 )
             if any(j.status is JudgmentStatus.PARTIAL for j in concluded_judgments):
                 zone_status = JudgmentStatus.PARTIAL.value
-            elif ambiguous_events or zone in return_review:
+            elif (ambiguous_events or zone in return_review or any(
+                note.startswith(f"zone{zone}:cross_zone_fingerprint_ambiguous:")
+                for note in notes
+            )):
                 zone_status = PAYMENT_STATUS_REVIEW
             else:
                 zone_status = JudgmentStatus.COMPLETE.value

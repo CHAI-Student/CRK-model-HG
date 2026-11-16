@@ -70,6 +70,9 @@ class LoadcellAnalysis:
     # pipeline이 이벤트별로 라우터를 돌려 단품 매칭으로 분해한다 (2단계).
     events: tuple[ChannelWeightEvent, ...] = ()
     terminal_levels: tuple[ChannelTerminalLevel, ...] = ()
+    # 음수 순변화 안에 마지막 증가가 있어도 기존 delta/stabilized는 그대로 둔다.
+    # 혼합 반납을 추가로 연결할 때만 기존 stabilization_wait 충족 여부를 사용한다.
+    trailing_return_stabilized: bool = True
 
 
 def terminal_levels(
@@ -191,7 +194,8 @@ class LoadcellAnalyzer:
                 for ch, a in gated
             )
             return LoadcellAnalysis(
-                delta, tuple(segments), True, baseline, events=events
+                delta, tuple(segments), True, baseline, events=events,
+                trailing_return_stabilized=all(a.trailing_return_stabilized for _, a in gated),
             )
         if settled:
             # 변화는 관측됐지만 전부 게이트 미달 — 합산 delta를 그대로 내보내
@@ -230,7 +234,16 @@ class LoadcellAnalyzer:
                 segments.append(
                     WeightSegment(samples[prev.end].ts, samples[cur.start].ts, step)
                 )
-        return LoadcellAnalysis(delta, tuple(segments), True, baseline)
+        trailing_return_stabilized = True
+        if plateaus[-1].mean - plateaus[-2].mean >= self._profile.segment_step_grams:
+            last = plateaus[-1]
+            trailing_return_stabilized = (
+                samples[last.end].ts - samples[last.start].ts >= self._stab_wait
+            )
+        return LoadcellAnalysis(
+            delta, tuple(segments), True, baseline,
+            trailing_return_stabilized=trailing_return_stabilized,
+        )
 
     def _stable_plateaus(self, totals: list[float]) -> list[_Plateau]:
         n = len(totals)

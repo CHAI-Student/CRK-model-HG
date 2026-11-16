@@ -237,7 +237,9 @@ _FINGERPRINT_CONF_TOLERANCE = 1e-6
 def _same_fingerprint(a: VisionCandidate, b: VisionCandidate) -> bool:
     if abs(a.confidence - b.confidence) > _FINGERPRINT_CONF_TOLERANCE:
         return False
-    vote_tolerance = max(1, round(_FINGERPRINT_VOTE_RATIO_TOLERANCE * max(a.vote_count, b.vote_count)))
+    vote_tolerance = max(
+        1, round(_FINGERPRINT_VOTE_RATIO_TOLERANCE * max(a.vote_count, b.vote_count))
+    )
     return abs(a.vote_count - b.vote_count) <= vote_tolerance
 
 
@@ -317,6 +319,36 @@ def _credible_trial_replacement(
     return trial
 
 
+def _ordered_duplicate_source(
+    events: Sequence[TriggerEvent], cid: int, cfg: CrossZonePenaltyConfig,
+) -> TriggerEvent | None:
+    """공유 영상의 두 취출 순서와 두 로드셀 이벤트 순서가 일치할 때만 귀속한다.
+
+    프레임을 시각으로 환산하지 않는다. 각 영상에서 독립적으로 관측한 순서가
+    같아야 하며, 같은 클래스 반복 취출/카메라 충돌/비겹침은 이 근거로 못 푼다.
+    """
+    if len(events) != 2 or not windows_mutually_overlap(events[0], events[1], cfg):
+        return None
+    orders = []
+    for event in events:
+        evidence = event.freezer_movement
+        if evidence is None or not evidence.stabilized:
+            return None
+        if len(event.judgment.products) != 1 or event.judgment.products[0].count != 1:
+            return None
+        visible = {c.class_id for c in evidence.take_candidates if c.vote_count >= 3}
+        order = evidence.take_order
+        if len(order) != 2 or len(set(order)) != 2 or not set(order) <= visible:
+            return None
+        orders.append(order)
+    if orders[0] != orders[1] or cid not in orders[0]:
+        return None
+    chronological = sorted(events, key=lambda event: min(sub_event_anchors(event)))
+    if min(sub_event_anchors(chronological[0])) == min(sub_event_anchors(chronological[1])):
+        return None
+    return chronological[orders[0].index(cid)]
+
+
 def _fingerprint_duplicate_suppression(
     events: Sequence[TriggerEvent],
     profiles: Mapping[int, SensorProfile],
@@ -324,6 +356,7 @@ def _fingerprint_duplicate_suppression(
     notes: list[str],
     default_profile: SensorProfile,
     router: JudgmentRouter,
+    cfg: CrossZonePenaltyConfig,
 ) -> list[TriggerEvent]:
     """서로 다른 zone에서 같은 클래스가 표·확신도까지 거의 완전히 동일하게
     청구되는 경우(ses-34/35의 71, ses-36/37의 70 — zone3·zone4 양쪽에 토씨
@@ -373,7 +406,7 @@ def _fingerprint_duplicate_suppression(
                     matched.add(z2)
         if len(matched) < 2:
             continue
-        survivors = [per_zone[z] for z in matched]
+        survivors = [per_zone[z] for z in sorted(matched)]
         residuals = {
             id(e): (r if (r := _judgment_residual(e)) is not None else float("inf"))
             for e in survivors
@@ -397,8 +430,20 @@ def _fingerprint_duplicate_suppression(
                     profiles.get(e.zone, default_profile), router,
                 )
             ]
-            if len(non_replaceable) == 1:
+            ordered = _ordered_duplicate_source(survivors, cid, cfg)
+            if ordered is not None and all(
+                _trial_replacement_valid(
+                    e, cid, active_products, profiles.get(e.zone, default_profile), router,
+                ) for e in survivors if e is not ordered
+            ):
+                best = ordered
+                notes.append(f"zone{best.zone}:cross_zone_visual_take_order:class{cid}")
+            elif len(non_replaceable) == 1:
                 best = non_replaceable[0]
+            else:
+                notes.extend(f"zone{e.zone}:cross_zone_fingerprint_ambiguous:class{cid}"
+                             for e in survivors)
+                continue  # 동률을 set/zone 번호 순서로 확정하지 않는다.
         for e in survivors:
             if e is not best:
                 to_strip[id(e)].add(cid)
@@ -678,7 +723,7 @@ def apply_cross_zone_penalty(
         )
         out.append(replaced if replaced is not None else e)
     out = _fingerprint_duplicate_suppression(
-        out, profiles, active_products, notes, default_profile, router
+        out, profiles, active_products, notes, default_profile, router, cfg
     )
     return _residual_loser_resolution(
         out, profiles, active_products, cfg, notes, default_profile, router, exempt,

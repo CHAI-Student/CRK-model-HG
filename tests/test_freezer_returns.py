@@ -255,6 +255,9 @@ def test_mixed_video_does_not_replace_weight_router_count(monkeypatch):
     assert [s.delta_grams for s in calls[0].segments] == [-205, 105]
     assert outcome.event.judgment.products
     assert outcome.event.freezer_actions is None
+    assert outcome.event.freezer_movement.take_candidates
+    assert outcome.event.freezer_movement.return_candidates
+    assert sum(outcome.event.freezer_movement.channel_deltas) == -100
 
 
 @pytest.mark.parametrize("analyzer", [LoadcellAnalyzer, BocpdLoadcellAnalyzer])

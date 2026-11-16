@@ -5,7 +5,7 @@ import math
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from crk_model.core.types import ActiveProduct, ProductCount
+from crk_model.core.types import ActiveProduct, ProductCount, VisionCandidate
 from crk_model.ledger.events import FreezerReturnEvidence
 
 
@@ -42,16 +42,57 @@ def consume_take(lots: Sequence[TakeLot], zone: int, product_id: str, count: int
 def match_return(
     evidence: FreezerReturnEvidence, delta: float, zone: int,
     lots: Sequence[TakeLot], tolerance: float,
+    *, channel_deltas: Sequence[float] = (), min_channel_weight: float | None = None,
 ) -> tuple[list[tuple[TakeLot, int]], str]:
     if not evidence.stabilized:
         return [], "not_stabilized"
+    if not math.isfinite(delta) or delta <= 0:
+        return [], "weight_mismatch"
     ranked = sorted(
-        (c for c in evidence.candidates if c.class_id > 0 and c.confidence > 0),
+        (c for c in evidence.candidates if c.class_id > 0 and c.confidence > 0
+         and math.isfinite(c.confidence)),
         key=lambda c: (-c.vote_count, -c.confidence),
     )
     if not ranked or ranked[0].vote_count < 3:
         return [], "missing_identity"
-    # 여러 튜브를 합친 후보의 우세다. 종류 선택 전에 무게나 취출 재고를 보지 않는다.
+    allocation, reason = _match_candidates(ranked, delta, zone, lots, tolerance)
+    if allocation or reason != "weight_mismatch":
+        return allocation, reason
+    primary = primary_return_delta(delta, channel_deltas, min_channel_weight)
+    if primary is not None:
+        allocation, channel_reason = _match_candidates(ranked, primary, zone, lots, tolerance)
+        if allocation:
+            return allocation, "matched_channel" + (
+                "_unique_refit" if channel_reason == "matched_unique_refit" else ""
+            )
+    return [], reason
+
+
+def primary_return_delta(
+    total: float, channels: Sequence[float], minimum: float | None,
+) -> float | None:
+    """단일 상품 채널 + 기존 추론 최소량 미만의 부채널 변화만 분리한다.
+
+    총 delta와 채널 합이 일치해야 한다. 나머지는 삭제하지 않고 정산에서
+    잔차/검토 사유로 보존한다. 채널 정보가 없거나 상품 크기 채널이 둘이면 불가.
+    """
+    if minimum is None or minimum <= 0 or len(channels) < 2:
+        return None
+    if not all(math.isfinite(value) for value in channels):
+        return None
+    if not math.isclose(sum(channels), total, abs_tol=1e-6):
+        return None
+    major = [value for value in channels if abs(value) >= minimum]
+    residual = sum(abs(value) for value in channels if abs(value) < minimum)
+    if len(major) == 1 and major[0] > 0 and residual < minimum:
+        return major[0]
+    return None
+
+
+def _match_candidates(
+    ranked: Sequence[VisionCandidate], delta: float, zone: int,
+    lots: Sequence[TakeLot], tolerance: float,
+) -> tuple[list[tuple[TakeLot, int]], str]:
     if len(ranked) > 1 and ranked[0].vote_count < 1.5 * ranked[1].vote_count:
         return [], "ambiguous_identity"
     cid = ranked[0].class_id
@@ -61,6 +102,30 @@ def match_return(
     if any(c.class_id in prior_classes and c.vote_count >= .5 * ranked[0].vote_count
            for c in ranked[1:]):
         return [], "ambiguous_identity"
+    allocation, reason = _allocate(cid, delta, zone, lots, tolerance)
+    if allocation or reason != "weight_mismatch":
+        return allocation, reason
+    # 선두의 실측 무게가 반증됐을 때만, 영상에서 실제 관측된 다른 SKU를 검증한다.
+    # 미관측 SKU/등록 무게만으로 대체하지 않으며, 적합한 종류가 복수면 확정하지 않는다.
+    alternatives = []
+    uncertain = False
+    for candidate in ranked[1:]:
+        if candidate.vote_count < 3 or candidate.class_id not in prior_classes:
+            continue
+        fit, alternative_reason = _allocate(candidate.class_id, delta, zone, lots, tolerance)
+        uncertain |= alternative_reason in ("ambiguous_count", "ambiguous_mapping")
+        if fit:
+            alternatives.append(fit)
+    if len(alternatives) == 1 and not uncertain:
+        return alternatives[0], "matched_unique_refit"
+    if alternatives or uncertain:
+        return [], "ambiguous_identity"
+    return [], reason
+
+
+def _allocate(
+    cid: int, delta: float, zone: int, lots: Sequence[TakeLot], tolerance: float,
+) -> tuple[list[tuple[TakeLot, int]], str]:
     available = sorted(
         (lot for lot in lots if lot.product.class_id == cid and lot.remaining > 0),
         key=lambda lot: lot.zone != zone,  # 같은 SKU 안에서만 동일 층 우선, 나머지는 시간순

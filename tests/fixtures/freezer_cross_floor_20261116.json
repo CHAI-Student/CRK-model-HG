@@ -1,0 +1,1403 @@
+{
+  "provenance": "2026-11-16 user-provided ses-4/5/6 YAML; original judgments, candidates, deltas and change anchors preserved. New movement fields are reconstructed from saved trace.directional_candidates and motion_evidence. take_order uses relative frame order, never inferred wall-clock timestamps. For ses-6 return, main channel +465g comes from recorded terminal levels/segment; secondary +24.1667g is the remainder of the recorded total, since individual BOCPD deltas were not archived. Stock quantities were not archived; replay uses 12 for visible mapped products. ses-5 physical source corrected by user to zone 1. Class 102 catalog metadata comes from the same-day ses-2 archive (530g, also confirmed by user).",
+  "products": [
+    {
+      "product_id": "P17937492280276406",
+      "name": "BAG_HARIM_CHICKEN_NUGGET_480G",
+      "class_id": 99,
+      "unit_weight": 500.0,
+      "unit_price": 5,
+      "stock_qty": 12
+    },
+    {
+      "product_id": "P17937492903644386",
+      "name": "BOX_HARIM_FLAME_GRILLED_BONELESS_CHICKEN_FEET_160G",
+      "class_id": 103,
+      "unit_weight": 200.0,
+      "unit_price": 5,
+      "stock_qty": 12
+    },
+    {
+      "product_id": "P17937491970057240",
+      "name": "BAG_HARIM_YONGGARI_CHICKEN_450G",
+      "class_id": 98,
+      "unit_weight": 460.0,
+      "unit_price": 5,
+      "stock_qty": 12
+    },
+    {
+      "product_id": "P17937490727723480",
+      "name": "BAG_HARIM_HOTDOG_ORIGINAL_400G",
+      "class_id": 95,
+      "unit_weight": 475.0,
+      "unit_price": 5,
+      "stock_qty": 12
+    },
+    {
+      "product_id": "P17937493392213708",
+      "name": "BAG_HARIM_HANNIP_BITESIZE_CHICKEN_BREAST_ORIGINAL_500G",
+      "class_id": 102,
+      "unit_weight": 530.0,
+      "unit_price": 5,
+      "stock_qty": 12
+    }
+  ],
+  "sessions": [
+    {
+      "source": "ses-4-1794795619",
+      "events": [
+        {
+          "session_id": "ses-4-1794795619",
+          "zone": 1,
+          "ts": 1794795620.519777,
+          "delta_weight": -495.0,
+          "segments": [
+            {
+              "start_ts": 1794795621.218772,
+              "end_ts": 1794795622.902026,
+              "delta_grams": 270.0
+            },
+            {
+              "start_ts": 1794795624.502704,
+              "end_ts": 1794795625.38186,
+              "delta_grams": -765.0
+            }
+          ],
+          "judgment": {
+            "status": "complete",
+            "confidence": 1.0,
+            "reason": "freezer_vision_first_single",
+            "strategy": "freezer_vision_first",
+            "products": [
+              {
+                "count": 1,
+                "product": {
+                  "product_id": "P17937492280276406",
+                  "name": "BAG_HARIM_CHICKEN_NUGGET_480G",
+                  "class_id": 99,
+                  "unit_weight": 500.0,
+                  "unit_price": 5,
+                  "stock_qty": 12
+                }
+              }
+            ]
+          },
+          "seq": null,
+          "status": "ok",
+          "vision_candidates": [
+            {
+              "class_id": 103,
+              "confidence": 1.0,
+              "vote_count": 61,
+              "vote_ratio": 0.18885448916408668,
+              "head_votes": 0,
+              "span_ratio": 0.2812,
+              "first_pos_ratio": 0.7188
+            },
+            {
+              "class_id": 99,
+              "confidence": 1.0,
+              "vote_count": 22,
+              "vote_ratio": 0.06811145510835913,
+              "head_votes": 0,
+              "span_ratio": 0.1562,
+              "first_pos_ratio": 0.5625
+            }
+          ],
+          "video_paths": {
+            "top": "/data/app-data/Codes/Edge_Environment/20261116_112019/inference/zone_1/2026-11-16_02-20-22/top.avi",
+            "side": "/data/app-data/Codes/Edge_Environment/20261116_112019/inference/zone_1/2026-11-16_02-20-22/side.avi"
+          },
+          "change_timestamps": [
+            1794795622.902026,
+            1794795625.38186
+          ],
+          "freezer_actions": null,
+          "freezer_return": null,
+          "freezer_movement": {
+            "take_candidates": [
+              {
+                "class_id": 103,
+                "confidence": 0.376962685585022,
+                "vote_count": 20,
+                "vote_ratio": 0.8,
+                "head_votes": 0,
+                "span_ratio": 0.0,
+                "first_pos_ratio": 0.0
+              },
+              {
+                "class_id": 99,
+                "confidence": 0.3472731351852417,
+                "vote_count": 5,
+                "vote_ratio": 0.2,
+                "head_votes": 0,
+                "span_ratio": 0.0,
+                "first_pos_ratio": 0.0
+              }
+            ],
+            "return_candidates": [
+              {
+                "class_id": 103,
+                "confidence": 0.38016815185546876,
+                "vote_count": 24,
+                "vote_ratio": 0.6857142857142857,
+                "head_votes": 0,
+                "span_ratio": 0.0,
+                "first_pos_ratio": 0.0
+              },
+              {
+                "class_id": 99,
+                "confidence": 0.3542497634887696,
+                "vote_count": 11,
+                "vote_ratio": 0.3142857142857143,
+                "head_votes": 0,
+                "span_ratio": 0.0,
+                "first_pos_ratio": 0.0
+              }
+            ],
+            "stabilized": true,
+            "channel_deltas": [],
+            "take_order": [
+              99,
+              103
+            ]
+          }
+        },
+        {
+          "session_id": "ses-4-1794795619",
+          "zone": 5,
+          "ts": 1794795620.519777,
+          "delta_weight": -10.0,
+          "segments": [
+            {
+              "start_ts": 1794795621.218772,
+              "end_ts": 1794795622.902026,
+              "delta_grams": -20.0
+            }
+          ],
+          "judgment": {
+            "status": "no_detection",
+            "confidence": 0.0,
+            "reason": "below_min_weight_change",
+            "strategy": "low_weight_skip",
+            "products": []
+          },
+          "seq": null,
+          "status": "ok",
+          "vision_candidates": [],
+          "video_paths": {
+            "top": "/data/app-data/Codes/Edge_Environment/20261116_112019/inference/zone_5/2026-11-16_02-20-23/top.avi",
+            "side": "/data/app-data/Codes/Edge_Environment/20261116_112019/inference/zone_5/2026-11-16_02-20-23/side.avi"
+          },
+          "change_timestamps": [
+            1794795622.902026,
+            1794795625.38186
+          ],
+          "freezer_actions": null,
+          "freezer_return": null,
+          "freezer_movement": null
+        },
+        {
+          "session_id": "ses-4-1794795619",
+          "zone": 2,
+          "ts": 1794795622.902026,
+          "delta_weight": -200.0,
+          "segments": [
+            {
+              "start_ts": 1794795624.502704,
+              "end_ts": 1794795625.38186,
+              "delta_grams": -125.0
+            },
+            {
+              "start_ts": 1794795626.104732,
+              "end_ts": 1794795626.983932,
+              "delta_grams": -75.0
+            }
+          ],
+          "judgment": {
+            "status": "complete",
+            "confidence": 1.0,
+            "reason": "freezer_vision_first_single",
+            "strategy": "freezer_vision_first",
+            "products": [
+              {
+                "count": 1,
+                "product": {
+                  "product_id": "P17937492903644386",
+                  "name": "BOX_HARIM_FLAME_GRILLED_BONELESS_CHICKEN_FEET_160G",
+                  "class_id": 103,
+                  "unit_weight": 200.0,
+                  "unit_price": 5,
+                  "stock_qty": 12
+                }
+              }
+            ]
+          },
+          "seq": null,
+          "status": "ok",
+          "vision_candidates": [
+            {
+              "class_id": 103,
+              "confidence": 1.0,
+              "vote_count": 80,
+              "vote_ratio": 0.22535211267605634,
+              "head_votes": 0,
+              "span_ratio": 0.3476,
+              "first_pos_ratio": 0.581
+            },
+            {
+              "class_id": 98,
+              "confidence": 1.0,
+              "vote_count": 26,
+              "vote_ratio": 0.07323943661971831,
+              "head_votes": 0,
+              "span_ratio": 0.09,
+              "first_pos_ratio": 0.9005
+            },
+            {
+              "class_id": 99,
+              "confidence": 1.0,
+              "vote_count": 22,
+              "vote_ratio": 0.061971830985915494,
+              "head_votes": 0,
+              "span_ratio": 0.1667,
+              "first_pos_ratio": 0.4143
+            }
+          ],
+          "video_paths": {
+            "top": "/data/app-data/Codes/Edge_Environment/20261116_112019/inference/zone_2/2026-11-16_02-20-25/top.avi",
+            "side": "/data/app-data/Codes/Edge_Environment/20261116_112019/inference/zone_2/2026-11-16_02-20-25/side.avi"
+          },
+          "change_timestamps": [
+            1794795625.38186,
+            1794795626.983932
+          ],
+          "freezer_actions": null,
+          "freezer_return": null,
+          "freezer_movement": {
+            "take_candidates": [
+              {
+                "class_id": 103,
+                "confidence": 0.376962685585022,
+                "vote_count": 20,
+                "vote_ratio": 0.6060606060606061,
+                "head_votes": 0,
+                "span_ratio": 0.0,
+                "first_pos_ratio": 0.0
+              },
+              {
+                "class_id": 98,
+                "confidence": 0.3773993253707886,
+                "vote_count": 8,
+                "vote_ratio": 0.24242424242424243,
+                "head_votes": 0,
+                "span_ratio": 0.0,
+                "first_pos_ratio": 0.0
+              },
+              {
+                "class_id": 99,
+                "confidence": 0.3472731351852417,
+                "vote_count": 5,
+                "vote_ratio": 0.15151515151515152,
+                "head_votes": 0,
+                "span_ratio": 0.0,
+                "first_pos_ratio": 0.0
+              }
+            ],
+            "return_candidates": [
+              {
+                "class_id": 103,
+                "confidence": 0.38016815185546876,
+                "vote_count": 42,
+                "vote_ratio": 0.7924528301886793,
+                "head_votes": 0,
+                "span_ratio": 0.0,
+                "first_pos_ratio": 0.0
+              },
+              {
+                "class_id": 99,
+                "confidence": 0.3542497634887696,
+                "vote_count": 11,
+                "vote_ratio": 0.20754716981132076,
+                "head_votes": 0,
+                "span_ratio": 0.0,
+                "first_pos_ratio": 0.0
+              }
+            ],
+            "stabilized": true,
+            "channel_deltas": [],
+            "take_order": [
+              99,
+              103,
+              98
+            ]
+          }
+        },
+        {
+          "session_id": "ses-4-1794795619",
+          "zone": 2,
+          "ts": 1794795628.671381,
+          "delta_weight": -470.0,
+          "segments": [
+            {
+              "start_ts": 1794795630.905861,
+              "end_ts": 1794795631.784224,
+              "delta_grams": -470.0
+            }
+          ],
+          "judgment": {
+            "status": "complete",
+            "confidence": 1.0,
+            "reason": "freezer_vision_first_single",
+            "strategy": "freezer_vision_first",
+            "products": [
+              {
+                "count": 1,
+                "product": {
+                  "product_id": "P17937491970057240",
+                  "name": "BAG_HARIM_YONGGARI_CHICKEN_450G",
+                  "class_id": 98,
+                  "unit_weight": 460.0,
+                  "unit_price": 5,
+                  "stock_qty": 12
+                }
+              }
+            ]
+          },
+          "seq": null,
+          "status": "ok",
+          "vision_candidates": [
+            {
+              "class_id": 98,
+              "confidence": 1.0,
+              "vote_count": 137,
+              "vote_ratio": 0.363395225464191,
+              "head_votes": 0,
+              "span_ratio": 0.5474,
+              "first_pos_ratio": 0.4526
+            },
+            {
+              "class_id": 103,
+              "confidence": 1.0,
+              "vote_count": 84,
+              "vote_ratio": 0.22281167108753316,
+              "head_votes": 17,
+              "span_ratio": 0.7487,
+              "first_pos_ratio": 0.1
+            }
+          ],
+          "video_paths": {
+            "top": "/data/app-data/Codes/Edge_Environment/20261116_112019/inference/zone_2/2026-11-16_02-20-31/top.avi",
+            "side": "/data/app-data/Codes/Edge_Environment/20261116_112019/inference/zone_2/2026-11-16_02-20-31/side.avi"
+          },
+          "change_timestamps": [
+            1794795631.784224
+          ],
+          "freezer_actions": null,
+          "freezer_return": null,
+          "freezer_movement": {
+            "take_candidates": [
+              {
+                "class_id": 98,
+                "confidence": 0.3773993253707886,
+                "vote_count": 43,
+                "vote_ratio": 0.6825396825396826,
+                "head_votes": 0,
+                "span_ratio": 0.0,
+                "first_pos_ratio": 0.0
+              },
+              {
+                "class_id": 103,
+                "confidence": 0.376962685585022,
+                "vote_count": 20,
+                "vote_ratio": 0.31746031746031744,
+                "head_votes": 0,
+                "span_ratio": 0.0,
+                "first_pos_ratio": 0.0
+              }
+            ],
+            "return_candidates": [
+              {
+                "class_id": 103,
+                "confidence": 0.38016815185546876,
+                "vote_count": 42,
+                "vote_ratio": 0.65625,
+                "head_votes": 0,
+                "span_ratio": 0.0,
+                "first_pos_ratio": 0.0
+              },
+              {
+                "class_id": 98,
+                "confidence": 0.3649060964584351,
+                "vote_count": 11,
+                "vote_ratio": 0.171875,
+                "head_votes": 0,
+                "span_ratio": 0.0,
+                "first_pos_ratio": 0.0
+              },
+              {
+                "class_id": 99,
+                "confidence": 0.3542497634887696,
+                "vote_count": 11,
+                "vote_ratio": 0.171875,
+                "head_votes": 0,
+                "span_ratio": 0.0,
+                "first_pos_ratio": 0.0
+              }
+            ],
+            "stabilized": true,
+            "channel_deltas": [],
+            "take_order": [
+              103,
+              98
+            ]
+          }
+        },
+        {
+          "session_id": "ses-4-1794795619",
+          "zone": 1,
+          "ts": 1794795633.384268,
+          "delta_weight": 198.33333333333331,
+          "segments": [
+            {
+              "start_ts": 1794795635.706784,
+              "end_ts": 1794795636.670999,
+              "delta_grams": 198.33333333333331
+            }
+          ],
+          "judgment": {
+            "status": "no_detection",
+            "confidence": 0.0,
+            "reason": "forced_final_no_match",
+            "strategy": "forced_final",
+            "products": []
+          },
+          "seq": null,
+          "status": "ok",
+          "vision_candidates": [
+            {
+              "class_id": 98,
+              "confidence": 1.0,
+              "vote_count": 138,
+              "vote_ratio": 0.4423076923076923,
+              "head_votes": 30,
+              "span_ratio": 0.5464,
+              "first_pos_ratio": 0.0309
+            },
+            {
+              "class_id": 103,
+              "confidence": 1.0,
+              "vote_count": 25,
+              "vote_ratio": 0.08012820512820513,
+              "head_votes": 21,
+              "span_ratio": 0.4072,
+              "first_pos_ratio": 0.0
+            }
+          ],
+          "video_paths": {
+            "top": "/data/app-data/Codes/Edge_Environment/20261116_112019/inference/zone_1/2026-11-16_02-20-36/top.avi",
+            "side": "/data/app-data/Codes/Edge_Environment/20261116_112019/inference/zone_1/2026-11-16_02-20-36/side.avi"
+          },
+          "change_timestamps": [
+            1794795636.670999
+          ],
+          "freezer_actions": null,
+          "freezer_return": {
+            "candidates": [
+              {
+                "class_id": 98,
+                "confidence": 0.3649060964584351,
+                "vote_count": 28,
+                "vote_ratio": 0.7,
+                "head_votes": 0,
+                "span_ratio": 0.0,
+                "first_pos_ratio": 0.0
+              },
+              {
+                "class_id": 103,
+                "confidence": 0.3741002082824707,
+                "vote_count": 12,
+                "vote_ratio": 0.3,
+                "head_votes": 0,
+                "span_ratio": 0.0,
+                "first_pos_ratio": 0.0
+              }
+            ],
+            "stabilized": true,
+            "source": "return_direction"
+          },
+          "freezer_movement": {
+            "take_candidates": [
+              {
+                "class_id": 98,
+                "confidence": 0.3773993253707886,
+                "vote_count": 26,
+                "vote_ratio": 1.0,
+                "head_votes": 0,
+                "span_ratio": 0.0,
+                "first_pos_ratio": 0.0
+              }
+            ],
+            "return_candidates": [
+              {
+                "class_id": 98,
+                "confidence": 0.3649060964584351,
+                "vote_count": 28,
+                "vote_ratio": 0.7,
+                "head_votes": 0,
+                "span_ratio": 0.0,
+                "first_pos_ratio": 0.0
+              },
+              {
+                "class_id": 103,
+                "confidence": 0.3741002082824707,
+                "vote_count": 12,
+                "vote_ratio": 0.3,
+                "head_votes": 0,
+                "span_ratio": 0.0,
+                "first_pos_ratio": 0.0
+              }
+            ],
+            "stabilized": true,
+            "channel_deltas": [],
+            "take_order": [
+              98
+            ]
+          }
+        },
+        {
+          "session_id": "ses-4-1794795619",
+          "zone": 4,
+          "ts": 1794795634.985264,
+          "delta_weight": 15.0,
+          "segments": [
+            {
+              "start_ts": 1794795637.30696,
+              "end_ts": 1794795638.184333,
+              "delta_grams": 22.5
+            }
+          ],
+          "judgment": {
+            "status": "no_detection",
+            "confidence": 0.0,
+            "reason": "below_min_weight_change",
+            "strategy": "low_weight_skip",
+            "products": []
+          },
+          "seq": null,
+          "status": "ok",
+          "vision_candidates": [],
+          "video_paths": {
+            "top": "/data/app-data/Codes/Edge_Environment/20261116_112019/inference/zone_4/2026-11-16_02-20-38/top.avi",
+            "side": "/data/app-data/Codes/Edge_Environment/20261116_112019/inference/zone_4/2026-11-16_02-20-38/side.avi"
+          },
+          "change_timestamps": [
+            1794795638.184333
+          ],
+          "freezer_actions": null,
+          "freezer_return": null,
+          "freezer_movement": null
+        },
+        {
+          "session_id": "ses-4-1794795619",
+          "zone": 5,
+          "ts": 1794795634.985264,
+          "delta_weight": 16.666666666666664,
+          "segments": [
+            {
+              "start_ts": 1794795637.30696,
+              "end_ts": 1794795638.184333,
+              "delta_grams": 30.0
+            }
+          ],
+          "judgment": {
+            "status": "no_detection",
+            "confidence": 0.0,
+            "reason": "below_min_weight_change",
+            "strategy": "low_weight_skip",
+            "products": []
+          },
+          "seq": null,
+          "status": "ok",
+          "vision_candidates": [],
+          "video_paths": {
+            "top": "/data/app-data/Codes/Edge_Environment/20261116_112019/inference/zone_5/2026-11-16_02-20-38/top.avi",
+            "side": "/data/app-data/Codes/Edge_Environment/20261116_112019/inference/zone_5/2026-11-16_02-20-38/side.avi"
+          },
+          "change_timestamps": [
+            1794795638.184333,
+            1794795639.785248
+          ],
+          "freezer_actions": null,
+          "freezer_return": null,
+          "freezer_movement": null
+        },
+        {
+          "session_id": "ses-4-1794795619",
+          "zone": 5,
+          "ts": 1794795643.707242,
+          "delta_weight": 8.75,
+          "segments": [],
+          "judgment": {
+            "status": "no_detection",
+            "confidence": 0.0,
+            "reason": "below_min_weight_change",
+            "strategy": "low_weight_skip",
+            "products": []
+          },
+          "seq": null,
+          "status": "ok",
+          "vision_candidates": [],
+          "video_paths": {
+            "top": "/data/app-data/Codes/Edge_Environment/20261116_112019/inference/zone_5/2026-11-16_02-20-46/top.avi",
+            "side": "/data/app-data/Codes/Edge_Environment/20261116_112019/inference/zone_5/2026-11-16_02-20-46/side.avi"
+          },
+          "change_timestamps": [
+            1794795646.987196
+          ],
+          "freezer_actions": null,
+          "freezer_return": null,
+          "freezer_movement": null
+        }
+      ],
+      "expected_zones": {
+        "1": {
+          "99": 1
+        },
+        "2": {
+          "98": 1
+        }
+      }
+    },
+    {
+      "source": "ses-5-1794795995",
+      "events": [
+        {
+          "session_id": "ses-5-1794795995",
+          "zone": 4,
+          "ts": 1794795997.534393,
+          "delta_weight": 6.666666666666667,
+          "segments": [],
+          "judgment": {
+            "status": "no_detection",
+            "confidence": 0.0,
+            "reason": "below_min_weight_change",
+            "strategy": "low_weight_skip",
+            "products": []
+          },
+          "seq": null,
+          "status": "ok",
+          "vision_candidates": [],
+          "video_paths": {
+            "top": "/data/app-data/Codes/Edge_Environment/20261116_112635/inference/zone_4/2026-11-16_02-26-40/top.avi",
+            "side": "/data/app-data/Codes/Edge_Environment/20261116_112635/inference/zone_4/2026-11-16_02-26-40/side.avi"
+          },
+          "change_timestamps": [
+            1794796000.014114
+          ],
+          "freezer_actions": null,
+          "freezer_return": null,
+          "freezer_movement": null
+        },
+        {
+          "session_id": "ses-5-1794795995",
+          "zone": 5,
+          "ts": 1794795997.534393,
+          "delta_weight": -10.0,
+          "segments": [
+            {
+              "start_ts": 1794795999.135874,
+              "end_ts": 1794796000.014114,
+              "delta_grams": -25.0
+            }
+          ],
+          "judgment": {
+            "status": "no_detection",
+            "confidence": 0.0,
+            "reason": "below_min_weight_change",
+            "strategy": "low_weight_skip",
+            "products": []
+          },
+          "seq": null,
+          "status": "ok",
+          "vision_candidates": [],
+          "video_paths": {
+            "top": "/data/app-data/Codes/Edge_Environment/20261116_112635/inference/zone_5/2026-11-16_02-26-40/top.avi",
+            "side": "/data/app-data/Codes/Edge_Environment/20261116_112635/inference/zone_5/2026-11-16_02-26-40/side.avi"
+          },
+          "change_timestamps": [
+            1794796000.014114,
+            1794796001.61628
+          ],
+          "freezer_actions": null,
+          "freezer_return": null,
+          "freezer_movement": null
+        },
+        {
+          "session_id": "ses-5-1794795995",
+          "zone": 3,
+          "ts": 1794795997.534393,
+          "delta_weight": -320.0,
+          "segments": [
+            {
+              "start_ts": 1794795999.135874,
+              "end_ts": 1794796000.014114,
+              "delta_grams": 85.0
+            },
+            {
+              "start_ts": 1794796000.736074,
+              "end_ts": 1794796001.61628,
+              "delta_grams": 750.0
+            },
+            {
+              "start_ts": 1794796003.938129,
+              "end_ts": 1794796004.815176,
+              "delta_grams": -1360.0
+            },
+            {
+              "start_ts": 1794796007.93955,
+              "end_ts": 1794796008.818011,
+              "delta_grams": 150.0
+            },
+            {
+              "start_ts": 1794796009.538951,
+              "end_ts": 1794796010.418518,
+              "delta_grams": 55.0
+            }
+          ],
+          "judgment": {
+            "status": "partial",
+            "confidence": 0.5,
+            "reason": "vision_first_identity_partial",
+            "strategy": "vision_first_identity_partial",
+            "products": [
+              {
+                "count": 1,
+                "product": {
+                  "product_id": "P17937492903644386",
+                  "name": "BOX_HARIM_FLAME_GRILLED_BONELESS_CHICKEN_FEET_160G",
+                  "class_id": 103,
+                  "unit_weight": 200.0,
+                  "unit_price": 5,
+                  "stock_qty": 12
+                }
+              }
+            ]
+          },
+          "seq": null,
+          "status": "ok",
+          "vision_candidates": [
+            {
+              "class_id": 103,
+              "confidence": 1.0,
+              "vote_count": 24,
+              "vote_ratio": 0.043478260869565216,
+              "head_votes": 0,
+              "span_ratio": 0.1425,
+              "first_pos_ratio": 0.5078
+            },
+            {
+              "class_id": 102,
+              "confidence": 1.0,
+              "vote_count": 16,
+              "vote_ratio": 0.028985507246376812,
+              "head_votes": 0,
+              "span_ratio": 0.0274,
+              "first_pos_ratio": 0.4223
+            }
+          ],
+          "video_paths": {
+            "top": "/data/app-data/Codes/Edge_Environment/20261116_112635/inference/zone_3/2026-11-16_02-26-40/top.avi",
+            "side": "/data/app-data/Codes/Edge_Environment/20261116_112635/inference/zone_3/2026-11-16_02-26-40/side.avi"
+          },
+          "change_timestamps": [
+            1794796000.014114,
+            1794796001.61628,
+            1794796004.815176,
+            1794796008.818011,
+            1794796010.418518
+          ],
+          "freezer_actions": null,
+          "freezer_return": null,
+          "freezer_movement": {
+            "take_candidates": [
+              {
+                "class_id": 102,
+                "confidence": 0.37921783924102787,
+                "vote_count": 8,
+                "vote_ratio": 1.0,
+                "head_votes": 0,
+                "span_ratio": 0.0,
+                "first_pos_ratio": 0.0
+              }
+            ],
+            "return_candidates": [
+              {
+                "class_id": 103,
+                "confidence": 0.36516120433807375,
+                "vote_count": 3,
+                "vote_ratio": 1.0,
+                "head_votes": 0,
+                "span_ratio": 0.0,
+                "first_pos_ratio": 0.0
+              }
+            ],
+            "stabilized": true,
+            "channel_deltas": [],
+            "take_order": [
+              102
+            ]
+          }
+        },
+        {
+          "session_id": "ses-5-1794795995",
+          "zone": 1,
+          "ts": 1794796003.216883,
+          "delta_weight": -205.0,
+          "segments": [
+            {
+              "start_ts": 1794796005.538768,
+              "end_ts": 1794796006.339118,
+              "delta_grams": -205.0
+            }
+          ],
+          "judgment": {
+            "status": "complete",
+            "confidence": 1.0,
+            "reason": "freezer_vision_first_single",
+            "strategy": "freezer_vision_first",
+            "products": [
+              {
+                "count": 1,
+                "product": {
+                  "product_id": "P17937492903644386",
+                  "name": "BOX_HARIM_FLAME_GRILLED_BONELESS_CHICKEN_FEET_160G",
+                  "class_id": 103,
+                  "unit_weight": 200.0,
+                  "unit_price": 5,
+                  "stock_qty": 12
+                }
+              }
+            ]
+          },
+          "seq": null,
+          "status": "ok",
+          "vision_candidates": [
+            {
+              "class_id": 103,
+              "confidence": 1.0,
+              "vote_count": 24,
+              "vote_ratio": 0.061381074168797956,
+              "head_votes": 0,
+              "span_ratio": 0.2865,
+              "first_pos_ratio": 0.474
+            },
+            {
+              "class_id": 102,
+              "confidence": 1.0,
+              "vote_count": 16,
+              "vote_ratio": 0.04092071611253197,
+              "head_votes": 0,
+              "span_ratio": 0.0503,
+              "first_pos_ratio": 0.2915
+            }
+          ],
+          "video_paths": {
+            "top": "/data/app-data/Codes/Edge_Environment/20261116_112635/inference/zone_1/2026-11-16_02-26-46/top.avi",
+            "side": "/data/app-data/Codes/Edge_Environment/20261116_112635/inference/zone_1/2026-11-16_02-26-46/side.avi"
+          },
+          "change_timestamps": [
+            1794796006.339118
+          ],
+          "freezer_actions": null,
+          "freezer_return": null,
+          "freezer_movement": {
+            "take_candidates": [
+              {
+                "class_id": 102,
+                "confidence": 0.37921783924102787,
+                "vote_count": 8,
+                "vote_ratio": 1.0,
+                "head_votes": 0,
+                "span_ratio": 0.0,
+                "first_pos_ratio": 0.0
+              }
+            ],
+            "return_candidates": [
+              {
+                "class_id": 103,
+                "confidence": 0.36516120433807375,
+                "vote_count": 3,
+                "vote_ratio": 1.0,
+                "head_votes": 0,
+                "span_ratio": 0.0,
+                "first_pos_ratio": 0.0
+              }
+            ],
+            "stabilized": true,
+            "channel_deltas": [],
+            "take_order": [
+              102
+            ]
+          }
+        },
+        {
+          "session_id": "ses-5-1794795995",
+          "zone": 5,
+          "ts": 1794796005.538768,
+          "delta_weight": 12.5,
+          "segments": [],
+          "judgment": {
+            "status": "no_detection",
+            "confidence": 0.0,
+            "reason": "below_min_weight_change",
+            "strategy": "low_weight_skip",
+            "products": []
+          },
+          "seq": null,
+          "status": "ok",
+          "vision_candidates": [],
+          "video_paths": {
+            "top": "/data/app-data/Codes/Edge_Environment/20261116_112635/inference/zone_5/2026-11-16_02-26-48/top.avi",
+            "side": "/data/app-data/Codes/Edge_Environment/20261116_112635/inference/zone_5/2026-11-16_02-26-48/side.avi"
+          },
+          "change_timestamps": [
+            1794796008.818011,
+            1794796012.017715,
+            1794796015.219517
+          ],
+          "freezer_actions": null,
+          "freezer_return": null,
+          "freezer_movement": null
+        },
+        {
+          "session_id": "ses-5-1794795995",
+          "zone": 4,
+          "ts": 1794796008.818011,
+          "delta_weight": 10.0,
+          "segments": [
+            {
+              "start_ts": 1794796011.140083,
+              "end_ts": 1794796012.017715,
+              "delta_grams": 20.0
+            }
+          ],
+          "judgment": {
+            "status": "no_detection",
+            "confidence": 0.0,
+            "reason": "below_min_weight_change",
+            "strategy": "low_weight_skip",
+            "products": []
+          },
+          "seq": null,
+          "status": "ok",
+          "vision_candidates": [],
+          "video_paths": {
+            "top": "/data/app-data/Codes/Edge_Environment/20261116_112635/inference/zone_4/2026-11-16_02-26-52/top.avi",
+            "side": "/data/app-data/Codes/Edge_Environment/20261116_112635/inference/zone_4/2026-11-16_02-26-52/side.avi"
+          },
+          "change_timestamps": [
+            1794796012.017715
+          ],
+          "freezer_actions": null,
+          "freezer_return": null,
+          "freezer_movement": null
+        }
+      ],
+      "expected_zones": {
+        "3": {
+          "102": 1
+        }
+      }
+    },
+    {
+      "source": "ses-6-1794796052",
+      "events": [
+        {
+          "session_id": "ses-6-1794796052",
+          "zone": 5,
+          "ts": 1794796053.749873,
+          "delta_weight": -3.3333333333333335,
+          "segments": [],
+          "judgment": {
+            "status": "no_detection",
+            "confidence": 0.0,
+            "reason": "below_min_weight_change",
+            "strategy": "low_weight_skip",
+            "products": []
+          },
+          "seq": null,
+          "status": "ok",
+          "vision_candidates": [],
+          "video_paths": {
+            "top": "/data/app-data/Codes/Edge_Environment/20261116_112732/inference/zone_5/2026-11-16_02-27-36/top.avi",
+            "side": "/data/app-data/Codes/Edge_Environment/20261116_112732/inference/zone_5/2026-11-16_02-27-36/side.avi"
+          },
+          "change_timestamps": [
+            1794796056.917088,
+            1794796058.517628
+          ],
+          "freezer_actions": null,
+          "freezer_return": null,
+          "freezer_movement": null
+        },
+        {
+          "session_id": "ses-6-1794796052",
+          "zone": 4,
+          "ts": 1794796055.317669,
+          "delta_weight": -465.0,
+          "segments": [
+            {
+              "start_ts": 1794796057.639709,
+              "end_ts": 1794796058.517628,
+              "delta_grams": -465.0
+            }
+          ],
+          "judgment": {
+            "status": "complete",
+            "confidence": 1.0,
+            "reason": "freezer_vision_first_single",
+            "strategy": "freezer_vision_first",
+            "products": [
+              {
+                "count": 1,
+                "product": {
+                  "product_id": "P17937490727723480",
+                  "name": "BAG_HARIM_HOTDOG_ORIGINAL_400G",
+                  "class_id": 95,
+                  "unit_weight": 475.0,
+                  "unit_price": 5,
+                  "stock_qty": 12
+                }
+              }
+            ]
+          },
+          "seq": null,
+          "status": "ok",
+          "vision_candidates": [
+            {
+              "class_id": 95,
+              "confidence": 1.0,
+              "vote_count": 73,
+              "vote_ratio": 0.2267080745341615,
+              "head_votes": 0,
+              "span_ratio": 0.5078,
+              "first_pos_ratio": 0.4197
+            },
+            {
+              "class_id": 98,
+              "confidence": 1.0,
+              "vote_count": 37,
+              "vote_ratio": 0.11490683229813664,
+              "head_votes": 0,
+              "span_ratio": 0.267,
+              "first_pos_ratio": 0.7068
+            }
+          ],
+          "video_paths": {
+            "top": "/data/app-data/Codes/Edge_Environment/20261116_112732/inference/zone_4/2026-11-16_02-27-38/top.avi",
+            "side": "/data/app-data/Codes/Edge_Environment/20261116_112732/inference/zone_4/2026-11-16_02-27-38/side.avi"
+          },
+          "change_timestamps": [
+            1794796058.517628
+          ],
+          "freezer_actions": null,
+          "freezer_return": null,
+          "freezer_movement": {
+            "take_candidates": [
+              {
+                "class_id": 95,
+                "confidence": 0.378783655166626,
+                "vote_count": 26,
+                "vote_ratio": 0.8387096774193549,
+                "head_votes": 0,
+                "span_ratio": 0.0,
+                "first_pos_ratio": 0.0
+              },
+              {
+                "class_id": 98,
+                "confidence": 0.3736212968826294,
+                "vote_count": 5,
+                "vote_ratio": 0.16129032258064516,
+                "head_votes": 0,
+                "span_ratio": 0.0,
+                "first_pos_ratio": 0.0
+              }
+            ],
+            "return_candidates": [
+              {
+                "class_id": 98,
+                "confidence": 0.38065049648284915,
+                "vote_count": 11,
+                "vote_ratio": 1.0,
+                "head_votes": 0,
+                "span_ratio": 0.0,
+                "first_pos_ratio": 0.0
+              }
+            ],
+            "stabilized": true,
+            "channel_deltas": [],
+            "take_order": [
+              95,
+              98
+            ]
+          }
+        },
+        {
+          "session_id": "ses-6-1794796052",
+          "zone": 2,
+          "ts": 1794796056.917088,
+          "delta_weight": -465.0,
+          "segments": [
+            {
+              "start_ts": 1794796059.240793,
+              "end_ts": 1794796060.120578,
+              "delta_grams": 515.0
+            },
+            {
+              "start_ts": 1794796060.844455,
+              "end_ts": 1794796061.723063,
+              "delta_grams": -980.0
+            }
+          ],
+          "judgment": {
+            "status": "complete",
+            "confidence": 1.0,
+            "reason": "freezer_vision_first_single",
+            "strategy": "freezer_vision_first",
+            "products": [
+              {
+                "count": 1,
+                "product": {
+                  "product_id": "P17937490727723480",
+                  "name": "BAG_HARIM_HOTDOG_ORIGINAL_400G",
+                  "class_id": 95,
+                  "unit_weight": 475.0,
+                  "unit_price": 5,
+                  "stock_qty": 12
+                }
+              }
+            ]
+          },
+          "seq": null,
+          "status": "ok",
+          "vision_candidates": [
+            {
+              "class_id": 95,
+              "confidence": 1.0,
+              "vote_count": 77,
+              "vote_ratio": 0.19201995012468828,
+              "head_votes": 0,
+              "span_ratio": 0.6,
+              "first_pos_ratio": 0.2512
+            },
+            {
+              "class_id": 98,
+              "confidence": 1.0,
+              "vote_count": 37,
+              "vote_ratio": 0.09226932668329177,
+              "head_votes": 0,
+              "span_ratio": 0.2326,
+              "first_pos_ratio": 0.5
+            }
+          ],
+          "video_paths": {
+            "top": "/data/app-data/Codes/Edge_Environment/20261116_112732/inference/zone_2/2026-11-16_02-27-40/top.avi",
+            "side": "/data/app-data/Codes/Edge_Environment/20261116_112732/inference/zone_2/2026-11-16_02-27-40/side.avi"
+          },
+          "change_timestamps": [
+            1794796060.120578,
+            1794796061.723063
+          ],
+          "freezer_actions": null,
+          "freezer_return": null,
+          "freezer_movement": {
+            "take_candidates": [
+              {
+                "class_id": 95,
+                "confidence": 0.378783655166626,
+                "vote_count": 26,
+                "vote_ratio": 0.8387096774193549,
+                "head_votes": 0,
+                "span_ratio": 0.0,
+                "first_pos_ratio": 0.0
+              },
+              {
+                "class_id": 98,
+                "confidence": 0.3736212968826294,
+                "vote_count": 5,
+                "vote_ratio": 0.16129032258064516,
+                "head_votes": 0,
+                "span_ratio": 0.0,
+                "first_pos_ratio": 0.0
+              }
+            ],
+            "return_candidates": [
+              {
+                "class_id": 98,
+                "confidence": 0.38065049648284915,
+                "vote_count": 11,
+                "vote_ratio": 1.0,
+                "head_votes": 0,
+                "span_ratio": 0.0,
+                "first_pos_ratio": 0.0
+              }
+            ],
+            "stabilized": true,
+            "channel_deltas": [],
+            "take_order": [
+              95,
+              98
+            ]
+          }
+        },
+        {
+          "session_id": "ses-6-1794796052",
+          "zone": 5,
+          "ts": 1794796060.120578,
+          "delta_weight": 489.1666666666667,
+          "segments": [
+            {
+              "start_ts": 1794796062.445227,
+              "end_ts": 1794796063.325956,
+              "delta_grams": 27.5
+            },
+            {
+              "start_ts": 1794796064.045636,
+              "end_ts": 1794796064.924718,
+              "delta_grams": 465.0
+            }
+          ],
+          "judgment": {
+            "status": "no_detection",
+            "confidence": 0.0,
+            "reason": "multi_tray[ch0:forced_final_no_match+ch1:forced_final_no_match]",
+            "strategy": "multi_tray[forced_final,forced_final]",
+            "products": []
+          },
+          "seq": null,
+          "status": "ok",
+          "vision_candidates": [
+            {
+              "class_id": 95,
+              "confidence": 1.0,
+              "vote_count": 66,
+              "vote_ratio": 0.17553191489361702,
+              "head_votes": 27,
+              "span_ratio": 0.4686,
+              "first_pos_ratio": 0.0
+            },
+            {
+              "class_id": 98,
+              "confidence": 1.0,
+              "vote_count": 37,
+              "vote_ratio": 0.09840425531914894,
+              "head_votes": 0,
+              "span_ratio": 0.1845,
+              "first_pos_ratio": 0.1735
+            }
+          ],
+          "video_paths": {
+            "top": "/data/app-data/Codes/Edge_Environment/20261116_112732/inference/zone_5/2026-11-16_02-27-43/top.avi",
+            "side": "/data/app-data/Codes/Edge_Environment/20261116_112732/inference/zone_5/2026-11-16_02-27-43/side.avi"
+          },
+          "change_timestamps": [
+            1794796063.325956,
+            1794796064.924718,
+            1794796068.126753
+          ],
+          "freezer_actions": null,
+          "freezer_return": {
+            "candidates": [
+              {
+                "class_id": 98,
+                "confidence": 0.38065049648284915,
+                "vote_count": 11,
+                "vote_ratio": 1.0,
+                "head_votes": 0,
+                "span_ratio": 0.0,
+                "first_pos_ratio": 0.0
+              }
+            ],
+            "stabilized": true,
+            "source": "return_direction"
+          },
+          "freezer_movement": {
+            "take_candidates": [
+              {
+                "class_id": 95,
+                "confidence": 0.378783655166626,
+                "vote_count": 19,
+                "vote_ratio": 0.76,
+                "head_votes": 0,
+                "span_ratio": 0.0,
+                "first_pos_ratio": 0.0
+              },
+              {
+                "class_id": 98,
+                "confidence": 0.3736212968826294,
+                "vote_count": 6,
+                "vote_ratio": 0.24,
+                "head_votes": 0,
+                "span_ratio": 0.0,
+                "first_pos_ratio": 0.0
+              }
+            ],
+            "return_candidates": [
+              {
+                "class_id": 98,
+                "confidence": 0.38065049648284915,
+                "vote_count": 11,
+                "vote_ratio": 1.0,
+                "head_votes": 0,
+                "span_ratio": 0.0,
+                "first_pos_ratio": 0.0
+              }
+            ],
+            "stabilized": true,
+            "channel_deltas": [
+              465.0,
+              24.166666666666686
+            ],
+            "take_order": [
+              95,
+              98
+            ]
+          }
+        },
+        {
+          "session_id": "ses-6-1794796052",
+          "zone": 4,
+          "ts": 1794796063.325956,
+          "delta_weight": 15.0,
+          "segments": [],
+          "judgment": {
+            "status": "no_detection",
+            "confidence": 0.0,
+            "reason": "below_min_weight_change",
+            "strategy": "low_weight_skip",
+            "products": []
+          },
+          "seq": null,
+          "status": "ok",
+          "vision_candidates": [],
+          "video_paths": {
+            "top": "/data/app-data/Codes/Edge_Environment/20261116_112732/inference/zone_4/2026-11-16_02-27-46/top.avi",
+            "side": "/data/app-data/Codes/Edge_Environment/20261116_112732/inference/zone_4/2026-11-16_02-27-46/side.avi"
+          },
+          "change_timestamps": [
+            1794796066.446965
+          ],
+          "freezer_actions": null,
+          "freezer_return": null,
+          "freezer_movement": null
+        }
+      ],
+      "expected_zones": {
+        "4": {
+          "95": 1
+        }
+      }
+    }
+  ]
+}

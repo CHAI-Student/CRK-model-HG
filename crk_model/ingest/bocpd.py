@@ -231,6 +231,7 @@ class BocpdLoadcellAnalyzer:
         pending_delta = 0.0
         pending = False
         moved = False
+        trailing_return_stabilized = True
         for c in res.channels:
             if len(c.segments) >= 2:
                 moved = True
@@ -244,6 +245,10 @@ class BocpdLoadcellAnalyzer:
                 delta = level.end_median - c.segments[0].level
             if abs(delta) < min_change:
                 continue  # 평탄/노이즈 트레이 — baseline에만 기여
+            if len(c.segments) >= 2 and c.segments[-1].level - c.segments[-2].level >= step:
+                last = c.segments[-1]
+                if samples[last.end].ts - samples[last.start].ts < self._stab_wait:
+                    trailing_return_stabilized = False
             if delta > 0:
                 # 반품 안정화 대기 (QA Q3 ①): 마지막 레벨이 충분히 지속돼야
                 # 구간화 — plateau 경로와 동일 계약.
@@ -266,6 +271,7 @@ class BocpdLoadcellAnalyzer:
             return LoadcellAnalysis(
                 delta, (), False, baseline, "needs_return_stabilization",
                 terminal_levels=terminals,
+                trailing_return_stabilized=trailing_return_stabilized,
             )
         if events:
             segments = sorted(
@@ -275,6 +281,7 @@ class BocpdLoadcellAnalyzer:
             return LoadcellAnalysis(
                 delta, tuple(segments), True, baseline, events=tuple(events),
                 terminal_levels=terminals,
+                trailing_return_stabilized=trailing_return_stabilized,
             )
         if moved:
             # 변화는 있었지만 전 채널 게이트 미달 — 합산 delta를 실어 보내

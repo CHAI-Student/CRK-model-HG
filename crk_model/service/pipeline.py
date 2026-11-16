@@ -33,7 +33,12 @@ from crk_model.ingest.loadcell import (
 )
 from crk_model.judgment.interfaces import JudgmentContext
 from crk_model.judgment.router import JudgmentRouter
-from crk_model.ledger.events import FreezerAction, FreezerReturnEvidence, TriggerEvent
+from crk_model.ledger.events import (
+    FreezerAction,
+    FreezerMovementEvidence,
+    FreezerReturnEvidence,
+    TriggerEvent,
+)
 from crk_model.perception.detector import HAND_CLASS_ID, Detector
 from crk_model.perception.early_termination import EarlyTerminator
 from crk_model.perception.filters import DetectionFilterChain
@@ -115,6 +120,8 @@ class TriggerTrace:
     # 이전 행동별 아카이브/저널 호환용. 신규 트리거는 기존 무게 경로(None)를 쓴다.
     freezer_actions: tuple[FreezerAction, ...] | None = None
     freezer_return: FreezerReturnEvidence | None = None
+    freezer_movement: FreezerMovementEvidence | None = None
+    directional_take_order: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -316,8 +323,19 @@ class TriggerPipeline:
             return self._outcome(session_id, req, delta, analysis.segments, judgment, trace)
 
         candidates = self._run_vision(req, profile, snapshot, delta, trace)
+        if not profile.weight_is_discriminative:
+            trace.freezer_movement = FreezerMovementEvidence(
+                trace.directional_candidates.get("take", ()),
+                trace.directional_candidates.get("return", ()),
+                analysis.stabilized and analysis.trailing_return_stabilized,
+                tuple(event.delta_grams for event in analysis.events),
+                trace.directional_take_order,
+            )
+            if (analysis.stabilized and not analysis.trailing_return_stabilized
+                    and trace.freezer_movement.return_candidates):
+                trace.reason_codes.append("mixed_return_stabilization_pending")
         if not profile.weight_is_discriminative and delta >= profile.min_weight_change_grams:
-            # 최종 양수 delta만 반납이다. 중간 양수 구간/경계 통과로 행동을 나누지 않는다.
+            # 양수 순변화의 반납 증거. 혼합 행동은 CLOSE에서 별도로 순변화를 검증한다.
             returning = trace.directional_candidates.get("return", ())
             trace.freezer_return = FreezerReturnEvidence(
                 tuple(returning or candidates), analysis.stabilized,
@@ -907,6 +925,19 @@ class TriggerPipeline:
                 accepted_ids = {c.class_id for c in trace.directional_candidates[direction]}
                 if observed_ids - accepted_ids:
                     uncertain.add(direction)
+                if direction == "take":
+                    first_by_camera: dict[str, dict[int, int]] = {}
+                    for (camera, pos), detections in sorted(observations.items()):
+                        first = first_by_camera.setdefault(camera, {})
+                        for detection in detections:
+                            if detection.class_id in accepted_ids:
+                                first.setdefault(detection.class_id, pos)
+                    orders = [tuple(sorted(first, key=first.get))
+                              for first in first_by_camera.values() if first]
+                    distinct = all(len(first) == len(set(first.values()))
+                                   for first in first_by_camera.values())
+                    if orders and distinct and all(order == orders[0] for order in orders):
+                        trace.directional_take_order = orders[0]
             trace.uncertain_directions = sorted(uncertain)
             trace.crossed_directions = sorted(crossed)
         return voting.combine()
@@ -963,5 +994,6 @@ class TriggerPipeline:
             change_timestamps=tuple(req.change_timestamps),
             freezer_actions=trace.freezer_actions,
             freezer_return=trace.freezer_return,
+            freezer_movement=trace.freezer_movement,
         )
         return TriggerOutcome(event, trace)

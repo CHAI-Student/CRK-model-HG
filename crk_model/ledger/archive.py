@@ -34,7 +34,7 @@ from typing import TYPE_CHECKING
 
 from crk_model.core.types import FinalizedSettlement, ZoneBasket
 from crk_model.ledger.events import TriggerEvent
-from crk_model.ledger.journal import action_to_dict
+from crk_model.ledger.journal import action_to_dict, movement_to_dict
 
 if TYPE_CHECKING:
     # 지연 임포트 (순환 회피): crk_model.service.__init__ -> model_service ->
@@ -171,6 +171,9 @@ def _event_to_dict(
              ], "stabilized": event.freezer_return.stabilized,
              "source": event.freezer_return.source}
             if event.freezer_return is not None else None
+        ),
+        "freezer_movement": (
+            movement_to_dict(event.freezer_movement) if event.freezer_movement else None
         ),
         "trace": _trace_to_dict(trace),
         "processing_time_ms": processing_time_ms,

@@ -29,6 +29,22 @@ class FreezerReturnEvidence:
 
 
 @dataclass(frozen=True)
+class FreezerMovementEvidence:
+    """최종 delta와 별도로 보존하는 냉동 영상·채널 증거.
+
+    방향 관측만으로 행동을 확정하지 않는다. CLOSE에서 취출 이력과 최종
+    순변화를 함께 검증한다. take_order는 같은 영상 안의 관측 순서이며,
+    프레임 번호를 벽시계 시간으로 환산한 값이 아니다.
+    """
+
+    take_candidates: tuple[VisionCandidate, ...]
+    return_candidates: tuple[VisionCandidate, ...]
+    stabilized: bool
+    channel_deltas: tuple[float, ...] = ()
+    take_order: tuple[int, ...] = ()
+
+
+@dataclass(frozen=True)
 class TriggerEvent:
     session_id: str
     zone: int
@@ -53,6 +69,7 @@ class TriggerEvent:
     freezer_actions: tuple[FreezerAction, ...] | None = None
     # None은 구 기록/냉장. 신규 냉동 반납은 영상 증거가 없어도 빈 후보를 명시한다.
     freezer_return: FreezerReturnEvidence | None = None
+    freezer_movement: FreezerMovementEvidence | None = None
 
 
 @dataclass

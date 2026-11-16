@@ -28,7 +28,12 @@ from crk_model.core.types import (
     VisionCandidate,
     WeightSegment,
 )
-from crk_model.ledger.events import FreezerAction, FreezerReturnEvidence, TriggerEvent
+from crk_model.ledger.events import (
+    FreezerAction,
+    FreezerMovementEvidence,
+    FreezerReturnEvidence,
+    TriggerEvent,
+)
 
 
 def _judgment_from_dict(j: dict) -> JudgmentResult:
@@ -46,6 +51,17 @@ def action_to_dict(action: FreezerAction) -> dict:
     out["judgment"]["status"] = action.judgment.status.value
     out["judgment"]["products"] = list(out["judgment"]["products"])
     return out
+
+
+def movement_to_dict(evidence: FreezerMovementEvidence) -> dict:
+    """JSON/표준 YAML 공용. dataclass의 튜플을 모두 목록으로 바꾼다."""
+    return {
+        "take_candidates": [asdict(c) for c in evidence.take_candidates],
+        "return_candidates": [asdict(c) for c in evidence.return_candidates],
+        "stabilized": evidence.stabilized,
+        "channel_deltas": list(evidence.channel_deltas),
+        "take_order": list(evidence.take_order),
+    }
 
 
 def event_to_dict(e: TriggerEvent) -> dict:
@@ -82,6 +98,7 @@ def event_to_dict(e: TriggerEvent) -> dict:
              "stabilized": e.freezer_return.stabilized, "source": e.freezer_return.source}
             if e.freezer_return is not None else None
         ),
+        "freezer_movement": movement_to_dict(e.freezer_movement) if e.freezer_movement else None,
     }
 
 
@@ -112,6 +129,15 @@ def event_from_dict(d: dict) -> TriggerEvent:
                 tuple(VisionCandidate(**c) for c in d["freezer_return"]["candidates"]),
                 d["freezer_return"]["stabilized"], d["freezer_return"]["source"],
             ) if d.get("freezer_return") is not None else None
+        ),
+        freezer_movement=(
+            FreezerMovementEvidence(
+                tuple(VisionCandidate(**c) for c in d["freezer_movement"]["take_candidates"]),
+                tuple(VisionCandidate(**c) for c in d["freezer_movement"]["return_candidates"]),
+                d["freezer_movement"]["stabilized"],
+                tuple(d["freezer_movement"].get("channel_deltas", ())),
+                tuple(d["freezer_movement"].get("take_order", ())),
+            ) if d.get("freezer_movement") is not None else None
         ),
     )
 
