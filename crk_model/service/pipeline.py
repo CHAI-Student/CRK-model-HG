@@ -324,12 +324,26 @@ class TriggerPipeline:
 
         candidates = self._run_vision(req, profile, snapshot, delta, trace)
         if not profile.weight_is_discriminative:
+            terminals = {level.channel: level for level in analysis.terminal_levels}
+            span_limit = profile.final_stability_span_grams
+            stable_channels = ()
+            if (analysis.events and span_limit is not None and all(
+                event.channel in terminals
+                and terminals[event.channel].start_span <= span_limit
+                and terminals[event.channel].end_span <= span_limit
+                for event in analysis.events
+            )):
+                stable_channels = tuple(
+                    terminals[event.channel].end_median - terminals[event.channel].start_median
+                    for event in analysis.events
+                )
             trace.freezer_movement = FreezerMovementEvidence(
                 trace.directional_candidates.get("take", ()),
                 trace.directional_candidates.get("return", ()),
                 analysis.stabilized and analysis.trailing_return_stabilized,
                 tuple(event.delta_grams for event in analysis.events),
                 trace.directional_take_order,
+                stable_channels,
             )
             if (analysis.stabilized and not analysis.trailing_return_stabilized
                     and trace.freezer_movement.return_candidates):

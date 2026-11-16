@@ -42,6 +42,9 @@ class FreezerMovementEvidence:
     stabilized: bool
     channel_deltas: tuple[float, ...] = ()
     take_order: tuple[int, ...] = ()
+    # channel_deltas와 같은 채널 순서. 시작/종료 3샘플 중앙값 차이이며,
+    # 양 끝의 흔들림 폭이 프로파일 기준 이내일 때만 전체 채널을 보존한다.
+    stable_channel_deltas: tuple[float, ...] = ()
 
 
 @dataclass(frozen=True)

@@ -38,9 +38,9 @@ from crk_model.ledger.freezer_movements import resolve_mixed_movements
 from crk_model.ledger.freezer_returns import (
     TakeLot,
     consume_take,
-    match_return,
-    primary_return_delta,
+    match_movement_return,
     record_take,
+    stable_movement_delta,
 )
 from crk_model.ledger.ghost_ledger import (
     GhostLedgerConfig,
@@ -165,12 +165,19 @@ def _pass_returns(
                 and not prof.weight_is_discriminative):
             eligible = [lot for lot in take_lots
                         if freezer_cross_zone or lot.zone == e.zone]
-            allocation, reason = match_return(
+            matched = match_movement_return(
                 e.freezer_return, e.delta_weight, e.zone, eligible, tol,
-                channel_deltas=(e.freezer_movement.channel_deltas
-                                if e.freezer_movement and e.freezer_movement.stabilized else ()),
-                min_channel_weight=prof.min_trigger_delta_grams,
+                e.freezer_movement, prof.min_trigger_delta_grams,
             )
+            allocation, reason = matched.allocation, matched.reason
+            if matched.measurement.startswith("stable_"):
+                if notes is not None:
+                    notes.append(
+                        f"zone{e.zone}:freezer_return_measurement:method=stable_endpoints:"
+                        f"return={matched.return_weight:.1f}g:total={e.delta_weight:+.1f}g"
+                    )
+                if abs(e.delta_weight - matched.return_weight) > 1e-6:
+                    review.add(e.zone)
             if not allocation:
                 affected = {z for z in baskets
                             if not _profile(profiles, z, default_profile).weight_is_discriminative}
@@ -178,16 +185,23 @@ def _pass_returns(
                 review.update(affected)
                 if notes is not None:
                     notes.append(f"zone{e.zone}:freezer_return_unresolved:{reason}")
+                    if reason == "weight_mismatch":
+                        visible = {c.class_id for c in e.freezer_return.candidates}
+                        weights = ",".join(
+                            f"class{lot.product.class_id}={matched.unit_weight(lot):.1f}gx"
+                            f"{lot.remaining}"
+                            for lot in eligible if lot.remaining > 0
+                            and lot.product.class_id in visible
+                        )
+                        notes.append(
+                            f"zone{e.zone}:freezer_return_weights:"
+                            f"return={matched.return_weight:.1f}g:takes={weights or 'none'}"
+                        )
                 # 비전 미확정 반납을 뒤의 무게 매칭/net 보정이 다른 SKU로 대신 차감하지 않는다.
                 continue
-            expected = sum(lot.unit_weight * count for lot, count in allocation)
-            matched_delta = e.delta_weight
+            expected = matched.expected_weight
+            matched_delta = matched.return_weight
             if reason.startswith("matched_channel"):
-                matched_delta = primary_return_delta(
-                    e.delta_weight, e.freezer_movement.channel_deltas,
-                    prof.min_trigger_delta_grams,
-                )
-                assert matched_delta is not None
                 review.add(e.zone)
                 if notes is not None:
                     notes.append(
@@ -200,19 +214,20 @@ def _pass_returns(
                     notes.append(f"zone{e.zone}:freezer_return_unique_refit")
             protected.add(e.zone)
             for lot, count in allocation:
+                take_weight = matched.unit_weight(lot) * count
                 for _ in range(count):
                     baskets[lot.zone].remove_one(lot.product.product_id)
                 lot.remaining -= count
                 protected.add(lot.zone)
                 if lot.zone != e.zone:
-                    moved = matched_delta * (lot.unit_weight * count / expected)
+                    moved = matched_delta * (take_weight / expected)
                     net_adjustments[lot.zone] += moved
                     net_adjustments[e.zone] -= moved
                 if notes is not None:
                     notes.append(
                         f"zone{lot.zone}:freezer_vision_return:from_zone{e.zone}:"
                         f"{lot.product.product_id}-{count}:"
-                        f"take={lot.unit_weight * count:.1f}g:return={matched_delta:.1f}g"
+                        f"take={take_weight:.1f}g:return={matched_delta:.1f}g"
                     )
             continue
         if e.freezer_actions is not None and not prof.weight_is_discriminative:
@@ -281,7 +296,10 @@ def _pass_returns(
             for pc in e.judgment.products:
                 b.add(pc.product, pc.count)
             if not prof.weight_is_discriminative:
-                record_take(take_lots, e.zone, e.delta_weight, e.judgment.products)
+                record_take(
+                    take_lots, e.zone, e.delta_weight, e.judgment.products,
+                    stable_delta=stable_movement_delta(e.freezer_movement),
+                )
         elif e.delta_weight > 0:
             if _match_return(b, e.delta_weight, tol, take_lots=take_lots, zone=e.zone):
                 continue

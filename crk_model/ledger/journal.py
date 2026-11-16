@@ -61,6 +61,7 @@ def movement_to_dict(evidence: FreezerMovementEvidence) -> dict:
         "stabilized": evidence.stabilized,
         "channel_deltas": list(evidence.channel_deltas),
         "take_order": list(evidence.take_order),
+        "stable_channel_deltas": list(evidence.stable_channel_deltas),
     }
 
 
@@ -137,6 +138,7 @@ def event_from_dict(d: dict) -> TriggerEvent:
                 d["freezer_movement"]["stabilized"],
                 tuple(d["freezer_movement"].get("channel_deltas", ())),
                 tuple(d["freezer_movement"].get("take_order", ())),
+                tuple(d["freezer_movement"].get("stable_channel_deltas", ())),
             ) if d.get("freezer_movement") is not None else None
         ),
     )

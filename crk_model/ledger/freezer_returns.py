@@ -3,10 +3,10 @@ from __future__ import annotations
 
 import math
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from crk_model.core.types import ActiveProduct, ProductCount, VisionCandidate
-from crk_model.ledger.events import FreezerReturnEvidence
+from crk_model.ledger.events import FreezerMovementEvidence, FreezerReturnEvidence
 
 
 @dataclass
@@ -15,17 +15,91 @@ class TakeLot:
     product: ActiveProduct
     remaining: int
     unit_weight: float  # 한 SKU 취출은 abs(delta)/수량. 여러 SKU는 개별 측정이 없어 등록값.
+    stable_unit_weight: float | None = None
 
 
 def record_take(
     lots: list[TakeLot], zone: int, delta: float, products: Sequence[ProductCount],
+    *, stable_delta: float | None = None,
 ) -> None:
     for pc in products:
         if pc.count <= 0:
             continue
         unit = abs(delta) / pc.count if len(products) == 1 else pc.product.unit_weight
         if math.isfinite(unit) and unit > 0:
-            lots.append(TakeLot(zone, pc.product, pc.count, unit))
+            stable_unit = None
+            if (len(products) == 1 and stable_delta is not None
+                    and math.isfinite(stable_delta) and stable_delta * delta > 0):
+                stable_unit = abs(stable_delta) / pc.count
+            lots.append(TakeLot(zone, pc.product, pc.count, unit, stable_unit))
+
+
+@dataclass(frozen=True)
+class ReturnMatch:
+    allocation: list[tuple[TakeLot, int]]
+    reason: str
+    return_weight: float
+    expected_weight: float
+    measurement: str  # bocpd_total/channel | stable_total/channel
+
+    def unit_weight(self, lot: TakeLot) -> float:
+        if self.measurement.startswith("stable_"):
+            assert lot.stable_unit_weight is not None
+            return lot.stable_unit_weight
+        return lot.unit_weight
+
+
+def stable_movement_delta(movement: FreezerMovementEvidence | None) -> float | None:
+    """양 끝이 안정된 동일 채널 집합의 순변화. 구 기록/불안정/부분 기록은 불가."""
+    if (movement is None or not movement.stabilized or not movement.channel_deltas
+            or len(movement.stable_channel_deltas) != len(movement.channel_deltas)):
+        return None
+    if not all(math.isfinite(value) for value in movement.stable_channel_deltas):
+        return None
+    return sum(movement.stable_channel_deltas)
+
+
+def match_movement_return(
+    evidence: FreezerReturnEvidence, delta: float, zone: int,
+    lots: Sequence[TakeLot], tolerance: float,
+    movement: FreezerMovementEvidence | None, minimum: float | None,
+) -> ReturnMatch:
+    """양쪽에 같은 시작·종료 관측이 있으면 그 기준으로 일관되게 비교한다.
+
+    적합한 쪽을 나중에 고르지 않는다. 구 기록 등 한쪽만 관측이 있으면
+    양쪽 모두 기존 BOCPD delta를 사용한다. 원본 이벤트의 delta는 유지한다.
+    """
+    channels = movement.channel_deltas if movement and movement.stabilized else ()
+    stable_delta = stable_movement_delta(movement)
+    available = [lot for lot in lots if lot.remaining > 0]
+    visible = {c.class_id for c in evidence.candidates if c.class_id > 0 and c.confidence > 0}
+    relevant = [lot for lot in available if lot.product.class_id in visible]
+    use_stable = (evidence.stabilized and stable_delta is not None and stable_delta > 0
+                  and bool(relevant)
+                  and all(lot.stable_unit_weight is not None for lot in relevant))
+    measured = stable_delta if use_stable else delta
+    if use_stable:
+        channels = movement.stable_channel_deltas
+        matching_lots = [replace(lot, unit_weight=lot.stable_unit_weight) for lot in relevant]
+    else:
+        matching_lots = available
+    allocation, reason = match_return(
+        evidence, measured, zone, matching_lots, tolerance,
+        channel_deltas=channels, min_channel_weight=minimum,
+    )
+    selected = measured
+    channel_match = reason.startswith("matched_channel")
+    if channel_match:
+        selected = primary_return_delta(measured, channels, minimum)
+        assert selected is not None
+    expected = sum(lot.unit_weight * count for lot, count in allocation)
+    originals = {id(copy): lot for copy, lot in zip(
+        matching_lots, relevant if use_stable else available, strict=True,
+    )}
+    return ReturnMatch(
+        [(originals[id(lot)], count) for lot, count in allocation], reason, selected, expected,
+        ("stable_" if use_stable else "bocpd_") + ("channel" if channel_match else "total"),
+    )
 
 
 def consume_take(lots: Sequence[TakeLot], zone: int, product_id: str, count: int) -> None:

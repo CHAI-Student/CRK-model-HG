@@ -14,7 +14,13 @@ from crk_model.core.types import ActiveProduct, JudgmentResult, JudgmentStatus
 from crk_model.judgment.interfaces import JudgmentContext
 from crk_model.judgment.router import JudgmentRouter
 from crk_model.ledger.events import FreezerReturnEvidence, TriggerEvent
-from crk_model.ledger.freezer_returns import TakeLot, match_return, record_take
+from crk_model.ledger.freezer_returns import (
+    TakeLot,
+    match_movement_return,
+    match_return,
+    record_take,
+    stable_movement_delta,
+)
 
 
 def _end_ts(event: TriggerEvent) -> float:
@@ -62,17 +68,18 @@ def resolve_mixed_movements(
                 continue
         if (event.delta_weight < 0
                 and event.judgment.status is JudgmentStatus.COMPLETE):
-            record_take(lots, event.zone, event.delta_weight, event.judgment.products)
-        elif event.delta_weight > 0 and event.freezer_return is not None:
-            allocation, _ = match_return(
-                event.freezer_return, event.delta_weight, event.zone, lots,
-                profile.tolerance_grams,
-                channel_deltas=movement.channel_deltas if movement and movement.stabilized else (),
-                min_channel_weight=profile.min_trigger_delta_grams,
+            record_take(
+                lots, event.zone, event.delta_weight, event.judgment.products,
+                stable_delta=stable_movement_delta(movement),
             )
-            for lot, count in allocation:
+        elif event.delta_weight > 0 and event.freezer_return is not None:
+            matched = match_movement_return(
+                event.freezer_return, event.delta_weight, event.zone, lots,
+                profile.tolerance_grams, movement, profile.min_trigger_delta_grams,
+            )
+            for lot, count in matched.allocation:
                 lot.remaining -= count
-            if not allocation:
+            if not matched.allocation:
                 lots.clear()  # 미확정 반납이 소비했을 수 있는 취출을 혼합 해석에 재사용하지 않는다.
         elif event.delta_weight >= (profile.min_trigger_delta_grams
                                     or profile.min_weight_change_grams):
