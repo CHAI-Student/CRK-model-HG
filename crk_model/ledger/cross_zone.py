@@ -779,6 +779,13 @@ def _repass_event(
     if not penalized:
         return None  # 오염 창 겹침 없음 또는 후보와 무관 — 기존 동작과 동일
     billed_classes = {pc.product.class_id for pc in e.judgment.products}
+    movement = e.freezer_movement
+    if (movement and movement.vision_priority and billed_classes
+            and billed_classes <= {c.class_id for c in movement.take_candidates}
+            and not (penalized & billed_classes)):
+        # 무관한 오염 후보의 재판정이 행동 방향에서 확인한 정체성을
+        # 단순 무게 적합 후보로 덮어쓰지 않게 한다. 부분 확정도 보존한다.
+        return None
     if (
         e.judgment.status is JudgmentStatus.COMPLETE
         and billed_classes

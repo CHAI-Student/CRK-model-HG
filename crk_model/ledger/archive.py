@@ -105,6 +105,12 @@ def _trace_to_dict(trace: TriggerTrace | None) -> dict:
         }
         out["uncertain_directions"] = trace.uncertain_directions
         out["crossed_directions"] = trace.crossed_directions
+    if trace.action_details:
+        out["action_details"] = trace.action_details
+    if trace.weight_action_windows:
+        out["weight_action_windows"] = trace.weight_action_windows
+    if trace.video_clocks:
+        out["video_clocks"] = trace.video_clocks
     return out
 
 

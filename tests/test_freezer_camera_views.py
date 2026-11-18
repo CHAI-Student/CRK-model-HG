@@ -86,6 +86,35 @@ def test_roi_overrides_are_independent_and_inherit_when_missing():
     assert f.drop_stats["vertical_roi"] == {"top": 0, "side": 1}
 
 
+def test_fixed_freezer_views_start_tracking_once_per_recorded_clip(cola):
+    class ClipScene(CameraScene):
+        def __init__(self):
+            super().__init__()
+            self.clips = []
+
+        def begin_clip(self, camera):
+            self.clips.append(camera)
+            self.positions[camera] = 0
+
+    detector = ClipScene()
+    svc = ModelService(detector, settings=Settings(
+        cabinet_type="freezer", camera_layout="dual_top_proxy", side_hand_enabled=True,
+    ))
+    svc.snapshots.update([cola])
+    for _ in range(2):
+        outcome = svc.pipeline.process("s1", replace(
+            request(), video_start_timestamps={"top": 0.0, "side": 0.0},
+            video_fps={"top": 30.0, "side": 30.0},
+        ))
+        assert outcome.event.status == "ok"
+        assert detector.positions == {"top": 3, "side": 3}
+        assert outcome.trace.video_clocks == {
+            "top": {"start_ts": 0.0, "fps": 30.0}, "side": {"start_ts": 0.0, "fps": 30.0},
+        }
+    # 프레임마다/문 상태마다 초기화하지 않고 고정 시점의 새 영상에서만 시작한다.
+    assert detector.clips == ["top", "side", "top", "side"]
+
+
 def test_camera_roi_can_keep_opposite_region():
     f = DetectionFilterChain(
         vertical_roi_region="upper", vertical_roi_y_split=350,

@@ -257,6 +257,14 @@ def create_app(
                 "change_timestamps": [
                     _parse_ts(t) for t in payload.get("change_timestamps") or ()
                 ],
+                "video_start_timestamps": {
+                    camera: _parse_ts(value)
+                    for camera, value in (payload.get("video_start_timestamps") or {}).items()
+                },
+                "video_fps": {
+                    camera: float(value)
+                    for camera, value in (payload.get("video_fps") or {}).items()
+                },
             }
         )
         resp = _wire_trigger_response(resp, service)

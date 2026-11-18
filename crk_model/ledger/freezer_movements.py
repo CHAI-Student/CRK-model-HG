@@ -18,8 +18,8 @@ from crk_model.ledger.freezer_returns import (
     TakeLot,
     match_movement_return,
     match_return,
+    record_event_takes,
     record_take,
-    stable_movement_delta,
 )
 
 
@@ -66,12 +66,8 @@ def resolve_mixed_movements(
                     f"net={event.delta_weight:.1f}g"
                 )
                 continue
-        if (event.delta_weight < 0
-                and event.judgment.status is JudgmentStatus.COMPLETE):
-            record_take(
-                lots, event.zone, event.delta_weight, event.judgment.products,
-                stable_delta=stable_movement_delta(movement),
-            )
+        if event.delta_weight < 0:
+            record_event_takes(lots, event, profile.tolerance_grams, verified_only=True)
         elif event.delta_weight > 0 and event.freezer_return is not None:
             matched = match_movement_return(
                 event.freezer_return, event.delta_weight, event.zone, lots,

@@ -173,6 +173,10 @@ class MotionEvidence:
     _tube_by_id: dict[int, _Tube] = field(default_factory=dict)
     _tube_of_tid: dict[int, int] = field(default_factory=dict)
     _next_aid: int = 0
+    _hands: dict[str, dict[int, list[Detection]]] = field(
+        default_factory=lambda: defaultdict(lambda: defaultdict(list))
+    )
+    action_details: list[dict] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if self.unmeasurable_policy not in ("forfeit", "exempt"):
@@ -196,6 +200,8 @@ class MotionEvidence:
         ids: list[int | None] = []
         for d in detections:
             if d.is_hand:
+                if pos is not None:
+                    self._hands[camera][pos].append(d)
                 ids.append(None)  # 손은 래치/hand_path 소관 — 투표 대상이 아님
                 continue
             if d.bbox == _ZERO_BBOX:
@@ -400,7 +406,11 @@ class MotionEvidence:
             return self.direction_configs.get(camera)
         return self.direction_config
 
-    def action_frames(self, entry_conf: Mapping[str, float]) -> tuple[dict, set, set]:
+    def action_frames(
+        self, entry_conf: Mapping[str, float], *,
+        time_windows: Mapping[str, Sequence[tuple[float, float]]] | None = None,
+        clocks: Mapping[str, tuple[float, float]] | None = None,
+    ) -> tuple[dict, set, set]:
         """진단용 방향별 투표 재료/불확실 방향/경계 통과. 진단 상한 미적용.
 
         한 튜브의 종류가 2:1 이상 우세하고 3회 이상 관측돼야 정체성 증거다.
@@ -412,6 +422,8 @@ class MotionEvidence:
         }
         uncertain: set[str] = set()
         crossed: set[str] = set()
+        actions = []
+        self.action_details = []
         for camera, tubes in self._tubes.items():
             config = self._direction_config(camera)
             if config is None:
@@ -435,6 +447,16 @@ class MotionEvidence:
                         crossed.add(action)
                     window = [(pos, d) for pos, d in points
                               if segment["first"] <= pos <= segment["last"]]
+                    # 실제 촬영 시각이 제공된 경우에만 로드셀 사건과 시간 정렬한다.
+                    # 중간 봉우리의 크기를 상품 무게나 수량으로 사용하지 않는다.
+                    if clocks and camera in clocks and time_windows:
+                        start, fps = clocks[camera]
+                        window = [(pos, d) for pos, d in window if any(
+                            lo <= start + pos / fps <= hi
+                            for lo, hi in time_windows.get(action, ())
+                        )]
+                    if not window:
+                        continue
                     votes: dict[int, set[int]] = defaultdict(set)
                     for pos, d in window:
                         votes[d.class_id].add(pos)
@@ -445,9 +467,28 @@ class MotionEvidence:
                     ):
                         uncertain.add(action)
                         continue
-                    for pos, d in window:
-                        if d.class_id == winner:
-                            frames[action][camera, pos].append(d)
+                    selected = [(pos, d) for pos, d in window if d.class_id == winner]
+                    hand = self._linked_hand(camera, selected)
+                    completed = (action == "return" and hand is not None
+                                 and self._return_finished(
+                                     camera, points, segment, winner, hand, config,
+                                 ))
+                    detail = {
+                        "camera": camera, "direction": action, "class_id": winner,
+                        "first": selected[0][0], "last": selected[-1][0],
+                        "hand_track_id": hand, "return_completed": completed,
+                        "time_focused": bool(clocks and camera in clocks and time_windows),
+                    }
+                    actions.append((action, camera, selected, detail))
+        # 같은 행동 안에서는 실제 손과 연결된 궤적을 우선한다. 손 ID를 얻지
+        # 못한 영상은 기존 방향 증거로 남기고, 완료 증거로 승격하지 않는다.
+        for action in frames:
+            group = [a for a in actions if a[0] == action]
+            linked = [a for a in group if a[3]["hand_track_id"] is not None]
+            for _, camera, selected, detail in linked or group:
+                self.action_details.append(detail)
+                for pos, detection in selected:
+                    frames[action][camera, pos].append(detection)
         # 두 시점이 서로 다른 종류만 주장하면 두 상품으로 합치지 않는다.
         for action, observations in frames.items():
             classes: dict[str, set[int]] = defaultdict(set)
@@ -458,6 +499,45 @@ class MotionEvidence:
                 if not (a <= b or b <= a):
                     uncertain.add(action)
         return frames, uncertain, crossed
+
+    def _linked_hand(self, camera: str, points) -> int | None:
+        contacts: dict[int, set[int]] = defaultdict(set)
+        for pos, detection in points:
+            for hand in self._hands[camera].get(pos, ()):
+                if hand.track_id is not None and _near(hand.bbox, detection.bbox):
+                    contacts[hand.track_id].add(pos)
+        if not contacts:
+            return None
+        ranked = sorted(contacts, key=lambda tid: -len(contacts[tid]))
+        if len(contacts[ranked[0]]) < 3:
+            return None
+        if len(ranked) > 1 and len(contacts[ranked[0]]) == len(contacts[ranked[1]]):
+            return None
+        return ranked[0]
+
+    def _return_finished(self, camera, points, segment, cid, hand_id, config) -> bool:
+        contacts = [pos for pos, d in points if segment["first"] <= pos <= segment["last"]
+                    and d.class_id == cid and any(
+                        h.track_id == hand_id and _near(h.bbox, d.bbox)
+                        for h in self._hands[camera].get(pos, ())
+                    )]
+        if not contacts:
+            return False
+        after = [(pos, d) for pos, d in points if d.class_id == cid
+                 and max(contacts) < pos <= segment["last"] + config.max_gap_frames]
+        resting = []
+        for pos, detection in after:
+            hands = self._hands[camera].get(pos, ())
+            # 미검출을 손 이탈로 해석하지 않는다. 같은 손을 떨어진 위치에서 실제 관측한다.
+            if (any(h.track_id == hand_id for h in hands)
+                    and all(not _near(h.bbox, detection.bbox) for h in hands)):
+                resting.append(detection)
+        if len(resting) < 3:
+            return False
+        centers = [((d.bbox[0] + d.bbox[2]) / 2, (d.bbox[1] + d.bbox[3]) / 2)
+                   for d in resting[:3]]
+        return all(max(c[axis] for c in centers) - min(c[axis] for c in centers)
+                   <= config.reversal_px for axis in (0, 1))
 
     def summary(self) -> dict:
         """vote_summary 진단용 — 카메라×클래스별 통과 여부와 최대 경로/임계.
@@ -508,3 +588,8 @@ class MotionEvidence:
         for camera, cid in self._exempt:
             out[camera].setdefault(cid, {"passed": True, "exempt": True})
         return {cam: dict(classes) for cam, classes in out.items()}
+
+
+def _near(a, b, margin=40.) -> bool:
+    return not (a[2] + margin < b[0] or b[2] + margin < a[0]
+                or a[3] + margin < b[1] or b[3] + margin < a[1])

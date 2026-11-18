@@ -5,8 +5,8 @@ import math
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 
-from crk_model.core.types import ActiveProduct, ProductCount, VisionCandidate
-from crk_model.ledger.events import FreezerMovementEvidence, FreezerReturnEvidence
+from crk_model.core.types import ActiveProduct, JudgmentStatus, ProductCount, VisionCandidate
+from crk_model.ledger.events import FreezerMovementEvidence, FreezerReturnEvidence, TriggerEvent
 
 
 @dataclass
@@ -16,11 +16,13 @@ class TakeLot:
     remaining: int
     unit_weight: float  # 한 SKU 취출은 abs(delta)/수량. 여러 SKU는 개별 측정이 없어 등록값.
     stable_unit_weight: float | None = None
+    ts: float = float("-inf")
 
 
 def record_take(
     lots: list[TakeLot], zone: int, delta: float, products: Sequence[ProductCount],
     *, stable_delta: float | None = None,
+    ts: float = float("-inf"),
 ) -> None:
     for pc in products:
         if pc.count <= 0:
@@ -31,7 +33,44 @@ def record_take(
             if (len(products) == 1 and stable_delta is not None
                     and math.isfinite(stable_delta) and stable_delta * delta > 0):
                 stable_unit = abs(stable_delta) / pc.count
-            lots.append(TakeLot(zone, pc.product, pc.count, unit, stable_unit))
+            lots.append(TakeLot(zone, pc.product, pc.count, unit, stable_unit, ts))
+
+
+def record_event_takes(
+    lots: list[TakeLot], event: TriggerEvent, tolerance: float, *, verified_only: bool = False,
+) -> None:
+    """채널에서 검증한 취출을 보존한다. 전체 PARTIAL 여부와 결제 추가를 분리한다."""
+    if event.delta_weight >= 0:
+        return
+    movement = event.freezer_movement
+    verified = movement.verified_takes if movement else ()
+    covered: dict[str, int] = {}
+    billed = {p.product.product_id: p.count for p in event.judgment.products}
+    for take in verified:
+        if take.delta_weight >= 0 or not math.isfinite(take.delta_weight):
+            continue
+        if any(covered.get(p.product.product_id, 0) + p.count
+               > billed.get(p.product.product_id, 0) for p in take.products):
+            continue
+        record_take(lots, event.zone, take.delta_weight, take.products,
+                    stable_delta=take.stable_delta, ts=event.ts)
+        for p in take.products:
+            covered[p.product.product_id] = covered.get(p.product.product_id, 0) + p.count
+    if verified_only and not verified:
+        products = event.judgment.products
+        valid_partial = (len(products) == 1 and event.judgment.status is JudgmentStatus.PARTIAL
+                         and abs(abs(event.delta_weight) - products[0].total_weight)
+                         <= tolerance)
+        if event.judgment.status is not JudgmentStatus.COMPLETE and not valid_partial:
+            return
+    elif verified_only:
+        return
+    remaining = [replace(p, count=p.count - covered.get(p.product.product_id, 0))
+                 for p in event.judgment.products if p.count > covered.get(p.product.product_id, 0)]
+    if remaining:
+        record_take(lots, event.zone, event.delta_weight, remaining,
+                    stable_delta=stable_movement_delta(movement) if not covered else None,
+                    ts=event.ts)
 
 
 @dataclass(frozen=True)
@@ -87,6 +126,17 @@ def match_movement_return(
         evidence, measured, zone, matching_lots, tolerance,
         channel_deltas=channels, min_channel_weight=minimum,
     )
+    if (not allocation and reason == "weight_mismatch" and movement
+            and movement.stabilized and movement.return_completed and evidence.source != "video"
+            and len(evidence.candidates) == 1 and evidence.candidates[0].vote_count >= 3
+            and measured > 0 and math.isfinite(measured)):
+        cid = evidence.candidates[0].class_id
+        same = [lot for lot in matching_lots if lot.product.class_id == cid and lot.remaining > 0]
+        # 수량이 여러 개면 손 ID/단일 검출 박스로 개수를 추정하지 않는다.
+        observed = {c.class_id for c in movement.return_candidates if c.vote_count >= 3}
+        if (observed == {cid} and len(same) == 1 and same[0].remaining == 1
+                and measured <= same[0].product.unit_weight + tolerance):
+            allocation, reason = [(same[0], 1)], "matched_vision_presence"
     selected = measured
     channel_match = reason.startswith("matched_channel")
     if channel_match:
@@ -111,6 +161,15 @@ def consume_take(lots: Sequence[TakeLot], zone: int, product_id: str, count: int
             count -= removed
             if count == 0:
                 break
+
+
+def evidence_action_time(event: TriggerEvent) -> float:
+    """영상 시각을 추정하지 않고 로드셀의 실제 행동 완료 시각을 정렬에 사용한다."""
+    if not event.freezer_movement or not event.freezer_movement.vision_priority:
+        return event.ts
+    edges = [s.end_ts for s in event.segments
+             if s.delta_grams * event.delta_weight > 0 and s.end_ts >= event.ts]
+    return max(edges, default=max((event.ts, *event.change_timestamps)))
 
 
 def match_return(

@@ -38,10 +38,12 @@ from crk_model.ledger.freezer_movements import resolve_mixed_movements
 from crk_model.ledger.freezer_returns import (
     TakeLot,
     consume_take,
+    evidence_action_time,
     match_movement_return,
+    record_event_takes,
     record_take,
-    stable_movement_delta,
 )
+from crk_model.ledger.freezer_session import resolve_session_returns
 from crk_model.ledger.ghost_ledger import (
     GhostLedgerConfig,
     apply_ghost_demotion,
@@ -157,7 +159,7 @@ def _pass_returns(
     protected: set[int] = set()
     review: set[int] = set()
     take_lots: list[TakeLot] = []
-    for e in sorted(events, key=lambda e: e.ts):
+    for e in sorted(events, key=evidence_action_time):
         b = baskets[e.zone]
         prof = _profile(profiles, e.zone, default_profile)
         tol = prof.tolerance_grams
@@ -170,6 +172,13 @@ def _pass_returns(
                 e.freezer_movement, prof.min_trigger_delta_grams,
             )
             allocation, reason = matched.allocation, matched.reason
+            if reason == "matched_vision_presence":
+                review.add(e.zone)
+                if notes is not None:
+                    notes.append(
+                        f"zone{e.zone}:freezer_return_vision_presence:"
+                        f"take={matched.expected_weight:.1f}g:return={matched.return_weight:.1f}g"
+                    )
             if matched.measurement.startswith("stable_"):
                 if notes is not None:
                     notes.append(
@@ -296,10 +305,7 @@ def _pass_returns(
             for pc in e.judgment.products:
                 b.add(pc.product, pc.count)
             if not prof.weight_is_discriminative:
-                record_take(
-                    take_lots, e.zone, e.delta_weight, e.judgment.products,
-                    stable_delta=stable_movement_delta(e.freezer_movement),
-                )
+                record_event_takes(take_lots, e, tol)
         elif e.delta_weight > 0:
             if _match_return(b, e.delta_weight, tol, take_lots=take_lots, zone=e.zone):
                 continue
@@ -537,6 +543,7 @@ class CloseSettler:
             tuple(self._products_provider()) if self._products_provider else (),
             self.default_profile, notes,
         )
+        ok = resolve_session_returns(ok, profiles, self.default_profile, notes)
 
         baskets, unmatched, net_adjustments, protected, return_review = _pass_returns(
             ok, profiles, self.default_profile, freezer_cross_zone=True, notes=notes

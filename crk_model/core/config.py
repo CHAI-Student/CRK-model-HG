@@ -223,6 +223,7 @@ class Settings:
     # 오투표를 거른다. 기본 off. 냉동 경사 side에서도 켤 수 있으나 손 검출이
     # 기존 hand_path 필터까지 활성화하므로 실영상으로 손 근접 누락을 확인한다.
     side_hand_enabled: bool = False
+    vision_tracker: str = "off"  # 기존 상품 검출은 보존하며 손 ID만 행동 연결에 사용
     # side 전용 손 conf 하한. side는 손 1건이 hand_path를 무장시키는
     # 방아쇠라 top보다 조일 수 있게 분리. 음수(기본) = hand_confidence_
     # threshold 상속.
@@ -451,6 +452,9 @@ class Settings:
                 "MODEL__VISION__HAND_CONFIDENCE_THRESHOLD", 0.30
             ),
             side_hand_enabled=_env_bool("MODEL__VISION__SIDE_HAND_ENABLED", False),
+            vision_tracker=_env_choice(
+                "MODEL__VISION__TRACKER", "off", ("off", "bytetrack", "botsort")
+            ),
             side_hand_confidence_threshold=_env_float(
                 "MODEL__VISION__SIDE_HAND_CONFIDENCE_THRESHOLD", -1.0
             ),

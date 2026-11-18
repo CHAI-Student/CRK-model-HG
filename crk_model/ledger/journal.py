@@ -32,6 +32,7 @@ from crk_model.ledger.events import (
     FreezerAction,
     FreezerMovementEvidence,
     FreezerReturnEvidence,
+    FreezerTakeEvidence,
     TriggerEvent,
 )
 
@@ -62,6 +63,10 @@ def movement_to_dict(evidence: FreezerMovementEvidence) -> dict:
         "channel_deltas": list(evidence.channel_deltas),
         "take_order": list(evidence.take_order),
         "stable_channel_deltas": list(evidence.stable_channel_deltas),
+        "verified_takes": [dict(asdict(t), products=list(asdict(t)["products"]))
+                           for t in evidence.verified_takes],
+        "vision_priority": evidence.vision_priority,
+        "return_completed": evidence.return_completed,
     }
 
 
@@ -139,6 +144,13 @@ def event_from_dict(d: dict) -> TriggerEvent:
                 tuple(d["freezer_movement"].get("channel_deltas", ())),
                 tuple(d["freezer_movement"].get("take_order", ())),
                 tuple(d["freezer_movement"].get("stable_channel_deltas", ())),
+                tuple(FreezerTakeEvidence(
+                    t["channel"], t["delta_weight"],
+                    tuple(ProductCount(ActiveProduct(**p["product"]), p["count"])
+                          for p in t["products"]), t.get("stable_delta"),
+                ) for t in d["freezer_movement"].get("verified_takes", ())),
+                d["freezer_movement"].get("vision_priority", False),
+                d["freezer_movement"].get("return_completed", False),
             ) if d.get("freezer_movement") is not None else None
         ),
     )
