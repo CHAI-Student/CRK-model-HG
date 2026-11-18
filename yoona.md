@@ -1858,7 +1858,7 @@ BOCPD 내부에는 정규분포를 사용하는 변화점 추정이 있다.
 | 상품 채널에서 확인한 취출이 전체 PARTIAL 때문에 반납 분석에서 빠짐 | 채널별 검증 취출 이력을 별도 보존 | 원래 판정에 없는 상품·수량을 추가하지 않음 |
 | 실제 오리로스를 무게가 비슷한 배경 상품으로 바꿈 | 취출 방향 후보와 해당 후보의 정체성을 우선 보존 | 비전 자체가 다른 SKU를 잘못 지지하면 정답 보장 불가 |
 | 손이 매 프레임 별개 검출이라 잡음·놓임 연결이 약함 | `model.track()`으로 손 ID를 연결 | 실제 Jetson 엔진 실행 검증 필요 |
-| 전체 영상의 다른 행동 표가 섞임 | 무게 변화 시간대와 손 연결 궤적을 우선 사용 | 정확한 시간 정렬은 촬영 시작 시각·FPS 필요 |
+| 전체 영상의 다른 행동 표가 섞임 | 영상 내 이동 방향과 손 연결 궤적을 우선 사용 | 무게 시각에 따른 후보 제한은 시계열 연동 정보가 없어 제외 |
 | 먼저 들어온 반납만 따로 처리해 전체 연결이 모호함 | CLOSE에서 복수 반납을 함께 검토 | 동점 해는 미확정 유지 |
 | 벽에 기댄 상품의 취출·반납 실측이 크게 다름 | 엄격한 놓임 증거와 잔여 1개 조건에서 시각적 반납 연결 | 여러 개 수량·동시 같은 SKU 취출 문제는 미해결 |
 
@@ -1973,30 +1973,16 @@ top의 손 ID 7과 side의 손 ID 7, 다른 층·다른 영상의 손 ID 7은 �
 같은 SKU가 여러 이력에 남아 있거나, 여러 개 중 몇 개를 놓았는지 모호하거나,
 상품이 계속 움직이거나 손 증거가 없으면 이 예외를 사용하지 않는다.
 
-## 7. 무게 변화 순간으로 영상 증거를 좁히는 방법
+## 7. 무게 시각에 맞춘 영상 후보 제한은 제외
 
-무게 변화 구간의 시작·끝에 각각 1초 여유를 둔 시간창을 만들고,
-해당 취출·반납 시간창에 들어가는 상품 관측을 방향별 후보 계산에 사용한다.
-현재는 기존 추론 전체를 줄이는 디코드 최적화가 아니라, **이미 추론한 영상에서 판단에 사용할 표를 좁히는 기능**이다.
+처음에는 무게 변화 구간 앞뒤 1초 안의 영상 관측만 사용하는 기능을 추가했으나,
+사용자가 시계열 연동 정보가 없다고 확인해 11월 18일에 제외했다.
+촬영 시작 시각·FPS의 추가 입력, 시간창 생성과 프레임 선별,
+관련 아카이브 필드와 시각 미정렬 사유 로그도 함께 제거했다.
 
-정확한 정렬에는 촬영 시스템이 `/trigger`에 다음 선택 정보를 전달해야 한다.
-
-```json
-{
-  "video_start_timestamps": {"top": 1794812134.0, "side": 1794812134.0},
-  "video_fps": {"top": 30.0, "side": 30.0}
-}
-```
-
-시각은 각 영상 첫 프레임의 실제 촬영 시각이며 로드셀과 같은 시계 기준이어야 한다.
-프레임 시각은 `시작 시각 + 디코드 위치/FPS`로 계산한다.
-제공되지 않으면 요청 시각·파일명을 임의로 촬영 시각으로 간주하지 않고 기존 손/방향 증거를 사용한다.
-정렬 정보를 전혀 얻지 못한 경우에는 `vision_time_alignment_unavailable`을 남긴다.
-일부 카메라에만 정보가 있으면 해당 카메라에만 시간 정렬을 적용한다.
-
-중간 하중의 작은 봉우리가 몸 접촉인지 기준선 이동인지는 이 기능으로 확정하지 않는다.
-봉우리의 크기를 상품 무게·수량의 보정치로 사용하는 기능도 아니다.
-다른 상품 취출과 반납을 나누는 기존 혼합 해석은 앞선 이력·양쪽 비전·안정화·순변화 정합을 별도로 요구한다.
+현재 행동 후보는 영상 안에서 관측한 상품의 이동 방향과 손·상품 연결을 기준으로 만든다.
+무게 변화 시각을 영상 프레임에 대입하지 않으며, 요청 시각·파일명으로 촬영 시각을 추정하지 않는다.
+기존 로드셀 분석과 최종 delta, 무게 세그먼트를 사용하는 혼합 취출·반납 해석은 유지한다.
 
 ## 8. 문을 닫을 때 여러 반납을 함께 연결한다
 
@@ -2027,7 +2013,7 @@ top의 손 ID 7과 side의 손 ID 7, 다른 층·다른 영상의 손 ID 7은 �
 ```text
 로드셀 분석 → 원본 최종 delta 유지 → 전체 50g 게이트
   → top·side 추론 / 선택적으로 손 ID 추적
-  → 방향 구간 + 손 연결 + 가능한 경우 무게 시각 정렬
+  → 영상 내 방향 구간 + 손 연결
   → 상품 채널 판정 / 작은 부채널 제외 / 검증 취출 이력 보존
   → CLOSE의 기존 ghost·교차존 보정
   → 조건을 갖춘 혼합 취출·반납 해석
@@ -2049,12 +2035,11 @@ top의 손 ID 7과 side의 손 ID 7, 다른 층·다른 영상의 손 ID 7은 �
 | `freezer_mixed_resolved` | 원본 순변화 안의 서로 다른 취출·반납을 조건부 분해 |
 | `freezer_session_return_assignment` | 세션 전체 증거로 모호한 반납 SKU를 좁힘 |
 | `freezer_return_unresolved` | 무게·종류·이력·안정화 등의 이유로 반납을 차감하지 못함 |
-| `vision_time_alignment_unavailable` | 실제 영상 시각 정보가 없어 시간 집중을 적용할 수 없음 |
 
 notes는 기존 OPS CLOSE 출력에 포함된다. 모든 항목이 트리거 처리 직후 별도 INFO 한 줄로
 출력된다는 뜻은 아니며, 문을 닫아 정산한 결과를 확인해야 하는 항목도 있다.
-YAML/JSON에는 `action_details`, `weight_action_windows`, `video_clocks`,
-`verified_takes`, `vision_priority`, `return_completed`와 선택적 손 `track_id`를 남긴다.
+YAML/JSON에는 `action_details`, `verified_takes`, `vision_priority`,
+`return_completed`와 선택적 손 `track_id`를 남긴다.
 프레임별 bbox/손 ID의 저장은 기존 `MODEL__SESSION__SAVE_DETECTIONS=1`을 사용한다.
 
 ## 10. 11월 16일 저녁 ses-1·2 재검증 결과
@@ -2102,7 +2087,6 @@ ses-2는 1층 −523.33g 상품 채널과 +6.25g 부채널이 합쳐져 약 −5
   그 영상이 추론되지 않는 경우를 이번 변경이 새로 해결한 것은 아니다.
 - 101/102처럼 비전의 종류·방향 후보가 잘못된 경우는 별도 영상 검증이 필요하다.
 - 과거 세션의 누락된 손 추적·완료 증거는 자동 복구하지 않는다. 저장 ses-1과 오후 오리로스는 미해결이다.
-- 실제 촬영 시각·FPS의 전달과 로드셀 시계 정합은 촬영 측 연동 확인이 필요하다.
 - Jetson의 설치된 Ultralytics 버전과 TensorRT 엔진으로 손 추적, 배치·패딩,
   side 손 가림, 추적 ID 유지, 놓임 후 관측 확보를 확인해야 한다.
   현재 로컬 추적 테스트는 공식 콜백 구조를 모사한 계약 검증이다.
@@ -2114,8 +2098,8 @@ ses-2는 1층 −523.33g 상품 채널과 +6.25g 부채널이 합쳐져 약 −5
 
 | 파일 | 역할 |
 |---|---|
-| [service/pipeline.py](crk_model/service/pipeline.py) | 작은 채널 제외, 행동 후보 우선, 검증 취출·시간창·손 증거 수집 |
-| [perception/motion_evidence.py](crk_model/perception/motion_evidence.py) | 손·상품 연결, 놓임 완료, 시간 범위에 맞는 행동 후보 |
+| [service/pipeline.py](crk_model/service/pipeline.py) | 작은 채널 제외, 행동 후보 우선, 검증 취출·손 증거 수집 |
+| [perception/motion_evidence.py](crk_model/perception/motion_evidence.py) | 손·상품 연결, 놓임 완료, 영상 내 방향별 행동 후보 |
 | [adapters/yolo_detector.py](crk_model/adapters/yolo_detector.py) | 선택적 `model.track()`, 손 ID, 영상별 추적 구간, 패딩 제외 |
 | [ledger/freezer_returns.py](crk_model/ledger/freezer_returns.py) | 채널별 이력 보존과 제한적인 시각적 반납 연결 |
 | [ledger/freezer_session.py](crk_model/ledger/freezer_session.py) | CLOSE의 복수 반납 공동 배정 |
@@ -2123,7 +2107,6 @@ ses-2는 1층 −523.33g 상품 채널과 +6.25g 부채널이 합쳐져 약 −5
 | [ledger/cross_zone.py](crk_model/ledger/cross_zone.py) | 무관한 교차존 재판정으로 행동 정체성이 사라지는 문제 방지 |
 | [ledger/settler.py](crk_model/ledger/settler.py) | 새 연결 경로 적용, 이력 소비와 사유 기록 |
 | [ledger/events.py](crk_model/ledger/events.py), [journal.py](crk_model/ledger/journal.py), [archive.py](crk_model/ledger/archive.py) | 신규 증거 저장 및 구 기록 호환 |
-| [adapters/http_app.py](crk_model/adapters/http_app.py), [service/model_service.py](crk_model/service/model_service.py) | 선택적 촬영 시각·FPS 전달 |
 | [core/config.py](crk_model/core/config.py), [adapters/serve.py](crk_model/adapters/serve.py) | 추적 설정 로딩과 검출기 연결 |
 | [freezer.env.example](freezer.env.example), [.env.example](.env.example), [adapters/README.md](crk_model/adapters/README.md) | 설정과 운영 설명 |
 
@@ -2131,9 +2114,9 @@ ses-2는 1층 −523.33g 상품 채널과 +6.25g 부채널이 합쳐져 약 −5
 `test_freezer_camera_views.py`와 저녁 세션 fixture에 추가했다.
 작은 채널·PARTIAL 이력·상품 보존, 미래 취출/중복 반납 차단, 잘못된 SKU·수량·불안정 반납 거부,
 세션 배정의 동점과 명확한 비전 보존, 카메라별 손 ID 분리, 패딩 제외,
-실제 손 이탈·정지 확인, 실제 촬영 시각 없는 정렬 거부를 검증했다.
+실제 손 이탈·정지 확인, 시각 정렬 없이 영상 내 행동 구간의 관측을 보존하는 것을 검증했다.
 
-직전 구현 검증 결과:
+무게 시각 기반 영상 후보 제한을 제외한 뒤의 검증 결과:
 
 ```text
 .venv/bin/python -m pytest -q
@@ -2144,6 +2127,7 @@ git diff --check 통과
 ```
 
 이 기록은 로컬 코드와 저장 데이터 검증 결과다. 실제 기기 배포·실영상 추적은 수행하지 않았다.
-11월 18일 변경은 현재 작업 트리에 있으며 이번 작업에서 커밋·push하지 않았다.
+이 절의 최초 구현은 커밋 `4390e7a`에 포함돼 있다.
+이후 요청한 시각 정렬 기능 제거는 현재 작업 트리에 있으며 이번 작업에서 커밋·push하지 않았다.
 실제 기기 `.env`, 등록 상품 DB, 원본 YAML 및 결제 이력도 수정하지 않았다.
 이번 문서 보충은 링크·섹션 앵커·코드 블록과 `git diff --check`로 확인했다.

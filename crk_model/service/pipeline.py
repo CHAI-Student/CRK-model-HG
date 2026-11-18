@@ -14,7 +14,6 @@ yolo_calls / early_terminated / reason_codes.
 """
 from __future__ import annotations
 
-import math
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 
@@ -89,9 +88,6 @@ class TriggerRequest:
     video_paths: Mapping[str, str] = field(default_factory=dict)
     # 0711 교차존 오염: 에피소드 내 change 벽시계 앵커 (카메라 optional 필드).
     change_timestamps: Sequence[float] = ()
-    # 촬영 시스템이 보증한 영상 시작 시각/FPS만 사용한다. 파일명/요청 시각으로 추정하지 않는다.
-    video_start_timestamps: Mapping[str, float] = field(default_factory=dict)
-    video_fps: Mapping[str, float] = field(default_factory=dict)
 
 
 @dataclass
@@ -130,8 +126,6 @@ class TriggerTrace:
     verified_takes: list[FreezerTakeEvidence] = field(default_factory=list)
     action_details: list[dict] = field(default_factory=list)
     return_completed: bool = False
-    weight_action_windows: dict[str, list[tuple[float, float]]] = field(default_factory=dict)
-    video_clocks: dict[str, dict[str, float]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -315,12 +309,6 @@ class TriggerPipeline:
         if analysis.reason == "final_delta_unstable":
             trace.reason_codes.append("loadcell_final_delta_unstable")
         delta = analysis.delta_weight
-        if not profile.weight_is_discriminative:
-            for segment in analysis.segments:
-                direction = "take" if segment.delta_grams < 0 else "return"
-                trace.weight_action_windows.setdefault(direction, []).append(
-                    (segment.start_ts - 1., segment.end_ts + 1.)
-                )
         below_profile_gate = (
             not vision_only and abs(delta) < profile.min_weight_change_grams
         )
@@ -1008,20 +996,10 @@ class TriggerPipeline:
             # vote_ratio를 섞어 비교할 때의 단일 정의(함정 #4) 보호.
             trace.vote_summary["ratio_denominator"] = voting.ratio_denominator
         if evidence is not None and not profile.weight_is_discriminative:
-            clocks = {
-                camera: (start, req.video_fps[camera])
-                for camera, start in req.video_start_timestamps.items()
-                if camera in req.video_fps and math.isfinite(start)
-                and math.isfinite(req.video_fps[camera]) and req.video_fps[camera] > 0
-            }
-            trace.video_clocks = {camera: {"start_ts": start, "fps": fps}
-                                  for camera, (start, fps) in clocks.items()}
-            if not clocks and trace.weight_action_windows:
-                trace.reason_codes.append("vision_time_alignment_unavailable")
             frames, uncertain, crossed = evidence.action_frames({
                 camera: self._voting_params.get(f"entry_conf_{camera}", 0.0)
                 for camera in CAMERAS
-            }, time_windows=trace.weight_action_windows, clocks=clocks)
+            })
             trace.action_details = evidence.action_details
             for direction, observations in frames.items():
                 action_voting = VotingEnsemble(**self._voting_params)

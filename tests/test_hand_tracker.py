@@ -163,17 +163,11 @@ def test_missing_hand_detection_or_ongoing_hold_does_not_confirm_return(invalid)
     assert not any(d['return_completed'] for d in evidence.action_details)
 
 
-def test_weight_time_focus_requires_explicit_capture_clock():
+def test_action_candidates_keep_full_observed_segment_without_weight_time_alignment():
     evidence = observations()
-    frames, _, _ = evidence.action_frames({'top': .1},
-        time_windows={'return': [(100.4, 100.8)]}, clocks={'top': (100, 10)})
-    assert frames['return']
-    assert all(4 <= pos <= 8 for _, pos in frames['return'])
-    assert all(d['time_focused'] for d in evidence.action_details)
-    frames, _, _ = evidence.action_frames({'top': .1},
-        time_windows={'return': [(999, 1000)]})
-    assert frames['return']  # 요청 시각/파일명으로 영상 시각을 만들어내지 않는다.
-    assert all(not d['time_focused'] for d in evidence.action_details)
+    frames, _, _ = evidence.action_frames({'top': .1})
+    assert {pos for _, pos in frames['return']} == set(range(10))
+    assert any(d['return_completed'] for d in evidence.action_details)
 
 
 def test_identical_hand_id_in_side_cannot_complete_top_return():

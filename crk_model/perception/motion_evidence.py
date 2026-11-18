@@ -406,11 +406,7 @@ class MotionEvidence:
             return self.direction_configs.get(camera)
         return self.direction_config
 
-    def action_frames(
-        self, entry_conf: Mapping[str, float], *,
-        time_windows: Mapping[str, Sequence[tuple[float, float]]] | None = None,
-        clocks: Mapping[str, tuple[float, float]] | None = None,
-    ) -> tuple[dict, set, set]:
+    def action_frames(self, entry_conf: Mapping[str, float]) -> tuple[dict, set, set]:
         """진단용 방향별 투표 재료/불확실 방향/경계 통과. 진단 상한 미적용.
 
         한 튜브의 종류가 2:1 이상 우세하고 3회 이상 관측돼야 정체성 증거다.
@@ -447,14 +443,6 @@ class MotionEvidence:
                         crossed.add(action)
                     window = [(pos, d) for pos, d in points
                               if segment["first"] <= pos <= segment["last"]]
-                    # 실제 촬영 시각이 제공된 경우에만 로드셀 사건과 시간 정렬한다.
-                    # 중간 봉우리의 크기를 상품 무게나 수량으로 사용하지 않는다.
-                    if clocks and camera in clocks and time_windows:
-                        start, fps = clocks[camera]
-                        window = [(pos, d) for pos, d in window if any(
-                            lo <= start + pos / fps <= hi
-                            for lo, hi in time_windows.get(action, ())
-                        )]
                     if not window:
                         continue
                     votes: dict[int, set[int]] = defaultdict(set)
@@ -477,7 +465,6 @@ class MotionEvidence:
                         "camera": camera, "direction": action, "class_id": winner,
                         "first": selected[0][0], "last": selected[-1][0],
                         "hand_track_id": hand, "return_completed": completed,
-                        "time_focused": bool(clocks and camera in clocks and time_windows),
                     }
                     actions.append((action, camera, selected, detail))
         # 같은 행동 안에서는 실제 손과 연결된 궤적을 우선한다. 손 ID를 얻지
