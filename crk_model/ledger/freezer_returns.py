@@ -5,8 +5,8 @@ import math
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 
-from crk_model.core.types import ActiveProduct, JudgmentStatus, ProductCount, VisionCandidate
-from crk_model.ledger.events import FreezerMovementEvidence, FreezerReturnEvidence, TriggerEvent
+from crk_model.core.types import ActiveProduct, ProductCount, VisionCandidate
+from crk_model.ledger.events import FreezerMovementEvidence, FreezerReturnEvidence
 
 
 @dataclass
@@ -16,13 +16,11 @@ class TakeLot:
     remaining: int
     unit_weight: float  # 한 SKU 취출은 abs(delta)/수량. 여러 SKU는 개별 측정이 없어 등록값.
     stable_unit_weight: float | None = None
-    ts: float = float("-inf")
 
 
 def record_take(
     lots: list[TakeLot], zone: int, delta: float, products: Sequence[ProductCount],
     *, stable_delta: float | None = None,
-    ts: float = float("-inf"),
 ) -> None:
     for pc in products:
         if pc.count <= 0:
@@ -33,44 +31,7 @@ def record_take(
             if (len(products) == 1 and stable_delta is not None
                     and math.isfinite(stable_delta) and stable_delta * delta > 0):
                 stable_unit = abs(stable_delta) / pc.count
-            lots.append(TakeLot(zone, pc.product, pc.count, unit, stable_unit, ts))
-
-
-def record_event_takes(
-    lots: list[TakeLot], event: TriggerEvent, tolerance: float, *, verified_only: bool = False,
-) -> None:
-    """채널에서 검증한 취출을 보존한다. 전체 PARTIAL 여부와 결제 추가를 분리한다."""
-    if event.delta_weight >= 0:
-        return
-    movement = event.freezer_movement
-    verified = movement.verified_takes if movement else ()
-    covered: dict[str, int] = {}
-    billed = {p.product.product_id: p.count for p in event.judgment.products}
-    for take in verified:
-        if take.delta_weight >= 0 or not math.isfinite(take.delta_weight):
-            continue
-        if any(covered.get(p.product.product_id, 0) + p.count
-               > billed.get(p.product.product_id, 0) for p in take.products):
-            continue
-        record_take(lots, event.zone, take.delta_weight, take.products,
-                    stable_delta=take.stable_delta, ts=event.ts)
-        for p in take.products:
-            covered[p.product.product_id] = covered.get(p.product.product_id, 0) + p.count
-    if verified_only and not verified:
-        products = event.judgment.products
-        valid_partial = (len(products) == 1 and event.judgment.status is JudgmentStatus.PARTIAL
-                         and abs(abs(event.delta_weight) - products[0].total_weight)
-                         <= tolerance)
-        if event.judgment.status is not JudgmentStatus.COMPLETE and not valid_partial:
-            return
-    elif verified_only:
-        return
-    remaining = [replace(p, count=p.count - covered.get(p.product.product_id, 0))
-                 for p in event.judgment.products if p.count > covered.get(p.product.product_id, 0)]
-    if remaining:
-        record_take(lots, event.zone, event.delta_weight, remaining,
-                    stable_delta=stable_movement_delta(movement) if not covered else None,
-                    ts=event.ts)
+            lots.append(TakeLot(zone, pc.product, pc.count, unit, stable_unit))
 
 
 @dataclass(frozen=True)
@@ -126,17 +87,6 @@ def match_movement_return(
         evidence, measured, zone, matching_lots, tolerance,
         channel_deltas=channels, min_channel_weight=minimum,
     )
-    if (not allocation and reason == "weight_mismatch" and movement
-            and movement.stabilized and movement.return_completed and evidence.source != "video"
-            and len(evidence.candidates) == 1 and evidence.candidates[0].vote_count >= 3
-            and measured > 0 and math.isfinite(measured)):
-        cid = evidence.candidates[0].class_id
-        same = [lot for lot in matching_lots if lot.product.class_id == cid and lot.remaining > 0]
-        # 수량이 여러 개면 손 ID/단일 검출 박스로 개수를 추정하지 않는다.
-        observed = {c.class_id for c in movement.return_candidates if c.vote_count >= 3}
-        if (observed == {cid} and len(same) == 1 and same[0].remaining == 1
-                and measured <= same[0].product.unit_weight + tolerance):
-            allocation, reason = [(same[0], 1)], "matched_vision_presence"
     selected = measured
     channel_match = reason.startswith("matched_channel")
     if channel_match:
@@ -161,15 +111,6 @@ def consume_take(lots: Sequence[TakeLot], zone: int, product_id: str, count: int
             count -= removed
             if count == 0:
                 break
-
-
-def evidence_action_time(event: TriggerEvent) -> float:
-    """영상 시각을 추정하지 않고 로드셀의 실제 행동 완료 시각을 정렬에 사용한다."""
-    if not event.freezer_movement or not event.freezer_movement.vision_priority:
-        return event.ts
-    edges = [s.end_ts for s in event.segments
-             if s.delta_grams * event.delta_weight > 0 and s.end_ts >= event.ts]
-    return max(edges, default=max((event.ts, *event.change_timestamps)))
 
 
 def match_return(
@@ -293,3 +234,67 @@ def _allocate(
         return [], "ambiguous_count"
     _, _, allocation = min(fits, key=lambda fit: abs(delta - fit[1]))
     return [(available[index], n) for index, n in allocation], "matched"
+
+
+# ---- 같은 층 반납 보완 (2026-11-25, 로드셀 무게 안정화 판단 이후) ----
+# 비전이 반납 SKU를 정하지 못한 경우(정체성 없음·모호)에만 같은 층 취출 이력 +
+# 실측 무게로 보완한다. 비전이 다른 SKU를 뚜렷하게 본 no_prior_take(같은 무게라도
+# 무게로 정체성을 가를 수 없다), 본 SKU의 취출 무게가 반증된 weight_mismatch,
+# 반납 무게가 아직 안정되지 않은 not_stabilized는 대상이 아니다 (기존처럼 미해결·검토).
+_SAME_FLOOR_FALLBACK_REASONS = frozenset({"missing_identity", "ambiguous_identity"})
+
+
+def match_same_floor_return(
+    evidence: FreezerReturnEvidence, delta: float, zone: int,
+    lots: Sequence[TakeLot], tolerance: float, reason: str,
+) -> list[tuple[TakeLot, int]]:
+    """같은 층의 남은 취출 중 실측 무게가 맞는 SKU가 정확히 하나면 그 SKU로 차감한다.
+
+    - 같은 층 취출만 본다. 다른 층 반납은 기존 비전 연결만 쓴다.
+    - 무게가 맞는 SKU가 둘 이상(같은 무게 SKU 등)이거나 개수가 갈리면 확정하지 않는다.
+    - 영상에 후보가 관측됐는데 맞는 SKU가 그중에 없으면 확정하지 않는다.
+    """
+    if reason not in _SAME_FLOOR_FALLBACK_REASONS or not evidence.stabilized:
+        return []
+    if not math.isfinite(delta) or delta <= 0:
+        return []
+    same_floor = [lot for lot in lots if lot.zone == zone and lot.remaining > 0]
+    fits = []
+    for cid in sorted({lot.product.class_id for lot in same_floor}):
+        allocation, fit_reason = _allocate(cid, delta, zone, same_floor, tolerance)
+        if fit_reason in ("ambiguous_count", "ambiguous_mapping"):
+            return []
+        if allocation:
+            fits.append((cid, allocation))
+    if len(fits) != 1:
+        return []
+    cid, allocation = fits[0]
+    visible = {c.class_id for c in evidence.candidates if c.class_id > 0 and c.confidence > 0}
+    if visible and cid not in visible:
+        return []
+    return allocation
+
+
+@dataclass
+class UnbilledTake:
+    """무게는 빠졌지만 청구 상품이 없는 취출. 같은 층 반납과 상쇄한다."""
+
+    zone: int
+    weight: float  # abs(delta)
+    cancelled: bool = False
+
+
+def cancel_unbilled_take(
+    unbilled: Sequence[UnbilledTake], zone: int, delta: float, gate: float,
+) -> UnbilledTake | None:
+    """같은 층 미청구 취출 중 반납 무게와 gate 안으로 맞는 것(가장 가까운 것)을 상쇄한다.
+
+    청구된 상품이 없으므로 장바구니는 바뀌지 않는다. 남은 미청구 무게는 정산의
+    zone status(unbilled weight drop → review)가 순변화로 다시 확인한다."""
+    fits = [u for u in unbilled
+            if u.zone == zone and not u.cancelled and abs(delta - u.weight) <= gate]
+    if not fits:
+        return None
+    best = min(fits, key=lambda u: abs(delta - u.weight))
+    best.cancelled = True
+    return best

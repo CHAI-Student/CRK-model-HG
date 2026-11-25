@@ -4,7 +4,7 @@
 그 중 YOLO가 본 것만 남겨 vision confidence로 최종 선택.
 
 불변식: I5(stock=0 제외) · I12(count ≤ stock)는 탐색 공간에서 강제.
-tolerance는 SensorProfile 단일 소스 — 조기 종료(D7)도 같은 함수를 쓴다.
+tolerance는 SensorProfile 단일 소스.
 
 개수 오컴 (count_occam, 이슈 #23 0806 3-1): 단일 종 n=1 적합이 있으면 그
 최소 잔차보다 **엄격히 더 잘 맞지 않는** 단일 종 n≥2 적합을 후보에서

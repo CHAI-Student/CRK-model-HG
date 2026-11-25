@@ -10,8 +10,8 @@
 으로 재해석해 같은 목적(오판정 즉시 원인 추적)을 달성한다:
 - 트리거별로 vision_candidates 전체(채택 안 된 후보 포함)와 video_paths를 남겨
   오판정 즉시 "어떤 후보가 경쟁했는지" + "어떤 AVI를 봐야 하는지"를 알 수 있게 한다.
-- trace(yolo_calls/frames/gate_skipped/early_terminated/reason_codes)도 함께
-  남겨 "왜 그 후보들만 봤는지"(모션 게이트·조기 종료)까지 재구성 가능하게 한다.
+- trace(yolo_calls/frames/gate_skipped/reason_codes)도 함께
+  남겨 "왜 그 후보들만 봤는지"(모션 게이트)까지 재구성 가능하게 한다.
 
 설계 원칙:
 - 세션당 정확히 1회 저장 — 호출측(MultiZoneGateway._notify_finalize)이 FINALIZED/
@@ -34,7 +34,7 @@ from typing import TYPE_CHECKING
 
 from crk_model.core.types import FinalizedSettlement, ZoneBasket
 from crk_model.ledger.events import TriggerEvent
-from crk_model.ledger.journal import action_to_dict, movement_to_dict
+from crk_model.ledger.journal import movement_to_dict
 
 if TYPE_CHECKING:
     # 지연 임포트 (순환 회피): crk_model.service.__init__ -> model_service ->
@@ -77,7 +77,6 @@ def _trace_to_dict(trace: TriggerTrace | None) -> dict:
         "yolo_calls": trace.yolo_calls,
         "processed_frames": dict(trace.processed_frames),
         "gate_skipped_frames": dict(trace.gate_skipped_frames),
-        "early_terminated": trace.early_terminated,
         "reason_codes": list(trace.reason_codes),
         "vote_summary": dict(trace.vote_summary) if trace.vote_summary else {},
     }
@@ -105,8 +104,6 @@ def _trace_to_dict(trace: TriggerTrace | None) -> dict:
         }
         out["uncertain_directions"] = trace.uncertain_directions
         out["crossed_directions"] = trace.crossed_directions
-    if trace.action_details:
-        out["action_details"] = trace.action_details
     return out
 
 
@@ -161,10 +158,6 @@ def _event_to_dict(
         "video_paths": dict(event.video_paths),
         # 0711 교차존 오염 (Phase 1 계측): 에피소드 내 서브이벤트 앵커
         "change_timestamps": list(event.change_timestamps),
-        "freezer_actions": (
-            [action_to_dict(a) for a in event.freezer_actions]
-            if event.freezer_actions is not None else None
-        ),
         "freezer_return": (
             {"candidates": [
                 {"class_id": c.class_id, "confidence": c.confidence,

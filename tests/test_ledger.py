@@ -1,4 +1,6 @@
 """ledger: 배리어(I17), 정산기(I11·I13·I14), 교차존, freezer close, I10."""
+from dataclasses import replace
+
 import pytest
 from conftest import cand
 
@@ -560,6 +562,28 @@ class TestVisionComboResolve:
         assert billed == {"P76": 1, "P75": 1}
         assert any("freezer_combo_override_strong_evidence:zone9:P76=1,P75=1" in n
                    for n in result.notes)
+        assert not any("freezer_combo_rejected_equal_weight" in n for n in result.notes)
+
+    def test_equal_weight_combo_keeps_gate_passed_snap(self):
+        """2026-11-19 ses-3-1795062865: 청양(101) ×2 취출 −1055g. 트리거는
+        101×2 COMPLETE였는데 CLOSE 콤보가 101+102(둘 다 530g)로 바꿨다 —
+        잔차가 5g→5g로 같아 무게는 아무것도 가르지 못한 순수 vision 교체."""
+        p101 = ActiveProduct("P101", "닭가슴살 청양", 101, 530.0, 5, 10)
+        p102 = ActiveProduct("P102", "닭가슴살 오리지널", 102, 530.0, 5, 10)
+        s = self.settler(p101, p102)
+        e = self.removal_with_cands(
+            "ses-3-1795062865", 9, 1.0, p101, 2, -1055.0,
+            [cand(101, conf=1.0, votes=35), cand(102, conf=1.0, votes=14)],
+            conf=1.0,
+        )
+        result = s.settle("ses-3-1795062865", [e], PROFILES)
+        billed = {pc.product.product_id: pc.count for z in result.zones for pc in z.products}
+        assert billed == {"P101": 2}
+        assert any(
+            "freezer_combo_rejected_equal_weight:zone9:P101=1,P102=1:keep=P101=2" in n
+            for n in result.notes
+        )
+        assert not any("freezer_close_resolve_combo" in n for n in result.notes)
 
     def test_combo_split_prefers_residual_when_snap_already_gate_passed(self):
         # 0826 2차 재테스트(ses-2 재구성): 71→69 순차 취출이 69x3+71x1(잔차
@@ -799,3 +823,90 @@ class TestFreezerCrossZoneReturn:
             removal("s1", 3, 4.0, cola),
         ])
         assert self.counts(result) == {(3, cola.product_id): 1}
+
+
+class TestFreezerCarriedOver:
+    """2026-11-19 ses-1-1795061395 (교자 세션): zone1에서 꺼낸 육즙교자(97)를
+    손에 든 채 zone2를 열어, zone2 클립 첫 프레임부터 97이 보였다(head 52,
+    first_pos 0). zone2 −205g(실제 닭발 200g)에 97(370g)이 identity partial로
+    과금됐다 — 앞선 과금 + carried-in 지문 + 어떤 개수로도 무게 불일치면 뺀다."""
+
+    P97 = ActiveProduct("P97", "육즙고기교자", 97, 370.0, 5, 10)
+
+    def events(self, *, head=52, delta=-205.0, with_source=True):
+        source = TriggerEvent(
+            "s", 1, 1.0, -367.5, (),
+            JudgmentResult(JudgmentStatus.COMPLETE, (ProductCount(self.P97, 1),), 0.39,
+                           "freezer_vision_first_single", "freezer_vision_first"),
+            vision_candidates=(cand(97, conf=1.0, votes=185),),
+        )
+        held = replace(cand(97, conf=1.0, votes=196), head_votes=head)
+        target = TriggerEvent(
+            "s", 2, 8.0, delta, (),
+            JudgmentResult(JudgmentStatus.PARTIAL, (ProductCount(self.P97, 1),), 0.1964,
+                           "vision_first_identity_partial", "vision_first_identity_partial"),
+            vision_candidates=(held,),
+        )
+        return [source, target] if with_source else [target]
+
+    def settle(self, events):
+        settler = CloseSettler(default_profile=FREEZER,
+                               active_products_provider=lambda: (self.P97,))
+        return settler.settle("s", events, {1: FREEZER, 2: FREEZER})
+
+    def test_carried_over_partial_is_suppressed_and_flagged(self):
+        result = self.settle(self.events())
+        zones = {z.zone: z for z in result.zones}
+        assert [(pc.product.product_id, pc.count) for pc in zones[1].products] == [("P97", 1)]
+        assert not zones[2].products
+        assert zones[2].status == "review"
+        assert any(
+            "zone2:freezer_carried_over_suppressed:P97:delta=-205.0g" in n
+            for n in result.notes
+        )
+
+    @pytest.mark.parametrize("kwargs", [
+        {"head": 0},  # 계측 이전 기록 또는 진짜 취출 (head 0)
+        {"delta": -360.0},  # 무게가 97×1 근접 밴드 안 — 같은 상품을 하나 더 꺼냈을 수 있다
+        {"with_source": False},  # 손에 든 상품의 출처(앞선 과금)가 없다
+    ])
+    def test_kept_without_all_three_conditions(self, kwargs):
+        result = self.settle(self.events(**kwargs))
+        zone2 = next(z for z in result.zones if z.zone == 2)
+        assert [(pc.product.product_id, pc.count) for pc in zone2.products] == [("P97", 1)]
+        assert not any("freezer_carried_over_suppressed" in n for n in result.notes)
+
+
+class TestRefitReviewStatus:
+    """2026-11-19 ses-1-1795055066: unique_refit이 vision 1위 후보를 무게만 맞는
+    다른 상품으로 바꾼 COMPLETE(101→102, 무게 차 0g)가 complete로 나갔다.
+    과금은 유지하고 결제 status만 review로 올린다."""
+
+    P102 = ActiveProduct("P102", "닭가슴살 오리지널", 102, 530.0, 5, 10)
+
+    def settle(self, reason):
+        event = TriggerEvent(
+            "s", 9, 1.0, -530.0, (),
+            JudgmentResult(JudgmentStatus.COMPLETE, (ProductCount(self.P102, 1),), 0.8,
+                           reason, "freezer_vision_first"),
+            vision_candidates=(cand(102, conf=1.0, votes=30),),
+        )
+        settler = CloseSettler(default_profile=FREEZER,
+                               active_products_provider=lambda: (self.P102,))
+        return settler.settle("s", [event], PROFILES)
+
+    @pytest.mark.parametrize("reason", [
+        "freezer_vision_first_unique_refit",
+        "freezer_vision_first_refit_arbitrated",
+    ])
+    def test_refit_complete_is_review(self, reason):
+        result = self.settle(reason)
+        zone = result.zones[0]
+        assert [(pc.product.product_id, pc.count) for pc in zone.products] == [("P102", 1)]
+        assert zone.status == "review"
+        assert any("zone9:refit_identity_replaced:trigger_ts=1.000" in n for n in result.notes)
+
+    def test_vision_first_single_stays_complete(self):
+        result = self.settle("freezer_vision_first_single")
+        assert result.zones[0].status == "complete"
+        assert not any("refit_identity_replaced" in n for n in result.notes)

@@ -223,7 +223,6 @@ class Settings:
     # 오투표를 거른다. 기본 off. 냉동 경사 side에서도 켤 수 있으나 손 검출이
     # 기존 hand_path 필터까지 활성화하므로 실영상으로 손 근접 누락을 확인한다.
     side_hand_enabled: bool = False
-    vision_tracker: str = "off"  # 기존 상품 검출은 보존하며 손 ID만 행동 연결에 사용
     # side 전용 손 conf 하한. side는 손 1건이 hand_path를 무장시키는
     # 방아쇠라 top보다 조일 수 있게 분리. 음수(기본) = hand_confidence_
     # threshold 상속.
@@ -283,14 +282,6 @@ class Settings:
     # 숫자를 두지 않고 segment_combo_min_segments·"표 1개 이상"을 재사용한다.
     judgment_mixed_kind_demotion: bool = False
 
-    # ---- 조기 종료 (D7) — removal & 비freezer에서만 유효 ----
-    # 기본 off (이슈 #22 0805 냉장 20종 실기): 후보 창 안의 무게 설명은
-    # "남은 프레임이 판정을 못 바꾼다"의 근거가 못 된다 — 정답 등장 전에
-    # 프리롤 진열·반사광 표가 delta를 설명해 종료된 오과금이 지배적
-    # (2-9·3-3, ses-38 z3: 진열 5표 86×3=258이 Δ-260 설명 → 정답 표 0).
-    # 처리량은 T2 배치 경로가 대체. 재활성화 시에도 전 재고 유일해 게이트
-    # (early_termination.py 모듈 docstring)가 강제된다.
-    early_termination_enabled: bool = False
     # ---- 모션 게이트 오버라이드 (None = SensorProfile 기본값 유지) ----
     # 프로파일 상수(냉장 0.02/8, 냉동 0.005/4)를 기기 전 존에 대해 덮어쓴다.
     motion_gate_threshold: float | None = None
@@ -452,9 +443,6 @@ class Settings:
                 "MODEL__VISION__HAND_CONFIDENCE_THRESHOLD", 0.30
             ),
             side_hand_enabled=_env_bool("MODEL__VISION__SIDE_HAND_ENABLED", False),
-            vision_tracker=_env_choice(
-                "MODEL__VISION__TRACKER", "off", ("off", "bytetrack", "botsort")
-            ),
             side_hand_confidence_threshold=_env_float(
                 "MODEL__VISION__SIDE_HAND_CONFIDENCE_THRESHOLD", -1.0
             ),
@@ -491,9 +479,6 @@ class Settings:
             ),
             judgment_mixed_kind_demotion=_env_bool(
                 "MODEL__JUDGMENT__MIXED_KIND_DEMOTION", False
-            ),
-            early_termination_enabled=_env_bool(
-                "MODEL__VISION__EARLY_TERMINATION", False
             ),
             motion_gate_threshold=_env_opt_float("MODEL__VISION__MOTION_GATE_THRESHOLD"),
             motion_evidence_enabled=_env_bool("MODEL__VISION__MOTION_EVIDENCE", True),

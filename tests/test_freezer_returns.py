@@ -1,6 +1,4 @@
-"""기존 무게 판정 복원과 이전 행동별 아카이브의 재생 호환성."""
-import json
-from dataclasses import replace
+"""냉동 기존 무게 판정 경로 복원 — 반납·왕복·저무게 스킵과 아카이브 진단 기록."""
 
 import pytest
 
@@ -15,8 +13,7 @@ from crk_model.core.types import (
 from crk_model.ingest.bocpd import BocpdLoadcellAnalyzer
 from crk_model.ingest.loadcell import LoadcellAnalysis, LoadcellAnalyzer, LoadcellSample
 from crk_model.ledger.archive import _event_to_dict, _trace_to_dict
-from crk_model.ledger.events import FreezerAction, TriggerEvent
-from crk_model.ledger.journal import event_from_dict, event_to_dict
+from crk_model.ledger.events import TriggerEvent
 from crk_model.ledger.settler import CloseSettler
 from crk_model.perception.detector import Detection
 from crk_model.perception.filters import DetectionFilterChain
@@ -40,14 +37,6 @@ def take(zone, ts, *items):
                         (), judgment(*items))
 
 
-def returned(zone, ts, *items, delta=None):
-    """이전 버전이 저장한 행동별 이벤트. 신규 파이프라인은 이 형식을 생성하지 않는다."""
-    weight = delta if delta is not None else sum(p.unit_weight * n for p, n in items)
-    j = judgment(*items) if items else JudgmentResult(JudgmentStatus.NO_DETECTION)
-    return TriggerEvent("s", zone, ts, weight, (), JudgmentResult(JudgmentStatus.COMPLETE),
-                        freezer_actions=(FreezerAction(weight, j),))
-
-
 def settle(events):
     return CloseSettler(default_profile=FREEZER).settle("s", events, PROFILES)
 
@@ -58,50 +47,6 @@ def counts(result):
         for pc in zone.products:
             out[pc.product.product_id] = out.get(pc.product.product_id, 0) + pc.count
     return out
-
-
-@pytest.mark.parametrize("destination", [1, 2, 3])
-def test_similar_weight_return_preserves_correct_sku(destination):
-    result = settle([take(1, 1, (A, 1)), take(2, 2, (B, 1)), returned(destination, 3, (B, 1))])
-    assert counts(result) == {"a": 1}
-    assert result.total_price == 1000
-
-
-def test_mixed_kind_and_more_than_two_returns_across_origins():
-    result = settle([take(1, 1, (A, 2)), take(2, 2, (B, 3)),
-                     returned(3, 3, (A, 1), (B, 3))])
-    assert counts(result) == {"a": 1}
-
-
-def test_same_sku_can_be_returned_from_multiple_origins():
-    assert counts(settle([take(1, 1, (A, 1)), take(2, 2, (A, 2)),
-                          returned(3, 3, (A, 3))])) == {}
-
-
-def test_unseen_same_weight_sku_does_not_cancel_take_at_zero_net():
-    result = settle([take(1, 1, (A, 1)), returned(1, 2, (C, 1))])
-    assert counts(result) == {"a": 1}
-    assert result.zones[0].status == "review"
-    assert any("unmatched_identity_return:c" in n for n in result.notes)
-
-
-def test_unknown_return_does_not_use_net_weight_to_choose_sku():
-    result = settle([take(1, 1, (A, 1), (B, 1)), returned(1, 2, delta=105)])
-    assert counts(result) == {"a": 1, "b": 1}
-    assert result.zones[0].status == "review"
-
-
-def test_return_cannot_consume_future_take_even_in_same_zone():
-    assert counts(settle([returned(1, 1, (A, 2)), take(1, 2, (A, 1))])) == {"a": 1}
-
-
-def test_returned_item_taken_again_at_destination():
-    assert counts(settle([take(1, 1, (B, 2)), returned(3, 2, (B, 1)),
-                          take(3, 3, (B, 1))])) == {"b": 2}
-
-
-def test_extra_return_never_produces_negative_count():
-    assert counts(settle([take(1, 1, (B, 1)), returned(2, 2, (B, 3))])) == {}
 
 
 def samples(levels, channels=2):
@@ -164,7 +109,6 @@ def test_reported_contact_load_keeps_existing_pickup_without_boundary_crossing(
     assert outcome.event.delta_weight == -net_take
     assert [s.delta_grams for s in outcome.event.segments] == [increase, -net_take - increase]
     assert outcome.trace.crossed_directions == []
-    assert outcome.event.freezer_actions is None
     assert outcome.event.judgment.products == (ProductCount(product, 1),)
     assert outcome.event.judgment.strategy == "freezer_vision_first"
     assert settle([outcome.event]).total_price == 1600
@@ -179,11 +123,11 @@ def test_positive_net_uses_identity_even_with_opposite_or_uncrossed_video(
     scene = [[detection(2, 100, y)] for y in ys]
     outcome, _ = pipeline_event(scene, levels, analyzer=analyzer, products=[B])
     assert outcome.event.delta_weight == 105
-    assert outcome.event.freezer_actions is None
     result = settle([take(1, 1, (B, 1)), outcome.event])
-    assert counts(result) == ({} if ys else {"b": 1})
+    # 영상 정체성이 없어도(ys=[]) 같은 층 B 취출과 실측 무게가 맞아 차감된다 (2026-11-25).
+    assert counts(result) == {}
     if not ys:
-        assert any("missing_identity" in note for note in result.notes)
+        assert "zone1:freezer_return_same_floor_weight:vision=missing_identity" in result.notes
 
 
 def test_bottom_origin_roi_and_direction_diagnostics_preserve_original_bbox():
@@ -193,7 +137,6 @@ def test_bottom_origin_roi_and_direction_diagnostics_preserve_original_bbox():
         vertical_roi_coordinate_origin="bottom_left",
     )
     outcome, _ = pipeline_event(scene, [500, 605], filters=filters, save_detections=True)
-    assert outcome.event.freezer_actions is None
     assert outcome.trace.decision_coordinate_origin == "bottom_left"
     assert filters.drop_stats["vertical_roi"]["top"] == 3
     first = outcome.trace.frame_detections[0]["detections"][0]
@@ -212,13 +155,23 @@ def test_two_cameras_do_not_double_weight_return():
     assert counts(settle([take(1, 1, (B, 2)), outcome.event])) == {"b": 1}
 
 
-def test_camera_identity_conflict_keeps_prior_take_for_review():
+def test_camera_identity_conflict_resolved_by_same_floor_take_weight():
+    """top은 A, side는 B로 갈려 비전 정체성은 모호하지만, 같은 층에서 꺼낸 것은
+    B뿐이고 실측 무게도 B와 맞아 B를 차감한다 (2026-11-25 같은 층 반납 보완)."""
     top = [[detection(1, 100, y)] for y in [300, 260, 220]]
     side = [[detection(2, 100, y)] for y in [300, 260, 220]]
     outcome, _ = pipeline_event(top, [500, 605], side=side)
     assert "return" in outcome.trace.uncertain_directions
-    assert outcome.event.freezer_actions is None
     result = settle([take(1, 1, (B, 1)), outcome.event])
+    assert counts(result) == {}
+    assert "zone1:freezer_return_same_floor_weight:vision=ambiguous_identity" in result.notes
+
+
+def test_camera_identity_conflict_on_other_floor_keeps_prior_take_for_review():
+    top = [[detection(1, 100, y)] for y in [300, 260, 220]]
+    side = [[detection(2, 100, y)] for y in [300, 260, 220]]
+    outcome, _ = pipeline_event(top, [500, 605], side=side)
+    result = settle([take(2, 1, (B, 1)), outcome.event])
     assert counts(result) == {"b": 1}
     assert any("ambiguous_identity" in note for note in result.notes)
 
@@ -231,7 +184,6 @@ def test_zero_net_roundtrip_keeps_original_low_weight_skip(same_product, analyze
     scene += [[detection(cid, 350, y)] for y in [280, 240, 200]]
     outcome, detector = pipeline_event(scene, [500, 400, 500], analyzer=analyzer)
     assert detector.calls == 0
-    assert outcome.event.freezer_actions is None
     assert outcome.event.judgment.reason == "below_min_weight_change"
     assert counts(settle([outcome.event])) == {}
 
@@ -254,7 +206,6 @@ def test_mixed_video_does_not_replace_weight_router_count(monkeypatch):
     assert calls[0].delta_weight == -100
     assert [s.delta_grams for s in calls[0].segments] == [-205, 105]
     assert outcome.event.judgment.products
-    assert outcome.event.freezer_actions is None
     assert outcome.event.freezer_movement.take_candidates
     assert outcome.event.freezer_movement.return_candidates
     assert sum(outcome.event.freezer_movement.channel_deltas) == -100
@@ -285,7 +236,6 @@ def test_unstable_loadcell_below_freezer_pilot_gate_skips_vision():
     assert outcome.event.judgment.strategy == "low_weight_skip"
     assert outcome.event.judgment.reason == "below_min_weight_change"
     assert not outcome.event.judgment.products
-    assert outcome.event.freezer_actions is None
 
 
 @pytest.mark.parametrize("analyzer", [LoadcellAnalyzer, BocpdLoadcellAnalyzer])
@@ -307,37 +257,16 @@ def test_weight_only_return_still_matches_same_or_other_floor(destination):
         assert any("cross_zone_return" in note for note in result.notes)
 
 
-def test_action_journal_roundtrip_and_legacy_compatibility():
-    event = returned(2, 2, (B, 1))
-    replay = event_from_dict(json.loads(json.dumps(event_to_dict(event))))
-    assert replay == event
-    events = [take(1, 1, (A, 1), (B, 1)), event]
-    assert settle(events) == settle([event_from_dict(event_to_dict(e)) for e in events])
-    legacy = event_to_dict(replace(event, freezer_actions=None))
-    del legacy["freezer_actions"]
-    assert event_from_dict(legacy).freezer_actions is None
-
-
-def test_shared_video_across_zones_does_not_bypass_archived_action_contamination_checks():
-    videos = (("top", "/same-top.avi"), ("side", "/same-side.avi"))
-    source = replace(take(1, 1, (A, 1), (B, 1)), video_paths=videos)
-    destination = replace(returned(2, 2, (B, 1)), video_paths=videos)
-    result = settle([source, destination])
-    assert counts(result) == {"a": 1, "b": 1}
-    assert all(zone.status in ("review", "partial") for zone in result.zones)
-    assert any("freezer_shared_video_action_unresolved" in note for note in result.notes)
-
-
 def test_new_archive_keeps_weight_event_and_direction_diagnostics():
     scene = [[detection(2, 100, y)] for y in [300, 260, 220]]
     outcome, _ = pipeline_event(scene, [500, 605])
     archive = _event_to_dict(outcome.event, outcome.trace, 10)
-    assert archive["freezer_actions"] is None
+    assert "freezer_actions" not in archive
     assert archive["delta_weight"] == 105
     assert archive["trace"]["directional_candidates"]["return"][0]["class_id"] == 2
     yaml = pytest.importorskip("yaml")
     document = yaml.safe_load(yaml.safe_dump(archive))
-    assert document["delta_weight"] == 105 and document["freezer_actions"] is None
+    assert document["delta_weight"] == 105 and "freezer_actions" not in document
 
 
 def test_calibrated_slanted_side_camera_records_x_axis_without_vetoing_weight_return():
@@ -347,7 +276,6 @@ def test_calibrated_slanted_side_camera_records_x_axis_without_vetoing_weight_re
                                    axis="x", return_direction="decreasing", boundary_px=200,
                                ))
     assert outcome.trace.crossed_directions == ["return"]
-    assert outcome.event.freezer_actions is None
     assert counts(settle([take(2, 1, (B, 1)), outcome.event])) == {}
 
 
@@ -362,4 +290,3 @@ def test_overlapping_segments_keep_existing_zero_weight_skip():
     outcome, detector = pipeline_event(scene, [500, 400, 500], analyzer=lambda _: OverlapAnalyzer())
     assert detector.calls == 0
     assert outcome.event.judgment.reason == "below_min_weight_change"
-    assert outcome.event.freezer_actions is None

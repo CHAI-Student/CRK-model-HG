@@ -114,6 +114,11 @@ flowchart TD
 신규 냉동 반납의 `freezer_return`은 비전 SKU를 먼저 확인하고, 같은 SKU의 앞선 취출
 실측 delta와 ±15g으로 비교한다. 등록490g/취출465g/반납466.7g이어도 같은 SKU라면
 차감할 수 있다. 같은 무게의 다른 SKU를 대체 차감하지 않는다. 미확정 반납은 검토로 남긴다.
+비전이 반납 SKU를 못 정한 경우(정체성 없음·모호)에만 같은 층 잔여 취출 중 실측 무게가
+맞는 SKU가 하나뿐이면 차감하고, 같은 층 미청구 취출과 무게가 같으면 상쇄한다
+(2026-11-25, `freezer_returns.match_same_floor_return`·`cancel_unbilled_take`).
+냉동 층에 청구 없이 50g 이상 빠진 무게가 순변화로도 남으면 그 층 status는 `review`다
+(`_unbilled_weight_drop`).
 
 이동이 성립하면 관측 반납 무게를 출발 존 net에는 더하고 반납 존 net에서는 뺀다.
 2층 보정과 4층 재solve는 이 보정 net을 함께 사용한다. 예를 들어 1층에서 200g 취출 후
@@ -287,7 +292,8 @@ note 코드: `zoneN:cross_zone_vision_penalty:demoted=..:adopted=..:source=zoneM
   시절과 동일). 이것이 **G2.5(세션 정산 등가성 게이트)의 훅**이다 — 회수한 저널을 재생해
   정산기에 넣으면 라이브 확정과 같은 금액이 나와야 한다.
 - **관용 파싱**: `event_from_dict()`가 신규 필드를 `dict.get` 기본값으로 읽어, 신규 필드
-  도입 전에 기록된 라인도 그대로 파싱된다.
+  도입 전에 기록된 라인도 그대로 파싱된다. 반대로 2026-11-25 제거된 구 행동별 정산 필드
+  `freezer_actions`가 남은 라인은 그 키를 무시하고 일반 순 무게 경로로 재생된다.
 
 ### `archive.py`
 
@@ -312,7 +318,7 @@ note 코드: `zoneN:cross_zone_vision_penalty:demoted=..:adopted=..:source=zoneM
 | `ground_truth` | 정답 라벨 placeholder(`None`) — `label-session` CLI 또는 `annotate_ground_truth()`가 채운다. `{labeled_at, note, items:[{zone, class_id 또는 name, count}]}` |
 | `zones[]` | 존별 `weight_delta`, `trigger_count`, `notes`, `products`(product_id·name·**class_id·unit_weight**·count·가격) |
 | `triggers[]` | 트리거별 `delta_weight`, `segments`, `status`, `judgment`(전략·사유·conf·품목), **`vision_candidates` 전체**(채택 안 된 것 포함, head_votes·span_ratio·first_pos_ratio), `video_paths`, `change_timestamps`, `trace`, `processing_time_ms` |
-| `trace` | `yolo_calls`, `processed_frames`, `gate_skipped_frames`, `early_terminated`, `reason_codes`, `vote_summary` |
+| `trace` | `yolo_calls`, `processed_frames`, `gate_skipped_frames`, `reason_codes`, `vote_summary` (2026-11-25 이전 파일에는 `early_terminated`가 남아 있을 수 있다) |
 | `trace.frame_detections` | **선택**(`MODEL__SESSION__SAVE_DETECTIONS=1`) — 판정 기여 검출의 프레임별 bbox + `camera_crops`(좌표계 계약). off면 키 자체가 없다 |
 
 `class_id`·`unit_weight`를 남기는 이유는 GT 라벨 대조와 σ_db 잔차 실측을 **아카이브만으로** 할

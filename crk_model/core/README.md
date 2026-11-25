@@ -82,8 +82,7 @@ core는 **이 시스템의 어휘**를 정의한다. 무엇을 몇 개 팔았는
 
 냉장/냉동 차이를 `if cabinet_type == "freezer"` 분기로 흩뿌리면, 새 존 타입이 생길 때마다
 분기가 늘고 어떤 임계가 어디서 갈리는지 추적 불가능해진다. 그래서 **코드 포크가 아닌
-파라미터 포크**로 만들었다(D3): 게이트 임계·구간화 임계·조기 종료 허용 여부까지 전부
-프로파일 필드다.
+파라미터 포크**로 만들었다(D3): 게이트 임계·구간화 임계까지 전부 프로파일 필드다.
 
 물리적 근거(제약 C3): 로드셀 **LABD-B3/K3의 보증 분해능은 5g**(division 1g)이고,
 IO-BOARD 엣지 단이 **5g 양자화**를 적용한다(CRK-IO-BOARD 2.0.2). 따라서 냉장에서도 5g
@@ -92,15 +91,16 @@ IO-BOARD 엣지 단이 **5g 양자화**를 적용한다(CRK-IO-BOARD 2.0.2). 따
 
 | 필드 | `REFRIGERATOR` | `FREEZER` | 의미 |
 |---|---|---|---|
-| `tolerance_grams` | 5.0 | 15.0 | 판정·조기 종료가 공유하는 단일 tolerance (이중 기준 금지) |
+| `tolerance_grams` | 5.0 | 15.0 | 판정(`judge()`)·CLOSE 정산이 공유하는 단일 tolerance (이중 기준 금지) |
 | `weight_is_discriminative` | `True` | `False` | 무게가 정체성 판별자 자격이 있는가 |
 | `count_gate_tolerance_grams` | `None`(→ tolerance) | 15.0 | 개수 검증 게이트 (I3) |
 | `min_weight_change_grams` | 5.0 | 5.0 | 저무게 스킵 게이트 (QA Q8) |
 | `segment_step_grams` | 5.0 | 20.0 | ingest 구간화 스텝 임계 (D4) |
 | `motion_gate_threshold` | 0.02 | 0.005 | 모션 게이트 변화 픽셀 비율 (D6) |
 | `motion_gate_keepalive` | 8 | 4 | 연속 스킵 상한 |
-| `early_termination_allowed` | `True` | `False` | I15 — 냉동은 조기 종료 금지 |
 | `motion_evidence_floor_px` | 10.0 | 12.0 | 변위 증거 하한(원본 `*_MOTION_MIN_DISPLACEMENT_PX` 대응) |
+
+조기 종료 허용 여부 필드(`early_termination_allowed`, I15)는 조기 종료 기능과 함께 2026-11-25 제거됐다.
 
 `weight_is_discriminative=False`가 냉동에서 뜻하는 것: 무게는 **거부권만** 갖는다.
 "무엇을 가져갔나"는 비전이 정하고, 무게는 `count_gate`(±15g) 안에서 개수만 거칠게 검증한다.
@@ -174,7 +174,6 @@ fail-closed 검증이 걸린 키: `MODEL__MACHINE__CABINET_TYPE`, `MODEL__LOADCE
 | I13 | 에러 세션 무성 확정 금지 | `FinalizedSettlement.blocked`/`block_reason` + `ErrorSessionPolicy` 기본 BLOCK |
 | I8 | 판정·정산 사유 코드는 현장 디버깅 계약 | `JudgmentResult.reason`, `ZoneBasket.notes`, `FinalizedSettlement.notes` |
 | I3 | 냉동 다품목 출력은 무게 게이트 통과 필수 | `SensorProfile.count_gate` (냉동 15g) |
-| I15 | 반품·냉동에는 조기 종료 미적용 | `early_termination_allowed=False` (FREEZER) |
 | I7 | 트리거 멱등성 TTL | `Settings.idempotency_ttl_s` (기본 5.0s) |
 | C3 | 센서 물리 — 5g 분해능·5g 양자화·냉동 5~15g 노이즈 | 프로파일 상수 전부의 하한 근거 |
 | C7 | 상품 매칭의 권위 소스는 Node 스냅샷 | `ActiveProduct`만이 상품 표현 (로컬 상품 DB 없음) |
@@ -222,7 +221,7 @@ core 전용 테스트 파일은 없다. **소비자 경로에서 고정**하는 
   값 동등성·불변성에 의존한다.
 - **`InterimSummary`와 `FinalizedSettlement`를 합치지 말 것.** I10은 문서가 아니라
   이 타입 분리로만 강제된다. 공통 필드를 빼서 상위 클래스를 만들면 `isinstance` 가드가 무력화된다.
-- **프로파일 상수를 바꾸면 판정이 바뀐다.** `tolerance_grams`는 판정과 조기 종료가 공유하는
+- **프로파일 상수를 바꾸면 판정이 바뀐다.** `tolerance_grams`는 판정과 CLOSE 정산이 공유하는
   단일 소스라 한쪽만 보고 조정하면 안 된다. 또한 env 템플릿·일부 주석에 **"냉장 ±3g"라는
   낡은 표기가 남아 있다** — 현행 코드값은 `tolerance_grams=5.0`이다(5g 분해능 대응 시
   상향됐고 문구가 따라오지 않았다). 값을 읽을 때는 항상 `profiles.py`가 정본이다.

@@ -1,7 +1,10 @@
 # Yoona 변경 사항 정리
 
-냉동의 최신 처리 기준은 [2026-11-18 비전 증거와 세션 전체 반납 연결](#freezer-20261118)을 따른다.
-이전에 누락된 [2026-11-16 테스트 이슈와 수정 기록](#freezer-20261116)도 보충했다.
+냉동의 현재 처리 기준은 [2026-11-25 로드셀 무게 안정화 판단](#freezer-20261125)이다.
+로드셀 무게를 신뢰하기로 하면서 [2026-11-18 비전 증거와 세션 전체 반납 연결](#freezer-20261118)(커밋 `4390e7a`·`8433acf`)을
+되돌렸다. 코드는 [2026-11-16 기록](#freezer-20261116)(커밋 `7bb4f25`) 상태를 바탕으로 한다.
+그 위에 [2026-11-19 CLOSE 정산 보완](#freezer-20261119), [2026-11-25 코드 경량화](#refactor-20261125),
+11-25 무게 신뢰 기반 보완(같은 층 반납, 청구 없이 빠진 무게의 review)을 더했다.
 아래 날짜별 기록은 당시 구현 이력이며, 이후 철회·보완된 설명이 포함되어 있다.
 최신 절의 구현 완료, 저장 데이터 검증, 실제 장비에서 확인할 항목을 구분해서 읽는다.
 
@@ -1844,7 +1847,12 @@ BOCPD 내부에는 정규분포를 사용하는 변화점 추정이 있다.
 
 <a id="freezer-20261118"></a>
 
-# 2026-11-18 현재 기준: 비전 증거와 세션 전체 취출·반납 연결
+# 2026-11-18 비전 증거와 세션 전체 취출·반납 연결 (2026-11-25 되돌림)
+
+> **2026-11-25 되돌림**: 로드셀 무게를 안정화된 것으로 판단해 이 절의 구현(커밋 `4390e7a`·`8433acf`)을
+> 코드에서 되돌렸다. 손 ID 추적, 방향 영상 후보 우선, 무게 불일치 반납의 비전 연결, 채널 검증 취출,
+> 작은 부채널 제외, 세션 전체 반납 공동 배정은 현재 코드에 없다. 아래는 당시 기록이다.
+> 현재 기준은 [2026-11-25 절](#freezer-20261125).
 
 ## 작업 목적과 현재 상태
 
@@ -2131,3 +2139,398 @@ git diff --check 통과
 이후 요청한 시각 정렬 기능 제거는 현재 작업 트리에 있으며 이번 작업에서 커밋·push하지 않았다.
 실제 기기 `.env`, 등록 상품 DB, 원본 YAML 및 결제 이력도 수정하지 않았다.
 이번 문서 보충은 링크·섹션 앵커·코드 블록과 `git diff --check`로 확인했다.
+
+<a id="freezer-20261119"></a>
+
+# 2026-11-19 냉동 6세션 오판정 분석과 CLOSE 정산 보완
+
+## 작업 목적과 결과 요약
+
+11월 19일 6세션의 실제 취출과 추론 결과를 비교해 원인을 로직·모델 인식으로 나눴다.
+로직 문제 4가지는 CLOSE 정산에서 고쳤다. 모델 혼동은 로직으로 고칠 수 없어 기록만 남긴다.
+새 env는 추가하지 않았고, 무게 처리 기본 경로와 트리거 판정은 바꾸지 않았다.
+
+| 세션 | 실제 취출 | 기록된 결과 | 변경 후 (저장 데이터 재정산) | 원인 |
+|---|---|---|---|---|
+| ses-1-1795055066 | 4층 핫도그·4층 청양·3층 오리로스 | 3층 오리지널×1, 4층 오리지널×2 | 상품 동일, 3·4층 status `review` | 모델 혼동(101→102, 92→102) + refit |
+| ses-2-1795055845 | 1층 대패오리·2층 너겟·5층 삼계탕 | 정답 | 동일 | — |
+| ses-1-1795061395 | 1층 땡초교자·3층 육즙교자·2층 닭발 | 1층 육즙×1, 2층 육즙×1 | 1층 육즙×1, 3층 육즙×1, 2층 미청구(`review`) | 모델 혼동(96→97) + 교차존 강제 억제 + 손에 든 상품 재청구 |
+| ses-2-1795062111 | 5층 용가리·1층 매운오리·2층 너겟 | 매운오리·너겟·닭발 | 동일 | 인식 부족(용가리 3표). 보류 항목 |
+| ses-3-1795062865 | 4층 청양×2 | 청양×1 + 오리지널×1 | 청양×2 | 로직(무게가 같은 조합으로 교체) |
+| ses-4-1795064208 | 5층 용가리×2 | 정답 | 동일 | — |
+
+교자 세션은 청구 개수가 2개로 같다. 다만 3층 육즙교자는 실제 취출을 맞게 청구했고,
+2층의 잘못된 육즙교자 청구는 빠졌다. 1층은 여전히 땡초교자를 육즙교자로 인식한 결과이고,
+2층의 실제 닭발은 청구 근거가 없어 미청구다(과청구보다 미청구 원칙).
+
+## 1. 무게가 같은 조합이 맞는 스냅을 바꾸던 문제 (ses-3 청양×2)
+
+트리거 판정은 청양(101)×2 COMPLETE였다(−1055g, 1060g과의 잔차 5g).
+CLOSE의 비전 조합이 청양+오리지널(530+530=1060g, 잔차 5g)을 찾아 결과를 바꿨다.
+두 상품의 등록 무게가 같아 무게는 아무것도 가르지 못했고, 비전만으로 정체성을 바꾼 것이다.
+기존 확신 스냅 보호(⑤)는 상대 후보 102의 conf도 1.0(≥0.92)이라 적용되지 않았다.
+
+조합의 모든 상품 단위 무게가 스냅 상품과 count gate(15g) 안에 있고,
+잔차 개선이 5g 미만이면 게이트를 통과한 스냅을 유지한다.
+
+```text
+freezer_combo_rejected_equal_weight:zone4:P102=1,P101=1:keep=P101=2
+```
+
+무게가 조합을 실제로 더 잘 설명하는 경우는 기존대로 조합을 쓴다.
+예: ses-8의 76+75(100/95g)는 잔차가 5g→0g으로 줄어 조합 유지.
+이 세션의 결과 status는 `review`다. 101/102 conf가 동률이라 기존 `ambiguous_runner_up_complete` 규칙이 적용된다.
+
+## 2. 손에 든 상품 때문에 진짜 취출이 지워지던 문제 (교자 세션 3층)
+
+교차존의 session42 강제 억제는 "소스 외에 같은 클래스를 유일 후보로 든 피해 zone이 2곳 이상이면 순수 유출"로 본다.
+교자 세션에서는 97을 유일 후보로 든 zone이 2층·3층이라 3층의 실제 육즙교자(−335g)가 지워졌다.
+
+2층의 97은 FOV 유출이 아니라 1층에서 꺼낸 상품을 손에 든 채 2층을 연 것이었다.
+
+| zone | 전체 후보 97 | head_votes | first_pos_ratio |
+|---|---|---:|---:|
+| 1층 (소스) | 185표 | 0 | 0.54 |
+| 3층 (실제 취출) | 229표 | 0 | 0.27 |
+| 2층 (손에 든 상품) | 196표 | 52 | 0.0 |
+
+피해 zone을 셀 때 carried-in 지문 zone(전체 후보 `head_votes ≥ 5`)은 제외한다.
+문턱 5는 `MotionEvidence.held_min_head` 기본값과 같은 값이고, env를 추가하지 않았다.
+그러면 3층은 2-zone 규칙(soft 페널티 후에도 이기면 인정)으로 돌아가 97 partial이 유지된다.
+`head_votes`가 기록되기 전 세션(값 0)은 기존 session42 동작과 같다.
+
+## 3. 손에 든 상품이 다른 층에 다시 청구되던 문제 (교자 세션 2층)
+
+2층 −205g에 97(370g)이 identity partial로 청구됐다. 실제는 닭발(200g)이었지만,
+닭발은 7표로 share 기준에서 탈락해 판정 후보에 없었다.
+
+`freezer_session.suppress_carried_over_partials()`를 CLOSE에 추가했다
+(2026-11-25 11-18 되돌림으로 `freezer_session.py`가 없어져 `freezer_carried_over.py`로 옮겼다. 내용은 같다).
+교차존 보정 뒤, 혼합 취출·반납 해석 전에 실행한다.
+아래 세 조건이 모두 맞을 때만 PARTIAL 판정에서 해당 클래스를 뺀다.
+
+1. 더 앞선 이벤트가 같은 클래스를 이미 청구했다 (손에 든 상품의 출처).
+2. 이 이벤트의 전체 비전 후보가 carried-in 지문(`head_votes ≥ 5`)을 가진다.
+3. 어떤 개수 n으로도 무게가 근접 밴드 2×gate_n(n) 안에 들지 않는다.
+   gate_n(n) = 15g + 5g×(n−1).
+   교자 세션 예시: n=1 잔차 165g > 30g, n=2 잔차 535g > 40g.
+
+뺀 자리에 다른 상품을 채우지 않는다. 남은 무게는 설명되지 않은 취출일 수 있으므로,
+해당 zone의 결제 status를 `review`로 올린다.
+
+```text
+zone2:freezer_carried_over_suppressed:P97:delta=-205.0g:trigger_ts=1795061404.454
+```
+
+무게가 그 상품과 맞거나(같은 상품을 하나 더 꺼냈을 수 있음), `head_votes`가 0이거나,
+앞선 청구가 없으면 아무것도 바꾸지 않는다. COMPLETE 판정은 대상이 아니다.
+
+## 4. refit으로 바뀐 정체성을 complete로 내보내던 문제 (ses-1-1795055066)
+
+`freezer_vision_first_unique_refit`과 `refit_arbitrated`는 비전 1위 후보를 무게가 맞는 다른 상품으로 바꾼 COMPLETE다.
+이 세션에서는 101→102 교체가 3번 있었고, 무게 차이는 0g이었다.
+청구는 그대로 두고 해당 zone의 결제 status를 `review`로 올린다.
+
+```text
+zone4:refit_identity_replaced:trigger_ts=1795055068.669
+```
+
+청구 상품은 여전히 오리지널이다. 모델 혼동 자체는 이 변경으로 고쳐지지 않는다.
+
+## 5. 보류: 무게가 맞지 않고 반납 증거가 더 많은 후보 미청구
+
+ses-2-1795062111 5층은 닭발(103)이 청구됐다. 이 판정에는 다음 문제가 있다.
+- 실제 취출은 용가리다.
+- 닭발은 반납 방향 13표, 취출 방향 5표였다.
+- 무게도 어떤 개수와도 맞지 않았다.
+
+"이런 후보는 청구하지 않는다"는 규칙은 로드셀 무게가 안정될 때까지 보류하기로 했다(사용자 결정).
+현재는 5층 닭발 partial 청구가 그대로 남는다.
+- 2026-11-25: 로드셀 무게를 안정화된 것으로 판단해 보류 조건은 풀렸지만, 이 규칙은 구현하지 않기로 했다(사용자 결정).
+
+## 6. 로직으로 해결하지 않은 원인
+
+- **모델 혼동 쌍**: 101↔102, 96↔97, 92↔102. 무게 차이가 7g 이하라 무게로 거부할 수 없다.
+  학습 데이터 보강이 필요하다. 이번 변경은 이 경우를 `review`로 드러내는 데까지만 한다.
+- **ses-1-1795055066 4층 ch0 −535g**: 핫도그 등록 무게 475g과 60g 차이가 난다.
+  아직 설명이 안 돼 원시 로드셀 기록 확인이 필요하다. 고정 보정은 적용하지 않았다.
+- **인식 부족**: ses-2-1795062111 용가리 3표, 교자 세션 2층 닭발 7표(share 탈락).
+- 11-19 YAML의 닭발 등록 무게는 200g이다(11-18 절의 표는 201g).
+
+## 7. 판단 흐름에서 바뀐 위치
+
+```text
+CLOSE: ghost 강등
+  → 교차존 보정 (피해 zone 집계에서 carried-in zone 제외)        ← 2
+  → carried-over partial 제거                                   ← 3 (신규)
+  → 혼합 취출·반납 해석 → 복수 반납 공동 배정 → 반납 차감
+  → freezer 재solve (무게가 같은 조합 교체 거부)                  ← 1
+  → zone status (refit·carried-over 제거 → review)             ← 4, 3
+```
+
+(2026-11-25: "복수 반납 공동 배정"은 11-18 되돌림으로 빠졌다. 현재 흐름은 [11-25 절](#freezer-20261125) 참고.)
+
+| 기록 | 의미 |
+|---|---|
+| `freezer_combo_rejected_equal_weight` | 무게가 같은 조합으로 스냅을 바꾸지 않고 유지 |
+| `freezer_carried_over_suppressed` | 손에 든 상품의 무게 불일치 재청구를 제거하고 zone을 review로 표시 |
+| `refit_identity_replaced` | refit이 비전 1위와 다른 상품으로 바꾼 COMPLETE. zone을 review로 표시 |
+
+## 8. 검증
+
+저장된 YAML 트리거의 판정은 그대로 두고 CLOSE 정산만 다시 실행했다.
+YOLO 재추론이나 실영상 처리는 하지 않았다.
+- 정산 설정: `Settings` 기본값, 모든 zone FREEZER 프로파일.
+- 재고: YAML에 없어 490개로 가정했다.
+- 재정산 도구 확인: 같은 도구를 HEAD(`8433acf`) 코드로 돌리면 11-19 6세션 모두 기록된 청구 결과와 같다.
+
+| 범위 | 변경 전후 차이 |
+|---|---|
+| 11-19 6세션 | 위 요약 표의 3세션만 변경 (ses-3 청양×2, 교자 세션 2·3층, ses-1-1795055066 status) |
+| 11-12~11-16 YAML 11세션 | 청구 상품 변경 없음. ses-1-1794812134 4층에 refit note만 추가(status는 원래 review). ses-2-1794789461 4층 −17.5g에 붙어 있던 오리지널 partial 제거로 status partial→review |
+| ses-1-1794471430 | 구 행동별 정산(`freezer_actions`) 기록이라 비교에서 제외 |
+
+새 회귀 테스트:
+- `tests/test_ledger.py`
+  - `test_equal_weight_combo_keeps_gate_passed_snap`
+  - `TestFreezerCarriedOver`: 제거 1건, 조건 하나라도 빠지면 유지 3건
+  - `TestRefitReviewStatus`: unique_refit·refit_arbitrated는 review, single은 complete
+- `tests/test_cross_zone.py`
+  - `test_carried_in_zone_is_not_counted_as_bleed_victim`: head 52면 3층 유지, head 0이면 기존 session42 억제
+
+변경 전 코드에서는 위 테스트 중 변경을 검증하는 5건이 실패하고 대조 케이스 5건은 통과한다.
+
+```text
+.venv/bin/python -m pytest -q
+750 passed, 25 skipped
+
+변경 Python 파일 ruff: tests/test_cross_zone.py:1029 F841 1건 (HEAD부터 있던 기존 경고, 이번 변경과 무관)
+git diff --check 통과
+```
+
+## 9. 변경 파일
+
+| 파일 | 역할 |
+|---|---|
+| [ledger/settler.py](crk_model/ledger/settler.py) | 무게가 같은 조합 거부, carried-over 패스 연결, refit·carried-over zone의 review status |
+| [ledger/cross_zone.py](crk_model/ledger/cross_zone.py) | `CARRIED_IN_MIN_HEAD`, `_carried_in_zones`, session42 피해 zone 집계 제외 |
+| `ledger/freezer_session.py` (11-25부터 [ledger/freezer_carried_over.py](crk_model/ledger/freezer_carried_over.py)) | `suppress_carried_over_partials` |
+| [tests/test_ledger.py](tests/test_ledger.py), [tests/test_cross_zone.py](tests/test_cross_zone.py) | 11-19 세션 값 기반 회귀 |
+
+이 절의 변경은 작업 트리에만 있고 커밋·push하지 않았다.
+실제 기기 `.env`, 등록 상품 DB, 원본 YAML, `README.md`는 수정하지 않았다.
+
+<a id="refactor-20261125"></a>
+
+# 2026-11-25 코드 경량화: CLOSE 정산 정리와 꺼진 경로 제거
+
+11-19 절 이후 전체 코드 경량화 검토 결과 중 아래 항목을 반영했다.
+청구 결과는 바꾸지 않는 정리가 목적이다. 동작이 바뀌는 곳은 5절에 따로 적었다.
+
+| 구분 | 내용 | 청구 영향 |
+|---|---|---|
+| A | cross_zone·ghost_ledger·settler 중복 정리 | 없음 (18세션 재정산 동일) |
+| C-1 | zone notes를 ambiguous/refit note 기록 뒤에 모음 | 없음 (`ZoneBasket.notes`만 보강) |
+| C-3 | render CLI 마무리 인코드 실패 격리 | 없음 (분석 도구) |
+| B-1 | 옛 냉동 행동별 정산(`freezer_actions`) 제거 | 신규 트리거 없음. 11-12 기록 재처리만 영향 |
+| B-2 | 조기 종료(early termination) 제거 | 없음 (env 3종 모두 0이던 기능) |
+
+## 1. A — CLOSE 정산 중복 정리
+
+| 위치 | 변경 |
+|---|---|
+| `cross_zone._rejudge` | 후보만 바꾼 재판정 호출 5곳(cross_zone 4, ghost_ledger 1)을 하나로 |
+| `cross_zone._strip_classes` | "오염 클래스 제거, 남는 상품 없으면 NO_DETECTION" 4곳을 하나로 |
+| `_credible_trial_replacement` | `_trial_replacement_valid`를 흡수. 지문 중복 억제는 신뢰도 하한 0, 동률 판별·잔차 패스는 `source_conf_min` |
+| 지문 중복 억제 | 같은 이벤트를 두 번 재판정하던 것을 한 번 계산해 재사용 |
+| `_tie_break_by_replaceability` | 실행되지 않던 첫 번째 정의 삭제 |
+| `_mutual_exemptions`, `_repass_event` | 유일 호출자가 항상 넘기던 인자의 기본값·`or {}` 폴백 삭제 |
+| `ghost_ledger.weight_backed_zones` | ghost `_weight_backed_classes`와 settler `_backed_zones_by_class`(같은 게이트)를 하나로 |
+| settler 콤보·단일 종 교체 | 후보 수집(`_zone_evidence`)·자격 제외 ①②(`_exclude_session_explained`)·실존 하한 ③(`_exclude_low_evidence`) 공용화, 콤보 note 문자열 `_fmt_combo` |
+
+재판정 캐시는 CLOSE 라우터가 정산마다 새로 만들어지고 telemetry·miss_log를 읽는 곳이 없어 결과에 영향이 없다.
+
+## 2. C-1 — zone notes 누락
+
+`_notes_for_zone`이 `ambiguous_runner_up_complete`·`refit_identity_replaced` 기록보다 먼저 실행돼,
+두 note가 세션 notes에는 남지만 zone notes(`ZoneBasket.notes`)에는 빠졌다. 기록 뒤로 옮겼다.
+18세션 재정산에서 바뀐 것은 4세션의 zone notes뿐이고, 청구·status·세션 notes는 같다.
+
+## 3. C-3 — render CLI 실패 격리
+
+`sink.close()`(마무리 인코드)가 `finally` 안에 있어 ffmpeg 실패 예외가 `except OSError` 밖으로 나가
+남은 카메라·트리거 렌더가 모두 중단됐다. close를 try 안으로 옮기고, `OSError`·인코드 대기 timeout은
+그 카메라만 건너뛴다. 예상 밖 예외는 sink를 정리한 뒤 그대로 올린다.
+
+## 4. B — 꺼진 경로 제거
+
+**옛 행동별 정산 (`freezer_actions`)**: 11-12에 생성 코드가 들어갔다가 같은 날 제거됐고, 이후에는
+옛 저널·아카이브 재생에만 쓰였다. `FreezerAction` 타입, `TriggerEvent.freezer_actions`, 저널·아카이브
+직렬화, settler의 행동별 SKU 차감·보호 경로, freezer_session·freezer_movements의 예외 처리를 지웠다.
+옛 저널·YAML에 `freezer_actions` 키가 있어도 읽기는 되며 키만 무시한다.
+
+**조기 종료**: 이슈 #22(0805 냉장 20종 실기) 이후 기본 off였고 env 예시 3종 모두 0이었다.
+`perception/early_termination.py`, `Settings.early_termination_enabled`, env `MODEL__VISION__EARLY_TERMINATION`,
+`SensorProfile.early_termination_allowed`, `TriggerTrace.early_terminated`(아카이브 `trace.early_terminated`),
+조기 종료 입력으로만 쓰이던 `HandLatch.frames_since_exit`를 지웠다. 기기 `.env`에 이 키가 남아 있어도 무시된다.
+
+## 5. 동작이 바뀌는 곳
+
+- **ses-1-1794471430 (11-12, `freezer_actions` 기록)**을 다시 정산하면 zone2(−370g)·zone3(−470g)가
+  `review` → `complete`(청구 없음)로 바뀐다. 두 트리거 모두 상품 없는 PARTIAL 판정이라 청구는 원래도 0이다.
+  행동별 경로는 이를 `freezer_action_unresolved`로 review에 올렸지만, 일반 경로의 zone status는
+  상품이 있는 PARTIAL만 본다.
+  - 참고: 신규 트리거에서도 "무게는 빠졌는데 상품 없는 PARTIAL"이면 zone이 `complete`(청구 없음)로 나갔다.
+    같은 날 [11-25 무게 안정화 절](#freezer-20261125)에서 review로 바꿨다. 이 세션의 2·3층도 다시 review다.
+- 조기 종료는 기본 off라 신규 트리거 동작 변화는 없다. 켜 두었던 기기라면 이제 항상 전 프레임을 추론한다.
+
+## 6. 검증
+
+저장 YAML 18세션(11-12~11-19)의 트리거 판정을 그대로 두고 CLOSE 정산만 다시 실행해, 오늘 작업 전
+작업 트리 복사본과 비교했다. YOLO 재추론·실영상 처리는 하지 않았다.
+
+| 단계 | 결과 |
+|---|---|
+| A 후 | 18세션 출력 전체(청구·status·세션/zone notes) 동일 |
+| C-1 후 | zone notes 4세션 보강 외 동일 |
+| B 후 | C-1 후와 동일 (재정산 도구는 원래 `freezer_actions`를 넣지 않음). 넣어서 비교한 ses-1-1794471430은 5절 |
+
+```text
+.venv/bin/python -m pytest -q
+726 passed, 25 skipped
+
+ruff (crk_model, tests): 기존 경고 2건만 (gateway/state_machine.py:365 E501, tests/test_cross_zone.py:1029 F841 — HEAD부터 있던 것)
+```
+
+테스트 수 750 → 726: 옛 행동별 경로 13건, 조기 종료 13건 삭제, render 실패 격리 2건 추가.
+- `tests/test_render_cli_failures.py` (신규, ffmpeg·numpy 없이 실행): 마무리 인코드 실패 시 그 카메라만 건너뜀 —
+  수정 전 코드에서 실패한다. 예상 밖 예외는 sink 정리 후 전파.
+- `tests/test_t2_batch.py::test_pipeline_prefetch_closes_unconsumed_side_on_error`: 조기 종료 대신 top 디코드 실패로
+  side 프리페처가 닫히는지 확인하도록 바꿨다.
+- `tests/test_session_archive.py::test_actual_freezer_save_is_readable_by_standard_safe_loader`: `freezer_movement`
+  튜플로 표준 YAML 저장을 확인하도록 바꿨다. 옛 `!!python/tuple` 아카이브 읽기 테스트는 그대로 둔다.
+
+## 7. 변경 파일
+
+| 파일 | 변경 |
+|---|---|
+| [ledger/cross_zone.py](crk_model/ledger/cross_zone.py) | A (−93줄) |
+| [ledger/settler.py](crk_model/ledger/settler.py) | A, C-1, B-1 (−108줄) |
+| [ledger/ghost_ledger.py](crk_model/ledger/ghost_ledger.py) | A, `weight_backed_zones` |
+| [ledger/events.py](crk_model/ledger/events.py), [journal.py](crk_model/ledger/journal.py), [archive.py](crk_model/ledger/archive.py), [freezer_session.py](crk_model/ledger/freezer_session.py), [freezer_movements.py](crk_model/ledger/freezer_movements.py) | B-1 (archive는 B-2 trace 키 포함) |
+| [service/pipeline.py](crk_model/service/pipeline.py), [model_service.py](crk_model/service/model_service.py), [worker.py](crk_model/service/worker.py), [core/config.py](crk_model/core/config.py), [core/profiles.py](crk_model/core/profiles.py), [perception/\_\_init\_\_.py](crk_model/perception/__init__.py), [frames/motion_gate.py](crk_model/frames/motion_gate.py), `perception/early_termination.py`(삭제) | B-2 |
+| [adapters/render_cli.py](crk_model/adapters/render_cli.py) | C-3 |
+| `.env.example`, `refrg.env.example`, `freezer.env.example` | `MODEL__VISION__EARLY_TERMINATION` 삭제 |
+| 테스트 7개 파일 + 신규 1개 | 위 6절 |
+
+`crk_model` 본체는 오늘 작업 전보다 424줄 줄었다.
+
+이 절의 수치(테스트 726건, 줄 수)는 같은 날 이어진 11-18 되돌림 이전 기준이다.
+`freezer_session.py`는 되돌림으로 삭제됐다. 최신 수치는 [11-25 무게 안정화 절](#freezer-20261125)에 있다.
+
+이 절의 변경도 작업 트리에만 있고 커밋·push하지 않았다. 실제 기기 `.env`, `README.md`는 수정하지 않았다.
+
+<a id="freezer-20261125"></a>
+
+# 2026-11-25 로드셀 무게 안정화: 11-18 비전 우선 설계 되돌림과 같은 층 반납 보완
+
+## 1. 판단
+
+로드셀 무게를 안정화된 것으로 판단했다(사용자 결정). 무게 신뢰가 낮다는 전제로 만든
+11-18 커밋 두 개(`4390e7a` 비전 기반 추론 설계, `8433acf` 시계열 후보 제한 제거)를 코드에서 되돌려
+11-16(`7bb4f25`) 기준으로 맞췄다. 11-19 절 5번은 보류 조건이 풀렸지만 구현하지 않기로 했다(사용자 결정).
+
+## 2. 되돌린 내용
+
+| 11-18 기능 | 되돌린 뒤 |
+|---|---|
+| 손 ID 추적 (`MODEL__VISION__TRACKER`=bytetrack, `Detection.track_id`, 클립별 추적 초기화, 행동 상세 `action_details`) | 없음. 기기 `.env`에 `MODEL__VISION__TRACKER`가 남아 있어도 무시된다 |
+| 방향 영상 후보 우선(`vision_priority`)·행동 정체성 보존(`freezer_action_identity_preserved`) | 트리거 판정은 전체 영상 후보 + 기존 segment 재시도 |
+| 무게가 안 맞는 반납의 비전 연결(`matched_vision_presence`, `return_completed`) | 없음. 반납은 앞선 취출 실측 delta와 ±15g으로 검증 |
+| 채널 검증 취출(`verified_takes`)·작은 부채널 독립 판정 제외 | 취출 이력은 판정 상품 기준(`record_take`) |
+| 세션 전체 반납 공동 배정(`freezer_session.resolve_session_returns`)·행동 완료 시각 정렬 | 반납은 시간순으로 하나씩 매칭 |
+| 교차존 보정의 `vision_priority` 보호 | 없음 |
+
+되돌리는 방법: 커밋은 건드리지 않고, 파일마다 (작업 트리, HEAD, `7bb4f25`) 3-way 병합으로 두 커밋의
+변경만 뺐다. 커밋하지 않은 11-19·11-25 변경이 닿지 않은 파일(`yolo_detector.py`, `serve.py`,
+`detector.py`, `motion_evidence.py`, `test_freezer_camera_views.py`)은 `7bb4f25`와 같다.
+`freezer_session.py`, `test_freezer_vision_priority.py`, `test_hand_tracker.py`,
+`fixtures/freezer_cross_floor_20261116_evening.json`은 삭제했다.
+
+유지한 것:
+- 11-19 항목 1~4. 항목 3(carried-over 억제)은 `freezer_session.py` 삭제로 `freezer_carried_over.py`로 옮겼다.
+  무게가 맞지 않음을 근거로 청구를 빼는 규칙이라 무게 신뢰 전제와 맞다.
+- 11-25 경량화 A·B·C.
+
+## 3. 같은 층 반납 보완
+
+비전이 반납 SKU를 정하지 못한 경우에만 같은 층 취출 이력과 실측 무게로 보완한다.
+
+| 경우 | 처리 | note |
+|---|---|---|
+| 반납 정체성 없음·모호(`missing_identity`·`ambiguous_identity`), 같은 층 잔여 취출 중 실측 무게가 맞는 SKU가 하나 | 그 SKU 차감 | `freezer_return_same_floor_weight:vision=…` |
+| 위가 안 되고, 같은 층 미청구 취출과 반납 무게가 ±15g(count gate) 안 | 서로 상쇄. 청구 변화 없음, review 아님 | `freezer_unbilled_take_returned:take=…:return=…` |
+| 영상 증거 없는 무게 반납 | 같은 층 청구 상품 매칭 → 같은 층 미청구 취출 상쇄 → 다른 층 순 | 위와 같음 |
+
+확정하지 않는 경우(기존처럼 미해결·검토):
+- 무게가 맞는 SKU가 둘 이상(같은 무게 SKU)이거나 개수가 갈림
+- 영상에 다른 후보만 보임
+- 비전이 다른 SKU를 뚜렷하게 본 `no_prior_take`(같은 무게라도 무게로는 정체성을 못 가른다)
+- 비전 SKU의 무게 불일치(`weight_mismatch`), 반납 무게 미안정(`not_stabilized`)
+- 다른 층으로 간 정체성 없는 반납
+
+## 4. 청구 없이 빠진 무게 → review
+
+냉동 층에 50g(`min_trigger_delta_grams`) 이상 빠졌는데 청구 상품이 없는 판정이 있으면 확인한다.
+상품 없는 PARTIAL과 NO_DETECTION(`forced_final_no_match`, 교차존·carried-over 억제 결과 등)을 모두 포함한다.
+반납·층간 이동을 반영한 층 순변화가 청구 무게보다 50g 이상 더 빠졌으면 그 층을 `review`로 올린다
+(`freezer_unbilled_weight_drop:unexplained=Xg`). 50g 미만이거나 같은 층 반납으로 상쇄되면 무시한다.
+냉장은 이번 규칙을 적용하지 않았다.
+
+## 5. 검증
+
+저장 YAML 18세션(11-12~11-19)의 트리거 판정을 그대로 두고 CLOSE 정산만 다시 실행했다.
+
+| 단계 | 결과 |
+|---|---|
+| 되돌린 직후 | 되돌리기 전과 청구·status 동일. notes 차이 3줄(ses-2-1795055845 5층에 교차존 재판정 시도 기록 추가, 결과는 원 판정 유지) |
+| 새 규칙 후 | 청구 동일. status 3곳 `complete`→`review`: ses-1-1794471430 2층(370g)·3층(470g) 미청구, ses-5-1794795995 3층(320g — 교차존 보정이 닭발 청구를 1층 유출로 지운 층). 교자 세션 2층(205g)은 원래 review, note만 추가 |
+
+한계: 저장 YAML의 트리거 판정은 기록 당시 파이프라인이 만든 것이다. 특히 11-19 6세션은 11-18 비전 우선
+파이프라인의 판정이라, 되돌린 트리거 판정 로직(방향 후보 우선, 정체성 보존, 부채널 제외)의 효과는
+이 재정산에 반영되지 않는다. 트리거 판정까지 보려면 실기 영상 재추론이 필요하다.
+
+```text
+.venv/bin/python -m pytest -q
+706 passed, 25 skipped (731 collected)
+
+ruff (crk_model, tests): 기존 경고 2건만 (gateway/state_machine.py:365 E501, tests/test_cross_zone.py:1029 F841)
+```
+
+테스트: 11-18 전용 테스트 삭제로 726 → 694. 새 규칙 12건 추가로 706.
+기대값이 바뀐 기존 테스트 3건은 같은 층 반납이 이제 차감되는 경우다.
+- `test_freezer_return_matching.py`: 정체성 없음·모호 같은 층 반납
+- `test_freezer_returns.py`: 영상 정체성 없는 같은 층 반납, 카메라 정체성 충돌
+
+같은 경우의 다른 층 반납은 계속 미해결로 남는지 테스트를 따로 추가했다.
+
+## 6. 변경 파일
+
+| 파일 | 변경 |
+|---|---|
+| `crk_model` 전반(11-18 변경 파일) | 되돌림 — 2절 |
+| [ledger/freezer_returns.py](crk_model/ledger/freezer_returns.py) | `match_same_floor_return`, `UnbilledTake`, `cancel_unbilled_take` |
+| [ledger/settler.py](crk_model/ledger/settler.py) | 같은 층 반납 연결, `_unbilled_weight_drop` review |
+| [ledger/freezer_carried_over.py](crk_model/ledger/freezer_carried_over.py) | 11-19 항목 3 이동 |
+| `.env.example`, `freezer.env.example` | `MODEL__VISION__TRACKER` 삭제(되돌림) |
+| [tests/test_freezer_return_matching.py](tests/test_freezer_return_matching.py), [tests/test_freezer_returns.py](tests/test_freezer_returns.py) | 5절 |
+| `docs/03`, `docs/05`, `crk_model/ledger/README.md`, `tests/README.md` | 반납 규칙·note·테스트 수 |
+
+`crk_model` Python 코드: HEAD 13,960줄, `7bb4f25` 13,486줄, 현재 13,398줄.
+
+## 7. 남은 것
+
+- 11-19 5번(무게가 어떤 개수로도 안 맞고 반납 방향 표가 취출보다 많은 후보 미청구): 구현하지 않는다(사용자 결정). ses-2-1795062111 5층 닭발 partial 청구는 그대로 남는다.
+- 루트 `README.md`의 조기 종료 언급 2줄(120·137행)은 사용자 수정이 있어 손대지 않았다.
+
+이 절의 변경도 작업 트리에만 있고 커밋·push하지 않았다. 되돌리기 전 작업 트리는 세션 스크래치패드에 백업했다.

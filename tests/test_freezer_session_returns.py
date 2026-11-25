@@ -19,7 +19,6 @@ from crk_model.ingest.loadcell import LoadcellAnalyzer, LoadcellSample
 from crk_model.ledger.archive import _event_to_dict
 from crk_model.ledger.cross_zone import CrossZonePenaltyConfig, apply_cross_zone_penalty
 from crk_model.ledger.events import (
-    FreezerAction,
     FreezerMovementEvidence,
     FreezerReturnEvidence,
     TriggerEvent,
@@ -174,7 +173,7 @@ def test_mixed_positive_net_also_preserves_both_actions():
     assert next(z for z in result.zones if z.zone == 3).weight_delta == 325
 
 
-@pytest.mark.parametrize("kind", ["unresolved", "pending", "legacy_weight", "legacy_action"])
+@pytest.mark.parametrize("kind", ["unresolved", "pending", "legacy_weight"])
 def test_uncertain_or_legacy_return_does_not_leave_reusable_take_for_mixed_episode(kind):
     earlier = replace(returned(), ts=2)
     if kind == "unresolved":
@@ -185,9 +184,6 @@ def test_uncertain_or_legacy_return_does_not_leave_reusable_take_for_mixed_episo
         earlier = replace(earlier, freezer_return=replace(earlier.freezer_return, stabilized=False))
     elif kind == "legacy_weight":
         earlier = replace(earlier, freezer_return=None, freezer_movement=None)
-    elif kind == "legacy_action":
-        earlier = replace(earlier, freezer_return=None, freezer_movement=None,
-                          freezer_actions=(FreezerAction(205, taken().judgment),))
     result = settle([taken(ts=1), earlier, mixed()])
     assert not any("freezer_mixed_resolved" in note for note in result.notes)
 

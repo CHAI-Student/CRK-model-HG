@@ -76,27 +76,6 @@ class TestBatchJudgmentParity:
         base = _pipe(cola, FakeDetector()).process("s1", _request())
         assert outcome.event.judgment == base.event.judgment
 
-    def test_fridge_early_termination_mid_batch_parity(self, cola):
-        """조기 종료(냉장)가 배치 중간에 발동해도 판정·투표가 비배치와 같다
-        — 잔여 배치 결과 폐기 규칙의 회귀 고정."""
-        # ET는 기본 off (이슈 #22 0805) — 배치 중간 발동 규칙 자체를 고정하는
-        # 테스트라 명시적으로 켠다 (단일 재고라 유일해 게이트 통과).
-        base = _pipe(
-            cola, FakeBatchDetector(), profile=REFRIGERATOR, zone=1,
-            early_termination_enabled=True,
-        ).process("s1", _request(zone=1))
-        batched = _pipe(
-            cola, FakeBatchDetector(), profile=REFRIGERATOR, zone=1, batch_size=4,
-            early_termination_enabled=True,
-        ).process("s1", _request(zone=1))
-
-        assert base.trace.early_terminated  # 전제: ET가 실제로 발동하는 시나리오
-        assert batched.trace.early_terminated
-        assert batched.event.judgment == base.event.judgment
-        assert batched.event.vision_candidates == base.event.vision_candidates
-        assert batched.trace.yolo_calls == base.trace.yolo_calls  # 소비분만 집계
-
-
 class TestPrefetchFrames:
     def test_preserves_order_and_exhausts(self):
         pf = PrefetchFrames(iter(range(50)), depth=4)
@@ -141,10 +120,14 @@ class TestPrefetchFrames:
         assert prefetched.event.judgment == base.event.judgment
         assert prefetched.trace.yolo_calls == base.trace.yolo_calls
 
-    def test_pipeline_prefetch_closes_unconsumed_side_on_early_stop(self, cola):
-        """조기 종료(냉장)로 side를 순회하다 멈춰도 프리페처가 닫혀 백그라운드
-        디코드가 남지 않는다 (finally 계약)."""
+    def test_pipeline_prefetch_closes_unconsumed_side_on_error(self, cola):
+        """top 디코드 실패로 side를 순회하지 못해도 미리 연 side 프리페처가
+        닫혀 백그라운드 디코드가 남지 않는다 (finally 계약, I1 에러 전파)."""
         closed = {"side": False}
+
+        def top_stream():
+            yield from moving_frames(5)
+            raise OSError("decode failed")
 
         def side_stream():
             try:
@@ -154,15 +137,14 @@ class TestPrefetchFrames:
 
         req = TriggerRequest(
             1,
-            {"top": moving_frames(20), "side": side_stream()},
+            {"top": top_stream(), "side": side_stream()},
             samples(500, 400),
             1.0,
         )
         outcome = _pipe(
             cola, FakeDetector(), profile=REFRIGERATOR, zone=1, prefetch_depth=2,
-            early_termination_enabled=True,  # 기본 off (이슈 #22) — finally 계약 검증용 opt-in
         ).process("s1", req)
-        assert outcome.trace.early_terminated
+        assert outcome.event.status == "error"
         assert closed["side"] is True
 
 

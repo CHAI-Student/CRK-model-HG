@@ -26,7 +26,6 @@
 | `weight_is_discriminative` | **True** | **False** |
 | `segment_step_grams` | 5.0 | 20.0 (컴프레서 사이클·드리프트 방어) |
 | `min_weight_change_grams` | 5.0 | 5.0 |
-| `early_termination_allowed` | True | False (I15) |
 | 무게의 역할 | **정체성 판별자** | **거부권만** |
 
 물리 제약(C3): 로드셀(LABD-B3/K3)의 보증 분해능은 5g이고 IO-BOARD 엣지 단이 5g
@@ -264,7 +263,7 @@ conf 척도는 천장에서 압축됩니다. `vt conf = 0.855`면 `+margin(0.15)
 | D4 구간화 위치 | ingest 소속, stabilize 후 순서 고정. primary는 BOCPD(2026-07-23 승격), plateau는 롤백 스위치 | [`ingest/loadcell.py`](../crk_model/ingest/loadcell.py), [`ingest/bocpd.py`](../crk_model/ingest/bocpd.py) |
 | D5 정산 구조 | 이벤트 소싱 + close-time **단일** 정산기 (구/신 병행 diff는 승격 완료로 은퇴) | [`ledger/settler.py`](../crk_model/ledger/settler.py), [`ledger/journal.py`](../crk_model/ledger/journal.py) |
 | D6 프레임 공급 | 모션 게이트 + 손 래치 + keepalive + 냉동 별도 임계 | [`frames/motion_gate.py`](../crk_model/frames/motion_gate.py) |
-| D7 조기 종료 | removal·비냉동 한정, `judge()`와 tolerance 단일 소스 | [`perception/early_termination.py`](../crk_model/perception/early_termination.py) |
+| D7 조기 종료 | **2026-11-25 제거** (이슈 #22 0805 기본 OFF 강등 후 기능째 제거) → [07. 배제·폐기 기록](07-rejected-and-retired.md) | — |
 | D8 배치 | 기본 OFF, 고정 배치 + 패딩, 카메라 분리. **파이프라인의 마이크로배치 루프로 구현** (설계 단계의 `frames/batch.py` 수집기는 2026-07-30 삭제) | [`service/pipeline.py`](../crk_model/service/pipeline.py), [`adapters/yolo_detector.py`](../crk_model/adapters/yolo_detector.py) |
 | D9 에러 세션 | 계약 enum, 기본 fail-closed | [`core/policy.py`](../crk_model/core/policy.py), `ledger/settler.py` |
 | D10 모듈 경계 | 모듈 경계 = 테스트 경계 | 패키지 구조, `tests/` |
@@ -287,7 +286,7 @@ conf 척도는 천장에서 압축됩니다. `vt conf = 0.855`면 `+margin(0.15)
 | I12 | `count ≤ stock_qty` — 탐색 공간에서 강제 | `judgment/strict.py`, `judgment/strategies.py`, `ledger/settler.py` |
 | I13 | 에러 트리거를 안은 세션의 무성 확정 금지 (D9 정책으로만 처리). 저증거 청구 금지도 같은 태도 | `core/policy.py`, `ledger/settler.py`, `judgment/strategies.py` |
 | I14 | 반품 정산이 존별 count를 음수로 만들 수 없음 (환수 > 청구 금지) | `ledger/settler.py`(`_Basket.remove_one`) |
-| I15 | 조기 종료는 removal·비냉동에서만 | `core/profiles.py`, `perception/early_termination.py` |
+| I15 | **폐지** — 2026-11-25 조기 종료 제거로 제한할 대상이 없음 | — |
 | I16 | 손 래치 활성 중 프레임 스킵 금지 | [`frames/motion_gate.py`](../crk_model/frames/motion_gate.py), `perception/filters.py` |
 | I17 | 세션 확정은 시간이 아니라 인과 배리어 충족으로 | `ledger/barrier.py`, `gateway/state_machine.py`, `service/worker.py` |
 | **I-V** | 냉동에서 무게는 정체성을 **선택**할 수 없다 (개수 산정·검증·반증만) — §1 | `judgment/strategies.py`(전략별 precondition) |
@@ -315,18 +314,33 @@ conf 척도는 천장에서 압축됩니다. `vt conf = 0.855`면 `+margin(0.15)
 같은 SKU 안에서 동일 층을 우선하고, 다른 층의 앞선 취출도 연결한다. 층간 net 보정과
 상품 원장 보호로 최종 재solve가 반납을 다시 추가하거나 다른 SKU로 바꾸지 못하게 한다.
 
-영상 누락/모호성, 안정화 미완료, 무게 불일치, 잔여 취출 없음은 임의 차감하지 않고
-notes와 `review`/`partial`로 남긴다. 이 상태가 자동 결제 차단을 뜻하지는 않는다.
+같은 층 반납 보완 (2026-11-25, 로드셀 무게 안정화 판단 이후): 비전이 반납 SKU를
+정하지 못했을 때(`missing_identity`·`ambiguous_identity`)는 **같은 층** 잔여 취출 중
+실측 무게가 맞는 SKU가 정확히 하나면 그 SKU를 차감한다(`freezer_return_same_floor_weight`).
+무게가 맞는 SKU가 둘 이상(같은 무게 SKU)이거나, 영상에 다른 후보만 보였으면 확정하지
+않는다. 그래도 안 되면 같은 층의 미청구 취출(무게는 빠졌는데 청구 상품이 없는 취출)과
+반납 무게가 count gate(±15g) 안이면 서로 상쇄한다(`freezer_unbilled_take_returned`).
+영상 증거 없는 무게 반납도 다른 층 상품을 찾기 전에 이 상쇄를 먼저 본다.
+
+비전이 다른 SKU를 뚜렷하게 본 잔여 취출 없음(`no_prior_take`), 비전 SKU의 무게 불일치,
+안정화 미완료, 다른 층으로의 정체성 없는 반납은 임의 차감하지 않고 notes와
+`review`/`partial`로 남긴다. 이 상태가 자동 결제 차단을 뜻하지는 않는다.
+
+청구 없이 빠진 무게: 냉동 층에 50g(`min_trigger_delta_grams`) 이상 빠졌는데 청구 상품이
+없는 판정(상품 없는 PARTIAL·NO_DETECTION)이 있고, 반납·층간 이동을 반영한 층 순변화가
+청구 무게보다 50g 이상 더 빠졌으면 그 층을 `review`로 올린다
+(`freezer_unbilled_weight_drop:unexplained=Xg`). 50g 미만이거나 같은 층 반납으로
+상쇄되면 무시한다.
 
 앞서 추가한 방향별 행동 판정과 순변화 0 왕복 분리를 제거했다. plateau/BOCPD 모두
 기존 분석으로 복원했고, 저무게 스킵도 냉동에 동일하게 적용한다. 순무게가 같은
 다른 SKU 교환은 이 변경에서도 별도 분석하지 않는다. 한 번에 여러 종류를 반납한
 상황은 개별 SKU 수량을 추측하지 않고 검토로 남길 수 있다.
 
-이전 버전이 이미 저장한 `freezer_actions` 저널/아카이브는 계속 읽고 당시 의미대로
-재생한다. 해당 형식의 SKU별 차감·보호 경로는 호환용으로 남기며 신규 트리거에는
-사용하지 않는다. `freezer_return` 없는 구 기록도 기존 무게 매칭을 유지한다.
-기존 YAML을 읽는 것만으로 과거 정산을 변경하지 않는다.
+2026-11-12 무렵 저장된 구 행동별 정산(`freezer_actions`) 저널/아카이브도 계속 읽지만,
+그 키는 무시하고 일반 순 무게 경로로 재생한다(전용 SKU별 차감·보호 경로는 2026-11-25
+제거 — 재생 결과가 당시 확정과 다를 수 있다). `freezer_return` 없는 구 기록도 기존 무게
+매칭을 유지한다. 기존 YAML을 읽는 것만으로 과거 정산을 변경하지 않는다.
 
 문이 닫히면 `CloseSettler.settle()`이 세션 전체 이벤트를 **한 번에** 재해석합니다.
 트리거별 판정은 손대지 않고(잠정 결과는 그대로

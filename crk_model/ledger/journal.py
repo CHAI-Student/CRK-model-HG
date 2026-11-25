@@ -29,10 +29,8 @@ from crk_model.core.types import (
     WeightSegment,
 )
 from crk_model.ledger.events import (
-    FreezerAction,
     FreezerMovementEvidence,
     FreezerReturnEvidence,
-    FreezerTakeEvidence,
     TriggerEvent,
 )
 
@@ -46,14 +44,6 @@ def _judgment_from_dict(j: dict) -> JudgmentResult:
     )
 
 
-def action_to_dict(action: FreezerAction) -> dict:
-    """저널과 YAML 공용 직렬화: Enum은 문자열, 상품 튜플은 표준 목록으로 보존."""
-    out = asdict(action)
-    out["judgment"]["status"] = action.judgment.status.value
-    out["judgment"]["products"] = list(out["judgment"]["products"])
-    return out
-
-
 def movement_to_dict(evidence: FreezerMovementEvidence) -> dict:
     """JSON/표준 YAML 공용. dataclass의 튜플을 모두 목록으로 바꾼다."""
     return {
@@ -63,10 +53,6 @@ def movement_to_dict(evidence: FreezerMovementEvidence) -> dict:
         "channel_deltas": list(evidence.channel_deltas),
         "take_order": list(evidence.take_order),
         "stable_channel_deltas": list(evidence.stable_channel_deltas),
-        "verified_takes": [dict(asdict(t), products=list(asdict(t)["products"]))
-                           for t in evidence.verified_takes],
-        "vision_priority": evidence.vision_priority,
-        "return_completed": evidence.return_completed,
     }
 
 
@@ -95,10 +81,6 @@ def event_to_dict(e: TriggerEvent) -> dict:
         # 0711 교차존 오염 (Phase 1 계측): 서브이벤트 앵커 — 저널 replay로
         # 타 존 오염 창 겹침 빈도를 사후 정량화하는 근거.
         "change_timestamps": list(e.change_timestamps),
-        "freezer_actions": (
-            [action_to_dict(a) for a in e.freezer_actions]
-            if e.freezer_actions is not None else None
-        ),
         "freezer_return": (
             {"candidates": [asdict(c) for c in e.freezer_return.candidates],
              "stabilized": e.freezer_return.stabilized, "source": e.freezer_return.source}
@@ -125,11 +107,6 @@ def event_from_dict(d: dict) -> TriggerEvent:
         ),
         video_paths=tuple(d.get("video_paths", {}).items()),
         change_timestamps=tuple(d.get("change_timestamps", ())),
-        freezer_actions=(
-            tuple(FreezerAction(a["delta_weight"], _judgment_from_dict(a["judgment"]))
-                  for a in d["freezer_actions"])
-            if d.get("freezer_actions") is not None else None
-        ),
         freezer_return=(
             FreezerReturnEvidence(
                 tuple(VisionCandidate(**c) for c in d["freezer_return"]["candidates"]),
@@ -144,13 +121,6 @@ def event_from_dict(d: dict) -> TriggerEvent:
                 tuple(d["freezer_movement"].get("channel_deltas", ())),
                 tuple(d["freezer_movement"].get("take_order", ())),
                 tuple(d["freezer_movement"].get("stable_channel_deltas", ())),
-                tuple(FreezerTakeEvidence(
-                    t["channel"], t["delta_weight"],
-                    tuple(ProductCount(ActiveProduct(**p["product"]), p["count"])
-                          for p in t["products"]), t.get("stable_delta"),
-                ) for t in d["freezer_movement"].get("verified_takes", ())),
-                d["freezer_movement"].get("vision_priority", False),
-                d["freezer_movement"].get("return_completed", False),
             ) if d.get("freezer_movement") is not None else None
         ),
     )

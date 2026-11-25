@@ -74,17 +74,16 @@ flowchart TD
     SV --> IN & FR & PE & JU & LE & GW
     GW --> LE
     LE -. "CLOSE 2차 패스 재판정" .-> JU
-    PE -. "tolerance 단일 소스 재사용" .-> JU
     IN & FR & PE & JU & LE & GW --> CO
 ```
 
-점선 2개는 **의도된 하향 재사용**입니다.
+점선은 **의도된 하향 재사용**입니다.
 
 - `ledger → judgment` — CLOSE 2차 패스(교차존 페널티·고스트 원장)가 보존된 후보로
   **재판정**하므로 라우터가 필요합니다 (zero-GPU 재계산).
-- `perception → judgment` — 조기 종료의 "무게 전량 설명" 판정이 `judge()`와 **같은**
-  매처·tolerance를 써야 합니다 (이중 기준 금지). 별도 구현을 두면 두 게이트가
-  서로 다른 답을 내는 사고가 납니다.
+
+tolerance는 `SensorProfile` 단일 소스이며 `judge()`와 CLOSE 정산이 같은 값을 씁니다
+(perception은 2026-11-25 조기 종료 제거 후 judgment를 참조하지 않습니다).
 
 `ledger/archive.py`에는 타입 힌트 목적의 `service` 참조가 있으나 `TYPE_CHECKING`
 블록에 격리돼 런타임 순환이 생기지 않습니다.
@@ -94,7 +93,7 @@ flowchart TD
 | `core/` | 도메인 타입, 센서 프로파일, 에러 정책, env 설정 | 무상태 | [core/README](../crk_model/core/README.md) |
 | `ingest/` | 로드셀 시계열 → 무게 이벤트 구간화, 트리거 멱등성 | 무상태 | [ingest/README](../crk_model/ingest/README.md) |
 | `frames/` | 프레임 공급: 모션 게이트, 손 래치, 선행 디코드 | 트리거 내 | [frames/README](../crk_model/frames/README.md) |
-| `perception/` | 검출 필터 체인, 변위 증거, 투표 앙상블, 조기 종료 | 트리거 내 | [perception/README](../crk_model/perception/README.md) |
+| `perception/` | 검출 필터 체인, 변위 증거, 투표 앙상블 | 트리거 내 | [perception/README](../crk_model/perception/README.md) |
 | `judgment/` | 전략 라우터 — "무엇을 몇 개" 결정 (순수) | 무상태 | [judgment/README](../crk_model/judgment/README.md) |
 | `ledger/` | 이벤트 소싱, close 정산, 인과 배리어, 저널·아카이브 | 영속 | [ledger/README](../crk_model/ledger/README.md) |
 | `gateway/` | 문 세션 상태기계, 결제 페이로드 | 상태기계 | [gateway/README](../crk_model/gateway/README.md) |
@@ -125,10 +124,6 @@ flowchart TD
     MG -- "통과 프레임만" --> DET["YOLO 검출 (TensorRT)"]
     DET --> FILT["필터 체인<br/>side ROI · 수직 ROI · 손 conf · 손 경로"]
     FILT --> VOTE["투표 앙상블 + 변위 증거<br/>움직이지 않은 클래스 표는 몰수"]
-    VOTE --> ET{"조기 종료 판정<br/>(취출 & 냉장 한정)"}
-    ET -- "무게 전량 설명됨" --> STOP["추론만 중단<br/>(디코드·트레이스는 완주)"]
-    ET -- 미수렴 --> MG
-
     VOTE --> RT["판정 라우터<br/>선언적 우선순위 · 전량 설명 검사"]
     FC --> EV
     SKIP --> EV
@@ -140,8 +135,7 @@ flowchart TD
 
 - **처리 예외는 무검출이 아니라 에러 이벤트**로 전파됩니다 (I1). 조용한 0원 확정 금지.
 - **빈 allowlist에서는 추론하지 않습니다** (I2). 판매 중이 아닌 상품 청구 원천 차단.
-- 조기 종료는 **추론만** 멈추고 디코드·손 경로·트레이스는 완주합니다 — 트레이스
-  의미가 게이트 조합에 따라 흔들리지 않게 하기 위함입니다.
+- 게이트를 통과한 프레임은 **끝까지 추론**합니다 (조기 종료는 2026-11-25 제거).
 
 ## 5. 제어 평면 — 세션 확정
 
@@ -181,7 +175,6 @@ stateDiagram-v2
 | 레버 | 상태 | 효과 |
 |---|---|---|
 | 모션 게이트 | 기본 ON | 변화 없는 프레임의 YOLO 생략. 실패 방향이 "스킵 안 함"이라 정확도 무손실 |
-| 조기 종료 | **기본 OFF** (이슈 #22 0805 강등 — opt-in, 취출·냉장 한정) | 전 재고 유일해 + 득표 리드 일치 시에만 남은 프레임 추론 중단. 처리량은 T2 배치가 대체 |
 | GPU 텐서 입력 | 기본 OFF (`TENSOR_INPUT=1`) | 프레임별 CPU 전처리(측정 비용의 ~72%) 제거. batch-1 엔진 그대로 사용 |
 | 마이크로배치 | 기본 OFF (`BATCH_SIZE=N`) | 게이트 통과 프레임 N장을 1회 추론으로 상각. 정적 batch 엔진 재수출 전제 |
 | 디코드 프리페치 | 기본 OFF (`PREFETCH=N`) | top 추론 중 side 디코드를 은닉 |

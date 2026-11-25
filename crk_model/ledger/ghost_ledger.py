@@ -50,11 +50,11 @@ from dataclasses import dataclass, replace
 
 from crk_model.core.profiles import REFRIGERATOR, SensorProfile
 from crk_model.core.types import ActiveProduct, JudgmentStatus
-from crk_model.judgment.interfaces import JudgmentContext
 from crk_model.judgment.router import JudgmentRouter
 from crk_model.ledger.cross_zone import (
     CrossZonePenaltyConfig,
     _penalize_candidates,
+    _rejudge,
     _same_products,
     windows_mutually_overlap,
 )
@@ -77,10 +77,11 @@ class GhostLedgerConfig:
     alpha: float = 0.5
 
 
-def _weight_backed_classes(events: Sequence[TriggerEvent]) -> set[int]:
-    """세션 내 무게 뒷받침 과금을 받은 클래스 집합
-    (COMPLETE + refit/near_gate 아님)."""
-    backed: set[int] = set()
+def weight_backed_zones(events: Sequence[TriggerEvent]) -> dict[int, set[int]]:
+    """class_id → 세션 내 무게 뒷받침 과금(COMPLETE + refit/near_gate 아님)을
+    받은 존 집합. 유령 판정(detect_ghosts)과 settler 콤보 자격 제외
+    ②(다른 존이 이미 설명한 정체성)가 같은 게이트를 공유한다."""
+    backed: dict[int, set[int]] = defaultdict(set)
     for e in events:
         if e.status != "ok" or e.judgment.status is not JudgmentStatus.COMPLETE:
             continue
@@ -88,7 +89,7 @@ def _weight_backed_classes(events: Sequence[TriggerEvent]) -> set[int]:
         if "refit" in reason or "near_gate" in reason:
             continue
         for pc in e.judgment.products:
-            backed.add(pc.product.class_id)
+            backed[pc.product.class_id].add(e.zone)
     return backed
 
 
@@ -152,7 +153,7 @@ def detect_ghosts(
             if c.class_id > 0 and c.vote_count >= cfg.vote_floor:
                 zones_seen[c.class_id].add(e.zone)
                 episodes_seen[c.class_id].add(episode)
-    backed = _weight_backed_classes(events)
+    backed = weight_backed_zones(events)
     return {
         cid: tuple(sorted(zs))
         for cid, zs in zones_seen.items()
@@ -235,16 +236,9 @@ def _repass_event(
         # 강등된 후보를 보도록 후보만 교체해 둔다. shadow는 무개입.
         return replace(e, vision_candidates=new_cands) if cfg.mode == "active" else None
 
-    ctx = JudgmentContext(
-        zone=e.zone,
-        profile=profiles.get(e.zone, default_profile),
-        delta_weight=e.delta_weight,
-        segments=e.segments,
-        vision_candidates=new_cands,
-        active_products=tuple(active_products),
-        vision_only=False,
+    rejudged = _rejudge(
+        e, new_cands, profiles.get(e.zone, default_profile), active_products, router,
     )
-    rejudged = router.judge(ctx)
     ghost_part = ",".join(f"class{cid}" for cid in billed_ghosts)
     adoptable = (
         rejudged.status is JudgmentStatus.COMPLETE

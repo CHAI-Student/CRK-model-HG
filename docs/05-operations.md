@@ -240,6 +240,9 @@ curl -s http://localhost:8002/api/health
 | `freezer_combo_suppressed:zone{N}:…:excluded=class{cid}({사유})` | ④ freezer 관측 | 자격 제외가 없었다면 나왔을 조합이 억제됨 — **동작 무변경, 관측용**. 사유는 `ghost`/`other_zone_backed`/`rejected_by_judgment`/`low_evidence` | 억제된 조합이 정답이었는지 → 가드 파라미터 보정 근거 |
 | `freezer_close_gate_failed:zone{N}:keep_incremental` | ④ freezer | 순변화 재해석이 개수 게이트를 통과하지 못해 안전하게 증분 결과 유지 | 순변화와 증분 청구 합의 차이 — 크면 무게 DB/드리프트 문제 |
 | `freezer_close_multi_kind:zone{N}:keep_incremental` | ④ freezer | 냉동 존에 2품목 이상 — 단일 품목 재해석 불가라 증분 유지 | 다품목 청구가 아카이브 판정 근거와 일치하는지 |
+| `zone{N}:freezer_return_same_floor_weight:vision={사유}` | ① 반납 (2026-11-25) | 비전이 반납 SKU를 못 정해(`missing_identity`/`ambiguous_identity`) 같은 층 잔여 취출 중 실측 무게가 맞는 유일한 SKU로 차감 | 같은 층에 비슷한 무게 상품이 여러 개 꺼내졌던 세션이면 차감 SKU가 맞는지 |
+| `zone{N}:freezer_unbilled_take_returned:take=-Xg:return=+Yg:vision={사유}` | ① 반납 (2026-11-25) | 청구 없던 같은 층 취출과 반납 무게가 ±15g 안이라 서로 상쇄 — 청구 변화 없음, review 아님 | 같은 상품을 꺼냈다 넣은 것인지 |
+| `zone{N}:freezer_unbilled_weight_drop:unexplained=Xg` | status (2026-11-25) | 50g 이상 빠졌는데 청구 상품이 없는 판정이 있고, 반납까지 반영한 순변화로도 X g이 설명되지 않아 `review` | 영상에서 무엇을 꺼냈는지 — 미청구 확인 대상 |
 | `error_zones_excluded:[존 목록]` | 에러 정책 | `FINALIZE_ERROR_FREE_ZONES` 정책에서 에러 존만 제외하고 확정 | 제외된 존의 매출 누락. 기본 정책(`BLOCK_PAYMENT`)에서는 발생하지 않는다 |
 
 ### 4.2 교차존 페널티가 남기는 note
@@ -297,7 +300,7 @@ flowchart LR
 | `ground_truth` | 정답 라벨. 미라벨은 `null` |
 | `zones[]` | 존별 최종 확정 — `weight_delta`, `trigger_count`, `notes`, `products[class_id, count, unit_weight, unit_price, total_price]` |
 | `triggers[]` | 트리거별 원자료 — `delta_weight`, `segments`, `judgment{status, strategy, reason, confidence, products}`, **채택되지 않은 후보까지 포함한** `vision_candidates[class_id, confidence, vote_count, vote_ratio, head_votes, span_ratio, first_pos_ratio]`, `video_paths`, `processing_time_ms` |
-| `triggers[].trace` | 왜 그 후보만 봤는지 — `yolo_calls`, `processed_frames`, `gate_skipped_frames`, `early_terminated`, `reason_codes`, `vote_summary` |
+| `triggers[].trace` | 왜 그 후보만 봤는지 — `yolo_calls`, `processed_frames`, `gate_skipped_frames`, `reason_codes`, `vote_summary` (2026-11-25 이전 파일에는 `early_terminated`가 남아 있을 수 있음) |
 | `triggers[].trace.vote_summary` | 클래스별 득표·탈락 사유(`classes`), 필터 단계별 제거(`filter_drops_by_stage`), 투표 진입 컷 탈락(`entry_dropped_by_camera`), 변위 증거(`motion_evidence`), held 트랙 관측(`held_shadow`), 튜브 진단(`tube_diag`), 분모 정의가 기본과 다를 때만 `ratio_denominator` |
 | `triggers[].trace.frame_detections` | `MODEL__SESSION__SAVE_DETECTIONS=1`일 때만 — 프레임별 bbox(+`camera_crops`). 6절 `render-session`의 전제 |
 
@@ -406,7 +409,8 @@ render-session --latest --map /home/crk/videos=./videos  # 경로 이식
 그릴 검출이 없음), `ffmpeg`와 `numpy`가 필요합니다. 크롭 기하는 아카이브의
 `camera_crops` 스탬프로 기록 당시와 동일하게 재현되므로 bbox 좌표가 어긋나지
 않습니다. 헤더 밴드에는 세션/트리거/존/delta/판정과 프레임별 `INFER n` 또는
-`SKIP`이 찍혀, 모션 게이트로 건너뛴 프레임과 조기 종료 지점도 보입니다.
+`SKIP`이 찍혀, 모션 게이트로 건너뛴 프레임이 보입니다(2026-11-25 이전 아카이브는
+조기 종료 이후 구간도 `SKIP`으로 보입니다).
 
 ### 6.2 `scripts/live_engine_preview.py` — 실시간 프리뷰
 

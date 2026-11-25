@@ -154,22 +154,6 @@ ultralytics TRT 백엔드는 정적 엔진에서 **모든** predict가 정확히
 하고(`input size ... not equal to max model size`), 그렇지 않으면 기동 프로브의
 단일 프레임 detect가 warmup부터 실패해 서비스가 뜨지 않는다.
 
-냉동 예시의 `MODEL__VISION__TRACKER=bytetrack`은 `model.track(persist=True)`로
-손에 추적 ID를 붙인다. `off`이면 기존 `predict` 경로다. 상품 검출과 저신뢰 표는
-그대로 보존하고 손만 추적기에 전달한다. 패딩 프레임은 추적하지 않는다.
-고정된 top·경사 side는 각 촬영 영상의 시작에서만 추적 구간을 새로 연다.
-같은 영상의 프레임/배치는 연결하며, 영상·층 사이의 손 ID는 연결하지 않는다.
-다른 층 반납은 CLOSE에서 상품별 취출 이력과 반납 증거를 함께 연결한다.
-
-행동 후보는 영상 안의 상품 이동 방향과 손 연결 궤적을 기준으로 만든다.
-무게 변화 시각에 맞춰 프레임을 제한하는 기능은 시계열 연동 정보가 없어 제외했다.
-
-반납 무게가 맞지 않아도 동일 손의 이탈과 상품의 정지를 3회 이상 실제 관측하고,
-같은 상품이 취출 이력에 1개만 남아 있으면 반납 연결을 보완할 수 있다.
-원본 delta와 불일치는 `freezer_return_vision_presence` 기록에 남긴다.
-손 미검출만으로 완료를 만들거나 단일 상품 박스에서 겹친 두 개의 수량을 만들지 않는다.
-Ultralytics 추적 콜백을 사용하므로 실제 Jetson 엔진/설치 버전에서 실행 확인이 필요하다.
-
 ### `avi_frames.py` — AVI → `FrameBundle` 디코드
 
 **기하 계약**: 640×480 소스에서 **center-crop 480×480** — 좌우 각 80px(존 바깥 영역
@@ -293,11 +277,14 @@ conf가 떨어지고 bbox 좌표계가 왜곡돼 ROI·hand_margin 상수가 전�
   헤더는 프레임 **밖** 상단 밴드(80px)에 그린다. bbox 라벨이 프레임 위 경계를
   넘어도 24px 띠에서 보이고 헤더를 가리지 않는다. 상품은 클래스별 고정 색(황금각
   hue 순환) 실선 + `id conf`, hand는 흰색. 상태줄은 `POS nnn INFER k` 또는
-  `POS nnn SKIP`(기록 없는 프레임 = 게이트 스킵 또는 조기 종료 이후)이다.
+  `POS nnn SKIP`(기록 없는 프레임 = 게이트 스킵. 2026-11-25 이전 아카이브는 조기 종료
+  이후 구간일 수도 있다)이다.
 - **최적화**: 트리거×카메라당 1회 만드는 캔버스 템플릿(배경·테두리·정적 헤더 사전
   렌더) + 글리프 마스크 캐시로 데모 렌더 **0.64s → 0.28s**, mp4 바이트 동일.
-- 카메라 1개의 디코드/인코드 실패는 나머지 렌더를 막지 않고, 실패한 출력은
-  `abort()`로 정리해 불완전 파일을 남기지 않는다.
+- 카메라 1개의 디코드/인코드 실패(마무리 인코드 `sink.close()` 실패 포함)는 그
+  카메라만 건너뛰고 나머지 카메라·트리거 렌더를 막지 않는다. 실패한 출력은
+  `abort()`로 정리해 불완전 파일을 남기지 않으며, 예상 밖 예외는 sink를 정리한 뒤
+  그대로 전파한다.
 
 ## 4. 계약과 불변식
 
@@ -342,6 +329,7 @@ conf가 떨어지고 bbox 좌표계가 왜곡돼 ROI·hand_margin 상수가 전�
 | `tests/test_frames_streaming.py` (18건) | hwaccel 프로브가 **실초기화 rc**로 판정 · 0프레임 hwaccel 실패의 CPU 1회 폴백 · 첫 프레임 이후 실패는 폴백 없이 전파 · `decode_avi`가 지연 이터레이터 · 부분 소비 후 `close()`가 프로세스 해제 · 없는 파일은 `OSError` · `LazyAviFrames`가 접근마다 새 스트림 · numpy/순수 파이썬 diff ratio 동등성(uint8 오버플로 포함) · `_gate_view` 순서 교환의 **비트 동일성**과 non-square 소스 · 파이프라인의 제너레이터 frames 처리(1회 순회) |
 | `tests/test_analyze_cli.py` (22건) | **폐기 shadow 필드 무시** · conformal 분위수와 후보 누락 보고 · 개당 잔차 표본 · 과금 정오(정답/오답, 라벨 없는 존의 과청구도 오답) · 트랙릿 head 분리와 단절 집계 · held shadow의 정답 플래그/비정답 계수 · 고스트 shadow 정오 · `--none` 라벨이 라벨로 집계 · `--session` 압축 vs `--full` · `tube_diag` 렌더 · class_id 없는 구 아카이브의 조용한 제외 · CLI(JSON 출력, 빈 디렉토리 오류, 단건 조회/미발견, `--since` epoch·ISO, 손상 파일 보고, **단건 조회가 대상 파일만 파싱**, `--since` 프리필터가 구 파일 파싱을 건너뛰는지) |
 | `tests/test_render_cli.py` (12건) | 오버레이 mp4 생성 · `--map` 경로 이식 · `--format jpg` 프레임 출력 · 기록 없는 세션의 안내 실패 · 영상 없음의 깔끔한 실패 · **left-crop 스탬프 적용** · 구 스키마 `kept=False` 제외 · `crop="left"` vs `center` 기하(x=0..480 vs 80..560) · 잘못된 crop 값 fail-closed · 그리기 프리미티브(픽셀 스탬프, 프레임 밖 클램프) · `_remap` 접두사 치환 |
+| `tests/test_render_cli_failures.py` (2건) | render CLI 실패 격리(ffmpeg/numpy 없이 실행): 마무리 인코드(`sink.close`) 실패 시 해당 카메라만 건너뛰고 나머지 카메라 출력 유지 · 예상 밖 예외는 sink `abort()` 후 전파 |
 | `tests/test_t2_batch.py` 중 `TestStaticBatchEngineAdapter` | 정적 batch 엔진 계약: 단일 `detect()`의 배치 위임, non-square 입력의 `ValueError`(batch>1) / 프레임별 폴백(batch=1), 빈 allowlist가 predict 없이 반환 |
 
 FastAPI·ffmpeg·numpy가 없는 환경에서는 해당 테스트가 `importorskip`/`skipif`로

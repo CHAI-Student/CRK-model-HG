@@ -111,19 +111,48 @@ def test_returning_different_same_weight_product_never_cancels_hotdog(destinatio
     assert any("no_prior_take" in note for note in result.notes)
 
 
-@pytest.mark.parametrize("stabilized,candidates,reason", [
-    (False, None, "not_stabilized"),
-    (True, (), "missing_identity"),
-    (True, (VisionCandidate(95, .9, 20, .5), VisionCandidate(98, .9, 19, .5)),
-     "ambiguous_identity"),
-])
-def test_unresolved_return_keeps_take_and_is_not_reapplied_by_net_or_close(
-    stabilized, candidates, reason,
-):
-    result = settle([taken(), returned(zone=2, stabilized=stabilized, candidates=candidates)])
+def test_unstable_return_keeps_take_and_is_not_reapplied_by_net_or_close():
+    result = settle([taken(), returned(zone=2, stabilized=False)])
     assert counts(result) == {HOTDOG.product_id: 1}
     assert result.zones[0].status in ("review", "partial")
-    assert any(reason in note for note in result.notes)
+    assert any("not_stabilized" in note for note in result.notes)
+
+
+@pytest.mark.parametrize("candidates,reason", [
+    ((), "missing_identity"),
+    ((VisionCandidate(95, .9, 20, .5), VisionCandidate(98, .9, 19, .5)), "ambiguous_identity"),
+])
+def test_same_floor_return_without_vision_identity_matches_by_weight(candidates, reason):
+    """2026-11-25 무게 안정화 이후: 비전이 반납 SKU를 못 정해도 같은 층 취출 중
+    실측 무게가 맞는 SKU가 하나뿐이면 그 SKU를 차감한다."""
+    result = settle([taken(), returned(zone=2, candidates=candidates)])
+    assert counts(result) == {}
+    assert f"zone2:freezer_return_same_floor_weight:vision={reason}" in result.notes
+    assert not any("freezer_return_unresolved" in note for note in result.notes)
+
+
+@pytest.mark.parametrize("candidates,reason", [
+    ((), "missing_identity"),
+    ((VisionCandidate(95, .9, 20, .5), VisionCandidate(98, .9, 19, .5)), "ambiguous_identity"),
+])
+def test_other_floor_return_without_vision_identity_stays_unresolved(candidates, reason):
+    result = settle([taken(), returned(zone=5, candidates=candidates)])
+    assert counts(result) == {HOTDOG.product_id: 1}
+    assert result.zones[0].status in ("review", "partial")
+    assert any(f"freezer_return_unresolved:{reason}" in note for note in result.notes)
+
+
+def test_same_floor_weight_match_refuses_two_equal_weight_skus():
+    result = settle([taken(), taken(ts=1.5, product=OTHER), returned(ts=2, zone=2, candidates=())])
+    assert counts(result) == {HOTDOG.product_id: 1, OTHER.product_id: 1}
+    assert any("freezer_return_unresolved:missing_identity" in note for note in result.notes)
+
+
+def test_same_floor_weight_match_refuses_candidate_not_seen_on_video():
+    seen = (VisionCandidate(97, .9, 20, .5), VisionCandidate(96, .9, 19, .5))
+    result = settle([taken(), returned(zone=2, candidates=seen)])
+    assert counts(result) == {HOTDOG.product_id: 1}
+    assert any("freezer_return_unresolved:ambiguous_identity" in note for note in result.notes)
 
 
 def test_catalog_weight_alone_cannot_override_disagreeing_measured_delta():
@@ -242,3 +271,60 @@ def test_new_return_evidence_survives_journal_and_standard_yaml():
     loaded = yaml.safe_load(yaml.safe_dump(archived))
     assert loaded["freezer_return"]["candidates"][0]["class_id"] == 95
     assert loaded["freezer_return"]["stabilized"] is True
+
+
+# ---- 2026-11-25: 청구 없이 빠진 무게와 같은 층 상쇄 ----
+
+def unbilled(zone=2, ts=1, delta=-370.0, status=JudgmentStatus.NO_DETECTION):
+    """무게는 빠졌지만 청구 상품이 없는 취출 (비전 미검출·상품 없는 PARTIAL)."""
+    judgment = JudgmentResult(status, (), 0.0, "forced_final_no_match")
+    return TriggerEvent("s", zone, ts, delta, (), judgment)
+
+
+def zone_of(result, zone):
+    return next(z for z in result.zones if z.zone == zone)
+
+
+@pytest.mark.parametrize("status", [JudgmentStatus.NO_DETECTION, JudgmentStatus.PARTIAL])
+def test_unbilled_weight_drop_is_review_not_complete(status):
+    result = settle([unbilled(status=status)])
+    assert counts(result) == {}
+    assert zone_of(result, 2).status == "review"
+    assert "zone2:freezer_unbilled_weight_drop:unexplained=370.0g" in result.notes
+
+
+def test_unbilled_drop_below_50g_is_ignored():
+    result = settle([unbilled(delta=-45.0)])
+    assert zone_of(result, 2).status == "complete"
+    assert not any("freezer_unbilled_weight_drop" in note for note in result.notes)
+
+
+def test_unbilled_remainder_next_to_billed_take_is_review():
+    result = settle([taken(), unbilled(ts=2, delta=-205.0)])
+    assert counts(result) == {HOTDOG.product_id: 1}
+    assert "zone2:freezer_unbilled_weight_drop:unexplained=180.0g" in result.notes
+
+
+@pytest.mark.parametrize("vision", [True, False])
+def test_same_floor_return_cancels_unbilled_take(vision):
+    """미청구 취출을 같은 층에 다시 넣으면 서로 상쇄 — 순변화 0이라 review도 아니다.
+    vision=False는 영상 증거 없는 무게 반납 기록: 다른 층의 같은 무게 청구 상품을
+    대신 빼지 않는다."""
+    ret = (returned(zone=2, delta=368.0, candidates=()) if vision
+           else TriggerEvent("s", 2, 2, 368.0, (), JudgmentResult(JudgmentStatus.NO_DETECTION)))
+    other_floor = taken(zone=4, ts=0.5, product=ActiveProduct("p97", "P97", 97, 370, 5, 12),
+                        delta=-370.0)
+    result = settle([other_floor, unbilled(), ret])
+    assert counts(result) == {"p97": 1}
+    assert any(note.startswith("zone2:freezer_unbilled_take_returned:take=-370.0g:return=+368.0g")
+               for note in result.notes)
+    assert zone_of(result, 2).status == "complete"
+    assert not any("freezer_return_unresolved" in note or "cross_zone_return" in note
+                   for note in result.notes)
+
+
+def test_unbilled_take_returned_to_other_floor_is_not_cancelled():
+    result = settle([unbilled(), returned(zone=3, delta=368.0, candidates=())])
+    assert counts(result) == {}
+    assert zone_of(result, 2).status == "review"
+    assert "zone2:freezer_unbilled_weight_drop:unexplained=370.0g" in result.notes

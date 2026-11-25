@@ -16,7 +16,7 @@ top 추론 중 side 디코드도 함께 진행된다 (2캠 동시 디코드).
 - 예외 전파 (I1): 소스가 던진 예외는 큐에 남은 프레임을 모두 소진한 뒤
   소비자에게 재던져진다 — 비프리페치 대비 "예외가 드러나는 프레임 위치"만
   뒤로 밀릴 수 있고(선행 디코드분), 무검출로 삼켜지지는 않는다.
-- close(): 소비자가 중도 포기(조기 종료 등)하면 생산자 스레드를 멈추고
+- close(): 소비자가 중도 포기(앞 카메라 예외 등)하면 생산자 스레드를 멈추고
   소스의 close()(ffmpeg kill 등)까지 전파한다. 멱등.
 - 런타임 의존성 0: threading/queue 표준 라이브러리만 사용.
 """
@@ -89,7 +89,7 @@ class PrefetchFrames:
 
     def close(self) -> None:
         """생산자 중단 + 소스 close 전파. 멱등 — 파이프라인의 finally 계약
-        (pipeline._run_vision: 조기 종료 시 스트림 즉시 해제)과 동형."""
+        (pipeline._run_vision: 예외로 중단 시 스트림 즉시 해제)과 동형."""
         self._stop.set()
         try:
             while True:

@@ -4,6 +4,8 @@
 연장창 내 A 재취출. zone2 AVI 프리롤/라이브에 A 장면이 섞여 A가 vision
 후보로 진입, B가 A로 오판 → CLOSE에서 soft 페널티로 보정.
 """
+from dataclasses import replace
+
 import pytest
 from conftest import cand
 
@@ -597,6 +599,56 @@ class TestCrossZonePenalty:
             "zone3:cross_zone_penalty_gate_failed:suppress_contaminated_partial=P178"
             in n for n in notes
         )
+
+    @pytest.mark.parametrize("zone2_head, zone3_kept", [(52, True), (0, False)])
+    def test_carried_in_zone_is_not_counted_as_bleed_victim(self, zone2_head, zone3_kept):
+        """2026-11-19 ses-1-1795061395 (교자 세션): zone1 97 COMPLETE(소스),
+        zone3 97 −335g(실제 육즙교자, head 0), zone2 97 −205g(zone1 상품을 든 채
+        진입, head 52). zone2를 피해 zone으로 세면 victims={2,3}이 되어 진짜
+        취출인 zone3이 session42 강제 억제로 지워졌다. carried-in zone을 빼면
+        2-zone 규칙(soft 페널티 후에도 이기면 인정)으로 돌아간다. head 0(계측
+        이전 기록)이면 기존 session42 동작 그대로."""
+        p97 = ActiveProduct("P97", "육즙고기교자", 97, 370.0, 5, 10)
+        base = 1795061000.0
+
+        def partial(conf):
+            return JudgmentResult(
+                JudgmentStatus.PARTIAL, (ProductCount(p97, 1),), conf,
+                "vision_first_identity_partial",
+            )
+
+        source = event(
+            "s", 1, base + 396.634, judged(p97, conf=0.3936), -367.5,
+            candidates=[cand(97, conf=1.0, votes=185)],
+            change_ts=(base + 399.651, base + 401.252),
+        )
+        zone3 = event(
+            "s", 3, base + 399.651, partial(0.1968), -335.0,
+            candidates=[cand(97, conf=1.0, votes=229)],
+            change_ts=(base + 402.854, base + 404.454),
+        )
+        zone2 = event(
+            "s", 2, base + 404.454, partial(0.1964), -205.0,
+            candidates=[replace(cand(97, conf=1.0, votes=196), head_votes=zone2_head)],
+            change_ts=(base + 407.654,),
+        )
+        notes: list[str] = []
+        out = apply_cross_zone_penalty(
+            [source, zone3, zone2], {1: FREEZER, 2: FREEZER, 3: FREEZER},
+            (p97,), CFG, notes,
+        )
+        by_zone = {e.zone: e for e in out}
+        kept = [(pc.product.product_id, pc.count) for pc in by_zone[3].judgment.products]
+        if zone3_kept:
+            assert kept == [("P97", 1)]
+            assert any("zone3:cross_zone_penalty_gate_failed:keep_original" in n
+                       for n in notes)
+        else:
+            assert kept == []
+            assert any(
+                "zone3:cross_zone_penalty_gate_failed:suppress_contaminated_partial=P97"
+                in n for n in notes
+            )
 
     def test_contamination_unrelated_to_billed_products_keeps_multi_tray_result(self):
         """0826 2차 재테스트(ses-3 zone2 재구성): zone2가 68x1+70x1로 두 상품을

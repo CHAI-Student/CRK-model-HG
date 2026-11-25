@@ -38,19 +38,15 @@ class HandLatch:
         self._exit_confirm = exit_confirm_frames
         self._pending = 0
         self.active = False
-        self.frames_since_exit = 0  # 조기 종료(D7)의 "퇴장 후 M프레임" 입력
 
     def update_after_inference(self, hand_in_roi: bool) -> None:
         if hand_in_roi:
             self.active = True
             self._pending = self._exit_confirm
-            self.frames_since_exit = 0
         elif self.active:
             self._pending -= 1
             if self._pending <= 0:
                 self.active = False
-        else:
-            self.frames_since_exit += 1
 
 
 class MotionGate:

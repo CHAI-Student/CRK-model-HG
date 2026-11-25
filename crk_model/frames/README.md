@@ -17,7 +17,7 @@
 |---|---|
 | 프레임의 두 뷰 계약 정의 (게이트용 / 검출기용) | `FrameBundle(full, gate_view)` |
 | 변화 없는 프레임의 추론 생략 결정 | `GateDecision(infer, reason)` |
-| 손 상태 래치로 스킵 금지 구간 확보 (I16) | `HandLatch.active`, `.frames_since_exit` |
+| 손 상태 래치로 스킵 금지 구간 확보 (I16) | `HandLatch.active` |
 | 게이트 트레이스 카운터 (I8) | `processed_frames`, `gate_skipped_frames` |
 | 디코드와 추론의 파이프라이닝 | `PrefetchFrames` |
 
@@ -27,7 +27,6 @@
 |---|---|
 | AVI 디코드·크롭·게이트 뷰 생성 | `adapters/avi_frames.py` (ffmpeg NVDEC / cv2, lazy import) |
 | 검출·필터·투표 | `perception/` |
-| 조기 종료 판정 | `perception/early_termination.py` — frames는 `frames_since_exit`만 제공 |
 | **배치 추론** | `service/pipeline.py`의 마이크로배치 루프 + `adapters/yolo_detector.detect_batch` |
 | 손이 "ROI 안"인지의 기하 판단 | `perception/filters.py`(손 conf 하한 통과분) — 게이트는 그 결과만 래치에 받는다 |
 
@@ -114,7 +113,6 @@ flowchart TD
 |---|---|
 | `active=True` | 추론 프레임에서 손 검출 → 즉시 활성, `_pending = exit_confirm_frames`(기본 3) |
 | 퇴장 유예 | 손 미검출 프레임마다 `_pending -= 1`, 0이 되면 `active=False` |
-| `frames_since_exit` | 래치 비활성 상태에서 손 없는 추론 프레임마다 증가 — 조기 종료(D7)의 "퇴장 후 M프레임" 입력 |
 
 `update_after_inference()`는 **추론한 프레임에서만** 호출해야 한다(파이프라인의 `consume()`
 말미). 미추론 프레임에서 호출하면 손 없음(`hand_in_roi=False`)이 계속 들어와 래치가
@@ -153,7 +151,7 @@ ndarray가 아니면 순수 파이썬으로 폴백한다(동작 등가). uint8 �
 |---|---|---|
 | 순서 보존 | 소스 이터레이터 방출 순서 그대로 bounded queue를 통과 | 프레임 위치(`pos`) 기반 계측·held 판정이 깨진다 |
 | 예외 전파 (I1) | 소스 예외를 보관하고, **큐에 남은 프레임을 모두 소진한 뒤** 소비자에게 재던짐 | 프레임 유실 또는 "무검출 0원"으로 삼켜짐 |
-| `close()` 전파 | 생산자 정지 + 소스의 `close()`(제너레이터 → ffmpeg kill)까지 전파. **멱등** | 조기 종료 후 ffmpeg 프로세스·스레드 잔존 |
+| `close()` 전파 | 생산자 정지 + 소스의 `close()`(제너레이터 → ffmpeg kill)까지 전파. **멱등** | 소비자가 스트림을 중도 포기(앞 카메라 예외 등)한 뒤 ffmpeg 프로세스·스레드 잔존 |
 
 구현 세부 둘: `_put()`은 `stop` 이벤트를 살피며 타임아웃 put을 반복한다 — 소비자가
 `close()`로 떠나도 생산자가 가득 찬 큐에 영원히 블록되지 않는다. `__next__`는 sentinel을
@@ -172,7 +170,6 @@ ndarray가 아니면 순수 파이썬으로 폴백한다(동작 등가). uint8 �
 | I16 | 손 래치 활성 동안 게이트 스킵 금지 | `MotionGate._decide()`의 래치 우선 검사 |
 | I8 | `processed_frames` 의미 유지 + `gate_skipped_frames` 신설 | `MotionGate.evaluate()` 카운터 |
 | I1 | 프레임 공급 실패는 무검출이 아니라 예외 | `PrefetchFrames._pump()` → `__next__` 재던짐 |
-| I15 | 반품·냉동에 조기 종료 미적용 | frames 밖(`perception/early_termination.py`) — 래치는 입력만 제공 |
 | — | 게이트 실패 방향은 "스킵 안 함" (fail-safe) | 임계·keepalive 설계 |
 | — | 성능 레버 기본값은 항상 "기존 동작" | `PREFETCH=0` 오픈 타이밍 회귀 테스트 |
 | — | 게이트는 다운스케일 뷰만, 검출기는 풀 프레임만 | `FrameBundle` 뷰 분리 |
@@ -196,7 +193,7 @@ ndarray가 아니면 순수 파이썬으로 폴백한다(동작 등가). uint8 �
 |---|---|
 | `tests/test_frames.py` (7건) | 첫 프레임은 항상 추론, 정지 프레임 스킵 + `gate_skipped_frames` 증가(I8), 모션 프레임 추론, **래치 활성 중 동일 프레임도 스킵 금지(I16)**, 퇴장 확인 후 래치 해제, keepalive 강제 추론, **비교 기준이 직전 통과 프레임**임 |
 | `tests/test_frames_streaming.py` (18건) | `TestDiffRatioEquivalence`(5): numpy·순수 파이썬 경로의 `_diff_ratio`와 `evaluate` 결정이 동일, **uint8 오버플로 안전**. `TestDecodeAviStreaming`(4)·`TestHwaccelProbeAndFallback`(4)·`TestGateViewOrder`(2): 어댑터 측 계약(제너레이터 디코드, 0프레임 → IOError(I1), hwaccel 실초기화 프로브, 게이트 뷰 비트 동일). `TestPipelineWithGeneratorFrames`(3): 제너레이터 프레임 1회 순회 계약 |
-| `tests/test_t2_batch.py` — `TestPrefetchFrames`(5) | 순서 보존·소진, 프레임 방출 후 소스 예외 전파(I1), `close()` 멱등 + 소스 close 전파, 프리페치 on/off 판정 동등성(`yolo_calls`까지), 조기 종료로 순회하지 않은 side 프리페처도 닫힘 |
+| `tests/test_t2_batch.py` — `TestPrefetchFrames`(5) | 순서 보존·소진, 프레임 방출 후 소스 예외 전파(I1), `close()` 멱등 + 소스 close 전파, 프리페치 on/off 판정 동등성(`yolo_calls`까지), top 디코드 예외로 순회하지 않은 side 프리페처도 닫힘 |
 | `tests/test_t2_batch.py` — `TestStreamOpenTiming`(2) | **기본값은 top 소비 후에야 side를 열고**, 프리페치 활성 시에만 시작 시점에 전 카메라를 연다 (2026-07-29 정정의 회귀 고정) |
 | `tests/test_adapters.py` — `TestFrameBundle`(1) | 게이트는 `gate_view`, 검출기는 `full`을 받는다 — 정지 뷰 9장에서 검출 호출이 `first_frame`+`keepalive` 2회뿐임으로 증명 |
 

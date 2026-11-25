@@ -1,14 +1,9 @@
-"""perception: 투표 분모 단일 정의, I4, 조기 종료 한정(I15)·단일 tolerance(D7)."""
+"""perception: 투표 분모 단일 정의, I4, 변위 증거·튜브 진단."""
 import pytest
-from conftest import cand
 
-from crk_model.core.profiles import FREEZER, REFRIGERATOR
-from crk_model.core.types import ActiveProduct
 from crk_model.perception import (
     Detection,
     DetectionFilterChain,
-    EarlyTerminationConfig,
-    EarlyTerminator,
     MotionEvidence,
     VotingEnsemble,
 )
@@ -200,137 +195,6 @@ class TestVoting:
         assert results[1].confidence == pytest.approx(0.8 * 0.60)
         assert results[2].confidence == pytest.approx(0.8 * 0.40)
         assert results[1].confidence > results[2].confidence
-
-
-class TestEarlyTermination:
-    def _terminator(self, profile=REFRIGERATOR):
-        return EarlyTerminator(
-            profile, EarlyTerminationConfig(min_lead_votes=5, lead_margin=3, hand_exit_frames=5)
-        )
-
-    def test_converged_removal_stops(self, cola):
-        assert self._terminator().should_stop(
-            delta_weight=-100.0,
-            candidates=[cand(1, votes=10)],
-            active_products=[cola],
-            frames_since_hand_exit=6,
-        )
-
-    def test_freezer_never_stops(self, cola):
-        # I15: freezer 금지
-        assert not self._terminator(FREEZER).should_stop(
-            delta_weight=-100.0, candidates=[cand(1, votes=10)],
-            active_products=[cola], frames_since_hand_exit=6,
-        )
-
-    def test_return_never_stops(self, cola):
-        # I15: +delta(반품) 금지
-        assert not self._terminator().should_stop(
-            delta_weight=100.0, candidates=[cand(1, votes=10)],
-            active_products=[cola], frames_since_hand_exit=6,
-        )
-
-    def test_hand_still_present_blocks(self, cola):
-        assert not self._terminator().should_stop(
-            delta_weight=-100.0, candidates=[cand(1, votes=10)],
-            active_products=[cola], frames_since_hand_exit=2,
-        )
-
-    def test_unexplained_delta_blocks(self, cola):
-        # D7: judge()와 동일 tolerance(±3g) 단일 소스 — 50g 오차는 설명 불가
-        assert not self._terminator().should_stop(
-            delta_weight=-150.0, candidates=[cand(1, votes=10)],
-            active_products=[cola], frames_since_hand_exit=6,
-        )
-
-    def test_no_margin_blocks(self, cola, water):
-        assert not self._terminator().should_stop(
-            delta_weight=-100.0,
-            candidates=[cand(1, votes=6), cand(2, votes=5)],  # 마진 1 < 3
-            active_products=[cola, water],
-            frames_since_hand_exit=6,
-        )
-
-    def test_ambiguous_weight_blocks(self, cola):
-        # 이슈 #22 0805 ses-38 z3 재구성: Δ-260을 진열 맛밤(86×3=258)과
-        # 정답 박카스(261×1)가 모두 설명 — 전 재고에 해가 2개면 아직 안
-        # 보인 정답이 있을 수 있으므로 완주한다 (구 동작: 후보 창 안의
-        # 86×3 설명만 보고 종료 → 정답 표 0).
-        chestnut = ActiveProduct(
-            "P58", "단밤", class_id=58, unit_weight=86.0, unit_price=3500, stock_qty=5
-        )
-        bacchus = ActiveProduct(
-            "P13", "박카스", class_id=13, unit_weight=261.0, unit_price=500, stock_qty=5
-        )
-        assert not self._terminator().should_stop(
-            delta_weight=-260.0,
-            candidates=[cand(58, votes=10)],
-            active_products=[chestnut, bacchus],
-            frames_since_hand_exit=6,
-        )
-
-    def test_combo_explanation_no_longer_stops(self):
-        # 이슈 #22 0805 ses-46 재구성: 60×1+54×3+32×2=738이 Δ-735를 조합
-        # 설명해도 종료 금지 — 단일 종 해가 없으면(정답 10×2는 아직 무투표)
-        # 완주한다 (구 동작: 매처 조합 성립만으로 종료 → 정답 표 0).
-        pool = [
-            ActiveProduct("P60", "콜라", class_id=60, unit_weight=535.0,
-                          unit_price=2300, stock_qty=5),
-            ActiveProduct("P54", "단백질바", class_id=54, unit_weight=55.0,
-                          unit_price=2500, stock_qty=5),
-            ActiveProduct("P32", "컨디션스틱", class_id=32, unit_weight=19.0,
-                          unit_price=3000, stock_qty=5),
-        ]
-        assert not self._terminator().should_stop(
-            delta_weight=-735.0,
-            candidates=[cand(54, votes=10), cand(32, votes=5)],
-            active_products=pool,
-            frames_since_hand_exit=6,
-        )
-
-    def test_lead_mismatch_blocks(self):
-        # 유일해 상품(트레비 523g)이 득표 리드(빼빼로)가 아니면 종료 금지 —
-        # 지금 보이는 증거와 무게 해가 어긋난다 (진열·오염 리드 신호)
-        pepero = ActiveProduct(
-            "P18", "빼빼로", class_id=18, unit_weight=66.0, unit_price=2500, stock_qty=5
-        )
-        trevi = ActiveProduct(
-            "P11", "트레비", class_id=11, unit_weight=523.0, unit_price=1600, stock_qty=5
-        )
-        assert not self._terminator().should_stop(
-            delta_weight=-523.0,
-            candidates=[cand(18, votes=10), cand(11, votes=5)],
-            active_products=[pepero, trevi],
-            frames_since_hand_exit=6,
-        )
-
-    def test_lazy_candidates_not_evaluated_when_gated(self, cola):
-        """T1-1 (0728 리서치): combine()은 값싼 가드 통과 후에만 평가된다 —
-        냉동(I15)·반품·손 미퇴장 프레임에서 콜러블이 호출되면 회귀."""
-        calls = []
-
-        def lazy():
-            calls.append(1)
-            return [cand(1, votes=10)]
-
-        # 냉동 금지 — 콜러블 미호출
-        assert not self._terminator(FREEZER).should_stop(
-            delta_weight=-100.0, candidates=lazy,
-            active_products=[cola], frames_since_hand_exit=6,
-        )
-        # 손 미퇴장 — 콜러블 미호출
-        assert not self._terminator().should_stop(
-            delta_weight=-100.0, candidates=lazy,
-            active_products=[cola], frames_since_hand_exit=2,
-        )
-        assert calls == []
-        # 가드 전부 통과 — 콜러블 1회 평가 후 기존과 동일 판정
-        assert self._terminator().should_stop(
-            delta_weight=-100.0, candidates=lazy,
-            active_products=[cola], frames_since_hand_exit=6,
-        )
-        assert calls == [1]
-
 
 
 class TestMotionEvidence:

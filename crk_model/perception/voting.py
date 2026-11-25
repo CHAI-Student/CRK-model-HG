@@ -1,6 +1,6 @@
 """Voting Ensemble — vote_ratio 분모 = 게이트 통과 프레임 수 (단일 정의).
 
-함정 #4: 모션 게이트(D6)·조기 종료(D7) 어느 조합에서도 분모 의미가 바뀌지
+함정 #4: 모션 게이트(D6)·T2 배치 어느 조합에서도 분모 의미가 바뀌지
 않도록, add_frame()은 "게이트를 통과해 추론된 프레임"에서만 호출한다.
 
 이슈 #6 조사 결과 (원본 reference/CRK-model/services/model/model_service/

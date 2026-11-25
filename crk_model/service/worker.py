@@ -106,12 +106,12 @@ class SerialTriggerWorker:
             log = logger.error if ev.status != "ok" else logger.info
             log(
                 "[TRIGGER] done in %.2fs: session=%s zone=%d status=%s judgment=%s "
-                "delta=%.1fg products=%s yolo_calls=%d frames=%s early_term=%s "
+                "delta=%.1fg products=%s yolo_calls=%d frames=%s "
                 "reasons=%s accepted=%s",
                 elapsed_ms / 1000.0, session_id, ev.zone, ev.status,
                 ev.judgment.status.value, ev.delta_weight,
                 [(pc.product.name, pc.count) for pc in ev.judgment.products],
-                tr.yolo_calls, dict(tr.processed_frames), tr.early_terminated,
+                tr.yolo_calls, dict(tr.processed_frames),
                 tr.reason_codes, accepted,
             )
             if not accepted:

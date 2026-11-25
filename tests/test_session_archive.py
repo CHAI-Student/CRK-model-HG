@@ -30,7 +30,7 @@ from crk_model.core.config import Settings
 from crk_model.core.profiles import REFRIGERATOR
 from crk_model.core.types import JudgmentResult, JudgmentStatus, ProductCount
 from crk_model.ledger.archive import SessionArchive, _load_document, build_session_document
-from crk_model.ledger.events import FreezerAction, TriggerEvent
+from crk_model.ledger.events import FreezerMovementEvidence, TriggerEvent
 from crk_model.ledger.journal import event_from_dict, event_to_dict
 from crk_model.perception.detector import Detection
 from crk_model.service import ModelService
@@ -281,26 +281,30 @@ class TestYamlTupleCompatibility:
     def test_actual_freezer_save_is_readable_by_standard_safe_loader(
         self, tmp_path, cola, yaml_backend,
     ):
-        from crk_model.ledger.journal import action_to_dict
         from crk_model.service.pipeline import TriggerTrace
 
         judgment = JudgmentResult(JudgmentStatus.COMPLETE, (ProductCount(cola, 1),), .9)
-        action = FreezerAction(100, judgment)
-        event = TriggerEvent("return", 1, 1, 100, (), judgment, freezer_actions=(action,))
+        movement = FreezerMovementEvidence(
+            (cand(cola.class_id, 0.9, 5),), (), True,
+            channel_deltas=(-100.0, 0.0), take_order=(cola.class_id,),
+        )
+        event = TriggerEvent("take", 1, 1, -100, (), judgment, freezer_movement=movement)
         trace = TriggerTrace(vote_summary={"nested": (1, (2, 3))})
-        assert isinstance(action_to_dict(action)["judgment"]["products"], list)
         path = SessionArchive(tmp_path).save(
-            "return", "finalized", [event], None, traces={event: trace},
+            "take", "finalized", [event], None, traces={event: trace},
         )
         assert path is not None
         text = path.read_text(encoding="utf-8")
         assert "!!python/" not in text
         document = yaml_backend.safe_load(text)
-        products = document["triggers"][0]["freezer_actions"][0]["judgment"]["products"]
-        assert products[0]["product"]["product_id"] == cola.product_id
-        assert document["triggers"][0]["trace"]["vote_summary"]["nested"] == [1, [2, 3]]
+        trigger = document["triggers"][0]
+        assert trigger["judgment"]["products"][0]["product_id"] == cola.product_id
+        assert trigger["freezer_movement"]["channel_deltas"] == [-100.0, 0.0]
+        assert trigger["freezer_movement"]["take_order"] == [cola.class_id]
+        assert "freezer_actions" not in trigger
+        assert trigger["trace"]["vote_summary"]["nested"] == [1, [2, 3]]
         assert _load_document(path) == document
-        assert isinstance(action.judgment.products, tuple)  # 도메인 이벤트는 불변 유지
+        assert isinstance(movement.channel_deltas, tuple)  # 도메인 이벤트는 불변 유지
 
     def test_legacy_nested_tuples_are_lists_without_rewriting_file(
         self, tmp_path, yaml_backend,

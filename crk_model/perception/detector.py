@@ -27,7 +27,6 @@ class Detection:
     confidence: float
     is_hand: bool = False
     bbox: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
-    track_id: int | None = None  # 카메라/클립 내부 ID. 서로 다른 영상 사이 식별자가 아니다.
 
 
 class Detector(Protocol):

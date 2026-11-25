@@ -18,8 +18,8 @@ from crk_model.ledger.freezer_returns import (
     TakeLot,
     match_movement_return,
     match_return,
-    record_event_takes,
     record_take,
+    stable_movement_delta,
 )
 
 
@@ -40,9 +40,7 @@ def resolve_mixed_movements(
     router = JudgmentRouter()
     for event in sorted(events, key=_end_ts):
         profile = profiles.get(event.zone, default_profile)
-        if profile.weight_is_discriminative or event.freezer_actions is not None:
-            if event.freezer_actions is not None:
-                lots.clear()  # 구 행동별 정산과 신규 추론이 같은 취출을 재사용하지 않는다.
+        if profile.weight_is_discriminative:
             out.append(event)
             continue
         movement = event.freezer_movement
@@ -66,8 +64,12 @@ def resolve_mixed_movements(
                     f"net={event.delta_weight:.1f}g"
                 )
                 continue
-        if event.delta_weight < 0:
-            record_event_takes(lots, event, profile.tolerance_grams, verified_only=True)
+        if (event.delta_weight < 0
+                and event.judgment.status is JudgmentStatus.COMPLETE):
+            record_take(
+                lots, event.zone, event.delta_weight, event.judgment.products,
+                stable_delta=stable_movement_delta(movement),
+            )
         elif event.delta_weight > 0 and event.freezer_return is not None:
             matched = match_movement_return(
                 event.freezer_return, event.delta_weight, event.zone, lots,

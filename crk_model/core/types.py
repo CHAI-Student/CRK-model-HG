@@ -35,7 +35,7 @@ class VisionCandidate:
     """투표 집계를 통과한 비전 후보.
 
     vote_ratio의 분모는 항상 "게이트 통과 프레임 수"다 (단일 정의 — 함정 #4).
-    L1 모션 게이트·L2 조기 종료 어느 조합에서도 분모 의미가 바뀌지 않는다.
+    L1 모션 게이트·T2 배치 어느 조합에서도 분모 의미가 바뀌지 않는다.
 
     head_votes/span_ratio/first_pos_ratio: held-object A-1 계측
     (docs/devdoc/design/0713_held_object_demotion.md §3) — "프리롤 첫 프레임부터 영상 전

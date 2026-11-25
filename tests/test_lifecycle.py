@@ -593,7 +593,6 @@ class TestVisionTuningWiring:
         monkeypatch.setenv("MODEL__JUDGMENT__SINGLE_SHARE", "0.4")
         monkeypatch.setenv("MODEL__JUDGMENT__NEAR_FACTOR", "1.5")
         monkeypatch.setenv("MODEL__JUDGMENT__REFIT_SHARE", "0.2")
-        monkeypatch.setenv("MODEL__VISION__EARLY_TERMINATION", "0")
         monkeypatch.setenv("MODEL__VISION__MOTION_GATE_THRESHOLD", "0.03")
         monkeypatch.setenv("MODEL__VISION__MOTION_GATE_KEEPALIVE", "12")
         monkeypatch.setenv("MODEL__WEIGHT__STABLE_WINDOW", "4")
@@ -601,7 +600,6 @@ class TestVisionTuningWiring:
         assert s.judgment_single_share == 0.4
         assert s.judgment_near_factor == 1.5
         assert s.judgment_refit_share == 0.2
-        assert s.early_termination_enabled is False
         assert s.motion_gate_threshold == 0.03
         assert s.motion_gate_keepalive == 12
         assert s.loadcell_stable_window == 4
@@ -620,7 +618,7 @@ class TestVisionTuningWiring:
         default = _default_profile_from_settings(s)
         assert default.motion_gate_threshold == 0.01
         assert default.motion_gate_keepalive == 6
-        assert default.early_termination_allowed is False  # 나머지 필드 보존
+        assert default.min_trigger_delta_grams == 50.0  # 나머지 필드 보존
         assert _profiles_from_settings(s)[2].motion_gate_threshold == 0.01
         # 오버라이드 없으면 프로파일 상수 그대로
         plain = _default_profile_from_settings(Settings(cabinet_type="freezer"))

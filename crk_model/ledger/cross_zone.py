@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, replace
 
 from crk_model.core.profiles import REFRIGERATOR, SensorProfile
@@ -40,6 +40,11 @@ from crk_model.judgment.router import JudgmentRouter
 from crk_model.ledger.events import TriggerEvent
 
 logger = logging.getLogger(__name__)
+
+# carried-in 지문 문턱 — MotionEvidence.held_min_head(기본 5, 0713 §10 실측:
+# held 27~33 vs 진짜 취출 0~2)와 같은 값. 클래스 단위 head_votes는 두 카메라
+# 합이라 트랙 단위보다 크게 나오므로 같은 문턱이면 보수적(덜 걸림)이다.
+CARRIED_IN_MIN_HEAD = 5
 
 
 @dataclass(frozen=True)
@@ -151,6 +156,45 @@ _SELF_FIT_MARGIN_G = 5.0
 # 이벤트는 명백한 별개 에피소드라 침묵이 정상이고, 노트는 노이즈다.
 _NO_OVERLAP_NOTE_HORIZON_S = 30.0
 
+# 단일 종 n개 설명 탐색의 개수 상한 (self-fit 자격·④ 무게 모호성 게이트 공용).
+_SINGLE_SPECIES_MAX_COUNT = 6
+
+
+def _rejudge(
+    e: TriggerEvent,
+    candidates: Sequence[VisionCandidate],
+    profile: SensorProfile,
+    active_products: Sequence[ActiveProduct],
+    router: JudgmentRouter,
+) -> JudgmentResult:
+    """e의 무게·세그먼트는 그대로 두고 비전 후보만 바꿔 다시 판정한다
+    (CLOSE zero-GPU 재판정 — cross_zone·ghost_ledger 공용)."""
+    return router.judge(
+        JudgmentContext(
+            zone=e.zone,
+            profile=profile,
+            delta_weight=e.delta_weight,
+            segments=e.segments,
+            vision_candidates=tuple(candidates),
+            active_products=tuple(active_products),
+            vision_only=False,
+        )
+    )
+
+
+def _strip_classes(
+    j: JudgmentResult,
+    classes: Collection[int],
+    reason_suffix: str,
+    empty_reason: str,
+) -> JudgmentResult:
+    """j에서 classes 상품만 뺀다. 남는 상품이 있으면 reason에 suffix를 붙이고,
+    없으면 NO_DETECTION(empty_reason)으로 내린다 — 빼낸 자리를 채우지 않는다."""
+    remaining = tuple(pc for pc in j.products if pc.product.class_id not in classes)
+    if remaining:
+        return replace(j, products=remaining, reason=j.reason + reason_suffix)
+    return JudgmentResult(JudgmentStatus.NO_DETECTION, confidence=0.0, reason=empty_reason)
+
 
 def _near_miss_sources(
     e: TriggerEvent, events: Sequence[TriggerEvent]
@@ -180,7 +224,6 @@ def _self_fit_prefers_alternative(
     e: TriggerEvent,
     cid: int,
     active_products: Sequence[ActiveProduct],
-    max_count: int = 6,
 ) -> bool:
     """상호 강등 가드의 면제 자격 검사 (10차 ses-1: z2 Δ-172.5가 자기 후보
     23(잔차 3.5)을 훨씬 잘 설명하는데도 존 간 잔차 비교만으로 공유 클래스
@@ -201,7 +244,7 @@ def _self_fit_prefers_alternative(
     for p in active_products:
         if p.class_id not in candidate_classes or p.stock_qty <= 0 or p.unit_weight <= 0:
             continue
-        for n in range(1, min(p.stock_qty, max_count) + 1):
+        for n in range(1, min(p.stock_qty, _SINGLE_SPECIES_MAX_COUNT) + 1):
             r = abs(target - n * p.unit_weight)
             if best_alt is None or r < best_alt:
                 best_alt = r
@@ -224,6 +267,25 @@ def _captive_only_zones(events: Sequence[TriggerEvent]) -> dict[int, set[int]]:
     return out
 
 
+def _carried_in_zones(events: Sequence[TriggerEvent]) -> dict[int, set[int]]:
+    """class_id → 그 클래스의 전체 비전 후보가 carried-in 지문
+    (head_votes ≥ CARRIED_IN_MIN_HEAD)을 가진 zone 집합.
+
+    2026-11-19 ses-1-1795061395 (교자 세션): zone1 취출 97을 손에 든 채
+    zone2를 열어 zone2 클립 첫 프레임부터 97이 보였다(head 52, first_pos 0).
+    이런 zone은 FOV 유출이 아니라 '손에 든 상품'으로 설명되므로 session42
+    3자 유출 패턴의 피해 zone 수에 넣지 않는다. 계측 이전 기록(head_votes=0)
+    은 해당 없음 — 기존 동작 무변경."""
+    out: dict[int, set[int]] = defaultdict(set)
+    for e in events:
+        if e.status != "ok":
+            continue
+        for c in e.vision_candidates:
+            if c.head_votes >= CARRIED_IN_MIN_HEAD:
+                out[c.class_id].add(e.zone)
+    return out
+
+
 # 지문 일치 억제(ses-34/35, ses-36/37) 판정 여유. 확신도는 여러 소수 자리까지
 # 일치해야 하는 강한 신호라 오차를 거의 안 둔다(ses-36/37 70: 두 zone
 # confidence가 0.9902377456426621로 13자리까지 동일 — 우연으론 불가능한
@@ -243,68 +305,35 @@ def _same_fingerprint(a: VisionCandidate, b: VisionCandidate) -> bool:
     return abs(a.vote_count - b.vote_count) <= vote_tolerance
 
 
-def _trial_replacement_valid(
-    e: TriggerEvent,
-    cid: int,
-    active_products: Sequence[ActiveProduct],
-    profile: SensorProfile,
-    router: JudgmentRouter,
-) -> bool:
-    """cid를 뺀 후보로 재판정했을 때, 개수 슬랙 없이도(base count_gate) 딱
-    맞는 COMPLETE 대체가 있는가 — ses-3 zone1/zone5 66 실사고: 진짜 66을
-    가진 zone도 66을 빼면 남은 후보로 억지로 스케일된 조합(70×2, 잔차가
-    n-스케일 게이트 경계에 겨우 걸침)을 만들어낼 수 있어, "대체가 되는지
-    여부"만으로는 진짜/가짜를 못 가른다. base gate(개수 슬랙 미적용)로
-    엄격히 걸러 억지 적합을 배제해야 진짜 대체(자기 상품이 따로 있다는
-    독립 증거)만 남는다."""
-    trial = router.judge(
-        JudgmentContext(
-            zone=e.zone,
-            profile=profile,
-            delta_weight=e.delta_weight,
-            segments=e.segments,
-            vision_candidates=tuple(
-                c for c in e.vision_candidates if c.class_id != cid
-            ),
-            active_products=tuple(active_products),
-            vision_only=False,
-        )
-    )
-    if trial.status is not JudgmentStatus.COMPLETE or not trial.products:
-        return False
-    residual = abs(
-        abs(e.delta_weight)
-        - sum(pc.count * pc.product.unit_weight for pc in trial.products)
-    )
-    return residual <= profile.count_gate
-
-
 def _credible_trial_replacement(
     e: TriggerEvent,
     cid: int,
     active_products: Sequence[ActiveProduct],
     profile: SensorProfile,
     router: JudgmentRouter,
-    min_confidence: float,
+    min_confidence: float = 0.0,
 ) -> JudgmentResult | None:
-    """`_trial_replacement_valid`와 같은 재판정이지만 결과를 그대로 반환하고,
-    신뢰도까지 `min_confidence`(기존 `source_conf_min` 재사용) 이상을 요구한다
-    — 잔차 동률/열세 판별은 결과적으로 원 상품을 지워버릴 수 있으므로,
-    약한(저confidence) 노이즈 후보 하나가 남아서 우연히 COMPLETE가 되는
-    것만으로 "독립적인 진짜 대안"이라 보지 않는다(합법적인 양쪽 판매를
-    노이즈 때문에 갈라놓는 사고 방지, test_penalized_winner_still_wins 류)."""
-    trial = router.judge(
-        JudgmentContext(
-            zone=e.zone,
-            profile=profile,
-            delta_weight=e.delta_weight,
-            segments=e.segments,
-            vision_candidates=tuple(
-                c for c in e.vision_candidates if c.class_id != cid
-            ),
-            active_products=tuple(active_products),
-            vision_only=False,
-        )
+    """cid를 뺀 후보로 재판정했을 때, 개수 슬랙 없이도(base count_gate) 딱
+    맞는 COMPLETE 대체가 있으면 그 판정을, 없으면 None을 반환한다.
+
+    base gate: ses-3 zone1/zone5 66 실사고 — 진짜 66을 가진 zone도 66을
+    빼면 남은 후보로 억지로 스케일된 조합(70×2, 잔차가 n-스케일 게이트
+    경계에 겨우 걸침)을 만들어낼 수 있어, "대체가 되는지 여부"만으로는
+    진짜/가짜를 못 가른다. 개수 슬랙 없이 엄격히 걸러야 진짜 대체(자기
+    상품이 따로 있다는 독립 증거)만 남는다.
+
+    min_confidence: 잔차 동률/열세 판별(_tie_break_by_replaceability,
+    _residual_loser_resolution)은 결과적으로 원 상품을 지워버릴 수 있으므로
+    기존 `source_conf_min`을 넘겨 신뢰도까지 요구한다 — 약한 노이즈 후보
+    하나가 남아서 우연히 COMPLETE가 되는 것만으로 "독립적인 진짜 대안"이라
+    보지 않는다(test_penalized_winner_still_wins 류). 지문 중복 억제의
+    대체 가능성 검사는 0(하한 없음)."""
+    trial = _rejudge(
+        e,
+        [c for c in e.vision_candidates if c.class_id != cid],
+        profile,
+        active_products,
+        router,
     )
     if trial.status is not JudgmentStatus.COMPLETE or not trial.products:
         return None
@@ -423,18 +452,16 @@ def _fingerprint_duplicate_suppression(
             len(ranked) >= 2
             and residuals[id(ranked[1])] - residuals[id(best)] <= _SELF_FIT_MARGIN_G
         ):
-            non_replaceable = [
-                e for e in survivors
-                if not _trial_replacement_valid(
-                    e, cid, active_products,
-                    profiles.get(e.zone, default_profile), router,
-                )
-            ]
+            replaceable = {
+                id(e): _credible_trial_replacement(
+                    e, cid, active_products, profiles.get(e.zone, default_profile), router,
+                ) is not None
+                for e in survivors
+            }
+            non_replaceable = [e for e in survivors if not replaceable[id(e)]]
             ordered = _ordered_duplicate_source(survivors, cid, cfg)
             if ordered is not None and all(
-                _trial_replacement_valid(
-                    e, cid, active_products, profiles.get(e.zone, default_profile), router,
-                ) for e in survivors if e is not ordered
+                replaceable[id(e)] for e in survivors if e is not ordered
             ):
                 best = ordered
                 notes.append(f"zone{best.zone}:cross_zone_visual_take_order:class{cid}")
@@ -457,9 +484,6 @@ def _fingerprint_duplicate_suppression(
         if not strip:
             out.append(e)
             continue
-        remaining = tuple(
-            pc for pc in e.judgment.products if pc.product.class_id not in strip
-        )
         removed = ",".join(
             f"class{pc.product.class_id}"
             for pc in e.judgment.products
@@ -468,28 +492,18 @@ def _fingerprint_duplicate_suppression(
         notes.append(
             f"zone{e.zone}:cross_zone_fingerprint_duplicate_suppressed:{removed}"
         )
-        if remaining:
-            judgment = replace(
-                e.judgment,
-                products=remaining,
-                reason=e.judgment.reason + "+cross_zone_fingerprint_duplicate",
-            )
-        else:
-            profile = profiles.get(e.zone, default_profile)
-            replacement = router.judge(
-                JudgmentContext(
-                    zone=e.zone,
-                    profile=profile,
-                    delta_weight=e.delta_weight,
-                    segments=e.segments,
-                    vision_candidates=tuple(
-                        candidate
-                        for candidate in e.vision_candidates
-                        if candidate.class_id not in strip
-                    ),
-                    active_products=tuple(active_products),
-                    vision_only=False,
-                )
+        judgment = _strip_classes(
+            e.judgment, strip,
+            "+cross_zone_fingerprint_duplicate",
+            "cross_zone_fingerprint_duplicate_suppressed",
+        )
+        if not judgment.products:
+            replacement = _rejudge(
+                e,
+                [c for c in e.vision_candidates if c.class_id not in strip],
+                profiles.get(e.zone, default_profile),
+                active_products,
+                router,
             )
             if replacement.status is JudgmentStatus.COMPLETE and replacement.products:
                 adopted = ",".join(
@@ -522,34 +536,6 @@ def _tie_break_by_replaceability(
     profiles: Mapping[int, SensorProfile],
     default_profile: SensorProfile,
     router: JudgmentRouter,
-) -> TriggerEvent | None:
-    """잔차 동률 전용 보조 판별 (2026-10 ses-2/ses-4 후속): 잔차만으로는
-    못 가르는 동률에서, cid를 뺀 자기 후보만으로 COMPLETE 대체가 되는 쪽은
-    X가 자기 것이 아닐 수 있다는 독립 증거를 가진 쪽이다 — 10차 ses-1
-    self-fit과 같은 원칙을 잔차-동률 케이스에 적용한 것. 정확히 한쪽만
-    대체되면 반대쪽(대체 불가)을 진짜 소스로 반환한다. 둘 다 대체되거나
-    둘 다 안 되면 구분 불가 — None(기존처럼 양쪽 면제로 폴백, 회귀 없음)."""
-    replaceable1 = _trial_replacement_valid(
-        e1, cid, active_products, profiles.get(e1.zone, default_profile), router
-    )
-    replaceable2 = _trial_replacement_valid(
-        e2, cid, active_products, profiles.get(e2.zone, default_profile), router
-    )
-    if replaceable1 and not replaceable2:
-        return e2
-    if replaceable2 and not replaceable1:
-        return e1
-    return None
-
-
-def _tie_break_by_replaceability(
-    e1: TriggerEvent,
-    e2: TriggerEvent,
-    cid: int,
-    active_products: Sequence[ActiveProduct],
-    profiles: Mapping[int, SensorProfile],
-    default_profile: SensorProfile,
-    router: JudgmentRouter,
     cfg: CrossZonePenaltyConfig,
 ) -> TriggerEvent | None:
     """잔차 동률 전용 보조 판별 (2026-10 ses-2/ses-4 후속): 잔차만으로는
@@ -560,19 +546,12 @@ def _tie_break_by_replaceability(
     대체되거나 둘 다 안 되면 구분 불가 — None(기존처럼 양쪽 면제로 폴백,
     회귀 없음). confidence 하한은 노이즈성 단일 후보(예: conf 0.3짜리 크로스
     클래스)가 합법적인 양쪽 판매를 갈라놓지 않게 막는다."""
-    replaceable1 = (
+    replaceable1, replaceable2 = (
         _credible_trial_replacement(
-            e1, cid, active_products, profiles.get(e1.zone, default_profile),
+            e, cid, active_products, profiles.get(e.zone, default_profile),
             router, cfg.source_conf_min,
-        )
-        is not None
-    )
-    replaceable2 = (
-        _credible_trial_replacement(
-            e2, cid, active_products, profiles.get(e2.zone, default_profile),
-            router, cfg.source_conf_min,
-        )
-        is not None
+        ) is not None
+        for e in (e1, e2)
     )
     if replaceable1 and not replaceable2:
         return e2
@@ -584,10 +563,10 @@ def _tie_break_by_replaceability(
 def _mutual_exemptions(
     events: Sequence[TriggerEvent],
     cfg: CrossZonePenaltyConfig,
-    active_products: Sequence[ActiveProduct] = (),
-    profiles: Mapping[int, SensorProfile] | None = None,
-    default_profile: SensorProfile = REFRIGERATOR,
-    router: JudgmentRouter | None = None,
+    active_products: Sequence[ActiveProduct],
+    profiles: Mapping[int, SensorProfile],
+    default_profile: SensorProfile,
+    router: JudgmentRouter,
 ) -> set[tuple[int, int]]:
     """상호 강등 가드 (8차 ses-3): 두 존이 같은 정체성 X를 판정했고 오염
     창이 **양방향**으로 겹치면, 각자가 상대를 소스로 X를 강등해 X가 정산에서
@@ -632,8 +611,7 @@ def _mutual_exemptions(
                     exempt.add(((e2 if unfit1 else e1).zone, cid))
                 elif r1 is None or r2 is None or r1 == r2:
                     tie_winner = _tie_break_by_replaceability(
-                        e1, e2, cid, active_products,
-                        profiles or {}, default_profile, router or JudgmentRouter(), cfg,
+                        e1, e2, cid, active_products, profiles, default_profile, router, cfg,
                     )
                     if tie_winner is not None:
                         exempt.add((tie_winner.zone, cid))
@@ -651,7 +629,6 @@ def _weight_ambiguous(
     e: TriggerEvent,
     active_products: Sequence[ActiveProduct],
     profile: SensorProfile,
-    max_count: int = 6,
 ) -> bool:
     """④ 무게 모호성 게이트 (핵심 안전장치): E의 |delta|를 게이트 내로 설명하는
     (상품, 개수) 해가 서로 다른 상품 2종 이상에서 성립하는가. 무게가 유일 해를
@@ -671,7 +648,7 @@ def _weight_ambiguous(
     for p in active_products:
         if p.class_id not in candidate_classes or p.stock_qty <= 0 or p.unit_weight <= 0:
             continue
-        for n in range(1, min(p.stock_qty, max_count) + 1):
+        for n in range(1, min(p.stock_qty, _SINGLE_SPECIES_MAX_COUNT) + 1):
             if abs(target - n * p.unit_weight) <= gate:
                 explainable.add(p.product_id)
                 break
@@ -715,11 +692,12 @@ def apply_cross_zone_penalty(
     router = router or JudgmentRouter()
     exempt = _mutual_exemptions(events, cfg, active_products, profiles, default_profile, router)
     captive = _captive_only_zones(events)
+    carried = _carried_in_zones(events)
     out: list[TriggerEvent] = []
     for e in events:
         replaced = _repass_event(
             e, events, profiles, active_products, cfg, notes, default_profile,
-            router, exempt, captive,
+            router, exempt, captive, carried,
         )
         out.append(replaced if replaced is not None else e)
     out = _fingerprint_duplicate_suppression(
@@ -739,8 +717,9 @@ def _repass_event(
     notes: list[str],
     default_profile: SensorProfile,
     router: JudgmentRouter,
-    exempt: set[tuple[int, int]] = frozenset(),
-    captive: Mapping[int, set[int]] | None = None,
+    exempt: set[tuple[int, int]],
+    captive: Mapping[int, set[int]],
+    carried: Mapping[int, set[int]],
 ) -> TriggerEvent | None:
     # 대상: 정상 removal 판정 + vision 후보 보유 (반품·에러·무후보는 무관)
     if (
@@ -779,13 +758,6 @@ def _repass_event(
     if not penalized:
         return None  # 오염 창 겹침 없음 또는 후보와 무관 — 기존 동작과 동일
     billed_classes = {pc.product.class_id for pc in e.judgment.products}
-    movement = e.freezer_movement
-    if (movement and movement.vision_priority and billed_classes
-            and billed_classes <= {c.class_id for c in movement.take_candidates}
-            and not (penalized & billed_classes)):
-        # 무관한 오염 후보의 재판정이 행동 방향에서 확인한 정체성을
-        # 단순 무게 적합 후보로 덮어쓰지 않게 한다. 부분 확정도 보존한다.
-        return None
     if (
         e.judgment.status is JudgmentStatus.COMPLETE
         and billed_classes
@@ -817,20 +789,22 @@ def _repass_event(
     ):
         return None  # ④ 무게가 유일 해 → 원 판정 유지 (KEEP)
 
-    ctx = JudgmentContext(
-        zone=e.zone,
-        profile=profile,
-        delta_weight=e.delta_weight,
-        segments=e.segments,
-        vision_candidates=_penalize_candidates(e, penalized, cfg.alpha),
-        active_products=tuple(active_products),
-        vision_only=False,
+    rejudged = _rejudge(
+        e, _penalize_candidates(e, penalized, cfg.alpha), profile, active_products, router,
     )
-    rejudged = router.judge(ctx)
 
     src_part = ",".join(
         f"zone{z}@{t:.3f}" for _, z, t in sorted(set(sources.values()))
     )
+
+    def adopt_robust_alternative() -> TriggerEvent:
+        notes.append(
+            f"zone{e.zone}:cross_zone_robust_alternative:"
+            f"adopted={robust_alternative.products[0].product.product_id}x1:"
+            f"source={src_part}"
+        )
+        return replace(e, judgment=robust_alternative)
+
     # ⑥ 게이트: 재판정이 COMPLETE(라우터가 I6로 tolerance/count gate 통과를
     # 보장)가 아니면 원 판정 유지 — 페널티로 후보 전멸 → NO_DETECTION 전락
     # 방지 (R2). 단, 원 판정이 PARTIAL이고 실제 과금 상품이 오염 클래스로
@@ -838,12 +812,7 @@ def _repass_event(
     # 보호하는 대신 오염 상품만 제거한다 (COMPLETE 보호 정책은 무변경).
     if rejudged.status is not JudgmentStatus.COMPLETE or not rejudged.products:
         if robust_alternative is not None:
-            notes.append(
-                f"zone{e.zone}:cross_zone_robust_alternative:"
-                f"adopted={robust_alternative.products[0].product.product_id}x1:"
-                f"source={src_part}"
-            )
-            return replace(e, judgment=robust_alternative)
+            return adopt_robust_alternative()
         contaminated = tuple(
             pc for pc in e.judgment.products if pc.product.class_id in penalized
         )
@@ -859,12 +828,18 @@ def _repass_event(
         # 말고도 하나 더 있으면 — soft 페널티가 이겨도(경쟁 후보가 없어
         # 당연히 이김) 인접 zone 실판매 개연성보다 순수 유출 개연성이 훨씬
         # 크다고 본다. 2-zone(소스 1 + 피해 1) 케이스는 기존 동작 유지.
+        # 2026-11-19 교자 세션: 피해 zone 중 carried-in 지문 zone(손에 든
+        # 상품)은 유출 증거가 아니므로 집계에서 뺀다 — 그 zone 때문에 진짜
+        # 취출 zone(zone3, head 0)이 3자 유출로 강제 억제되던 경로 차단.
+        # carried-in zone 자체의 처리는 settler의 carried-over 패스 소관.
         forced_suppress = False
         if same_partial_survived and captive:
             for pc in contaminated:
                 cid = pc.product.class_id
                 source_zone = sources[cid][1] if cid in sources else None
-                victims = captive.get(cid, set()) - {source_zone}
+                victims = (
+                    captive.get(cid, set()) - {source_zone} - carried.get(cid, set())
+                )
                 if e.zone in victims and len(victims) >= 2:
                     forced_suppress = True
                     break
@@ -873,11 +848,6 @@ def _repass_event(
             and contaminated
             and (not same_partial_survived or forced_suppress)
         ):
-            remaining = tuple(
-                pc
-                for pc in e.judgment.products
-                if pc.product.class_id not in penalized
-            )
             suppressed = ",".join(
                 pc.product.product_id for pc in contaminated
             )
@@ -885,32 +855,19 @@ def _repass_event(
                 f"zone{e.zone}:cross_zone_penalty_gate_failed:"
                 f"suppress_contaminated_partial={suppressed}:source={src_part}"
             )
-            if remaining:
-                judgment = replace(
-                    e.judgment,
-                    products=remaining,
-                    reason=e.judgment.reason + "+cross_zone_contamination_pruned",
-                )
-            else:
-                judgment = JudgmentResult(
-                    JudgmentStatus.NO_DETECTION,
-                    confidence=0.0,
-                    reason="cross_zone_contaminated_partial_suppressed",
-                )
-            return replace(e, judgment=judgment)
+            return replace(e, judgment=_strip_classes(
+                e.judgment, penalized,
+                "+cross_zone_contamination_pruned",
+                "cross_zone_contaminated_partial_suppressed",
+            ))
         notes.append(
             f"zone{e.zone}:cross_zone_penalty_gate_failed:keep_original:source={src_part}"
         )
         return None
-    if _same_products(rejudged, e.judgment) and robust_alternative is None:
-        return None  # 페널티 후에도 오염 후보가 이김 — 그대로 인정 (⑤)
-    if _same_products(rejudged, e.judgment) and robust_alternative is not None:
-        notes.append(
-            f"zone{e.zone}:cross_zone_robust_alternative:"
-            f"adopted={robust_alternative.products[0].product.product_id}x1:"
-            f"source={src_part}"
-        )
-        return replace(e, judgment=robust_alternative)
+    if _same_products(rejudged, e.judgment):
+        if robust_alternative is None:
+            return None  # 페널티 후에도 오염 후보가 이김 — 그대로 인정 (⑤)
+        return adopt_robust_alternative()
 
     still_contaminated = penalized & {
         pc.product.class_id for pc in rejudged.products
@@ -924,10 +881,6 @@ def _repass_event(
         # 영(0)건으로 추락). 위 "rejudge 실패" 경로와 동일하게 원 판정에서
         # 오염 멤버만 제거해 비오염 상품을 보존한다 — 원 판정이 COMPLETE인
         # 경우에도 동일하게 적용(①: 비오염 멤버를 지킬 이유는 상태와 무관).
-        remaining = tuple(
-            pc for pc in e.judgment.products
-            if pc.product.class_id not in penalized
-        )
         pruned = ",".join(
             pc.product.product_id
             for pc in e.judgment.products
@@ -937,19 +890,11 @@ def _repass_event(
             f"zone{e.zone}:cross_zone_vision_penalty_still_contaminated:"
             f"pruned={pruned or '-'}:source={src_part}"
         )
-        if remaining:
-            judgment = replace(
-                e.judgment,
-                products=remaining,
-                reason=e.judgment.reason + "+cross_zone_contamination_pruned",
-            )
-        else:
-            judgment = JudgmentResult(
-                JudgmentStatus.NO_DETECTION,
-                confidence=0.0,
-                reason="cross_zone_contaminated_partial_suppressed",
-            )
-        return replace(e, judgment=judgment)
+        return replace(e, judgment=_strip_classes(
+            e.judgment, penalized,
+            "+cross_zone_contamination_pruned",
+            "cross_zone_contaminated_partial_suppressed",
+        ))
 
     demoted = sorted(
         pc.product.product_id
@@ -1107,23 +1052,12 @@ def _residual_loser_resolution(
             residual = _judgment_residual(e)
             if residual is None or residual <= profile.count_gate:
                 continue  # 자기 무게로도 base gate 이내 — 정상 판매일 수 있어 보존
-            remaining = tuple(
-                pc for pc in e.judgment.products if pc.product.class_id != cid
-            )
             notes.append(f"zone{zone}:cross_zone_residual_loser_suppressed:class{cid}")
-            if remaining:
-                judgment = replace(
-                    e.judgment,
-                    products=remaining,
-                    reason=e.judgment.reason + "+cross_zone_residual_loser_suppressed",
-                )
-            else:
-                judgment = JudgmentResult(
-                    JudgmentStatus.NO_DETECTION,
-                    confidence=0.0,
-                    reason="cross_zone_residual_loser_suppressed",
-                )
-            replacements[id(e)] = replace(e, judgment=judgment)
+            replacements[id(e)] = replace(e, judgment=_strip_classes(
+                e.judgment, {cid},
+                "+cross_zone_residual_loser_suppressed",
+                "cross_zone_residual_loser_suppressed",
+            ))
 
     if not replacements:
         return list(events)

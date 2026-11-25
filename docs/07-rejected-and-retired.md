@@ -1,6 +1,6 @@
 # 07. 배제·폐기 결정 기록
 
-> 대상: 후속 개발자 · 최종 갱신: 2026-07-30
+> 대상: 후속 개발자 · 최종 갱신: 2026-11-25
 > 선행 문서: [03. 판정과 정산](03-judgment-and-settlement.md) · [04. 설정 레퍼런스](04-configuration.md)
 
 ---
@@ -18,7 +18,7 @@
 |---|---|---|
 | 1 | [왜 이 문서가 있는가](#1-왜-이-문서가-있는가--저장소의-3원칙) | 운영 3원칙과 그 실측 근거 |
 | 2 | [전체 현황 한눈에](#2-전체-현황-한눈에) | 기제별 도입·처분·근거 요약표 |
-| 3 | [폐기 항목 상세](#3-폐기-항목-상세) | 9개 기제 + 부수 정리 |
+| 3 | [폐기 항목 상세](#3-폐기-항목-상세) | 11개 기제 + 부수 정리 |
 | 4 | [실패로 판명된 기술 선택](#4-실패로-판명된-기술-선택) | 기제가 아닌 구현 선택의 오답 |
 | 5 | [하지 말 것 — 성능](#5-하지-말-것--성능) | 리서치로 배제 확정된 최적화 방향 |
 | 6 | [금지된 전제 — 정적 planogram](#6-금지된-전제--정적-planogram) | "배치를 알면 쉬운데"에 대한 답 |
@@ -114,6 +114,8 @@ flowchart TD
 | track_min_hits / track_max_gap | 2026-07-23 | 🗑 **폐기** | **2026-07-30** | 발동 이력 0회. 단절이 심각(실질 트랙/클래스 median 4)해 fail-closed 스위치 근거를 만들 수 없었다 |
 | likelihood (무게 우도 score) + tray_prior | 2026-07-23 | 🗑 **폐기** | **2026-07-30** | 4차 mismatch 정오 3:4:4로 Phase 2 부결 → 11차 2/1/1. "동일 상품 n개 우연 적합" 선호의 구조적 한계 |
 | FixedBatchCollector (D8 설계 산출물) | 초기 재설계 | 🗑 **폐기** (대체됨) | **2026-07-30** | 2026-07-28 T2 실구현(파이프라인 마이크로배치 루프 + `detect_batch`)이 같은 목적을 대체, 운영 경로 완전 미사용 |
+| 조기 종료 (D7/L2 — 무게 전량 설명 시 추론 중단) | 초기 재설계 (취출·냉장 한정, I15) | 🗑 **폐기** | **2026-11-25** | 이슈 #22 0805 냉장 20종 실기: 정답 등장 전 프리롤 진열·반사광 표가 delta를 설명해 종료 → 오과금 지배 원인으로 기본 off 강등. env 템플릿 3종 모두 0. 처리량은 T2 배치가 대체 |
+| 구 냉동 행동별 정산 (`freezer_actions`) | 2026-11-12 | 🗑 **폐기** | **2026-11-25** | 생산 코드는 도입 당일(11-12) 기존 무게 경로 복원으로 제거됐고, 이후 11-12 기록 재생에만 쓰였다 |
 
 출처는 전부 `docs/devdoc/fix_logs.md`(배치별 실측)와
 `docs/devdoc/field-tests/0724_shadow_status_review.md`(처분 권고)입니다.
@@ -235,7 +237,29 @@ env 노브 11종
 | **남긴 것** | `crk_model/frames/__init__.py` 모듈 docstring이 "배치 추론은 이 계층의 수집기가 아니라 파이프라인의 마이크로배치 루프로 구현됐다"를 명시하고 이 문서를 링크한다 |
 | **재시도 선행** | 없음. 배치 관련 작업은 `service/pipeline.py`의 마이크로배치 루프와 `adapters/yolo_detector.detect_batch`를 고칠 것. 엔진/배치 짝이 어긋난 조합은 기동 프로브가 즉시 실패시킨다 |
 
-### 3-10. 부수 정리 — 아카이브·리포트 필드와 구 아카이브 호환
+### 3-10. 조기 종료 — D7/L2 무게 전량 설명 시 추론 중단 (2026-11-25 삭제)
+
+| 항목 | 내용 |
+|---|---|
+| **가설** | 현재 후보가 delta를 이미 전량 설명하고 득표가 수렴했으면, 남은 프레임은 판정을 바꾸지 못한다 — 추론을 멈춰 `yolo_calls`(처리시간 ≈ 40ms × 호출수)를 줄인다 |
+| **구현** | `perception/early_termination.py`의 `EarlyTerminator.should_stop` — 취출(`delta < 0`) & 비냉동(`SensorProfile.early_termination_allowed`, I15)에서만, 1위 득표·리드 마진·손 퇴장 후 M프레임(`HandLatch.frames_since_exit`) + `judge()`와 같은 tolerance의 전량 설명. 0805 이후 전 재고 유일해 게이트(단일 종 (상품,n) 해 유일 + 득표 리드 일치) 강제. env `MODEL__VISION__EARLY_TERMINATION`, 트레이스 `trace.early_terminated` + reason `early_terminated` |
+| **실측** | 이슈 #22 0805 냉장 20종 실기에서 오과금의 지배 원인 — "후보 창 안의 설명"은 "남은 프레임이 판정을 못 바꾼다"의 근거가 아니었다. 2-9는 top 9컷 처리 후 종료로 정답 표 0(프리롤 진열 5표 86×3=258이 Δ-260 설명), 3-3은 리드 표가 진열·반사광 오검출, ses-46은 3종 조합 738이 Δ-735를 설명해 종료 |
+| **폐기 판단** | 0805 기본 off 강등 후 env 템플릿 3종 모두 0이었고, 처리량은 T2 배치(`BATCH_SIZE`/`TENSOR_INPUT`)가 대체했다. 2026-11-25 모듈·`Settings.early_termination_enabled`·env·`SensorProfile.early_termination_allowed`·`TriggerTrace.early_terminated`·`HandLatch.frames_since_exit`·`TriggerPipeline(early_termination_enabled=...)` 삭제. 배치 경로의 "배치 중간 종료 시 잔여 결과 폐기" 규칙도 함께 사라졌다. I15는 제한할 대상이 없어져 폐지 |
+| **남긴 것** | tolerance 단일 소스 불변식은 유지 — `judge()`와 CLOSE 정산이 같은 `SensorProfile.tolerance_grams`를 쓴다. 프리페치 `close()`/`finally` 계약도 유지되며, 발동 조건은 "앞 카메라 예외 등으로 소비자가 스트림을 버릴 때"다. 기기 `.env`에 키가 남아 있어도 무시된다 |
+| **재시도 선행** | ① 전 프레임 추론 대비 판정 동등성을 냉장 라벨 배치 A/B로 먼저 입증할 것 — 0805 실패는 후보 창 밖(아직 등장하지 않은 정답)에서 왔다. ② 냉동·반품은 후반 프레임 증거가 중요하다는 §5의 3중 근거가 그대로다. ③ 처리량이 목적이면 T2 배치·텐서 입력 실측이 먼저다 |
+
+### 3-11. 구 냉동 행동별 정산 — `freezer_actions` (2026-11-25 삭제)
+
+| 항목 | 내용 |
+|---|---|
+| **가설** | 한 트리거 안의 중간 양수/음수 무게 구간을 별도 행동(반납/취출)으로 쪼개고, 행동별 SKU 판정으로 CLOSE에서 같은 SKU만 차감·보호하면 같은 무게의 다른 SKU 반납을 바로잡을 수 있다 |
+| **구현** | `ledger/events.py`의 `FreezerAction`(부호별 무게 + 판정)과 `TriggerEvent.freezer_actions`, 저널·아카이브 직렬화(`journal.action_to_dict`), `CloseSettler`의 행동별 SKU 원장 경로(note `freezer_action_unresolved`·`freezer_identity_return`·`unmatched_identity_return`·`freezer_shared_video_action_unresolved`), `freezer_session`·`freezer_movements`의 예외 처리 |
+| **실측** | 도입 당일(2026-11-12) `ses-1-1794471430`에서 2층 +80→−450g, 3층 +235→−705g을 혼합 행동으로 분류해 경계 통과 증거가 없자 상품을 비우고 0원으로 끝냈다 — 중간 무게 증가를 새 반납 행동으로 해석해 기존 취출 경로를 막았다 |
+| **폐기 판단** | 생산 코드(`_judge_freezer_actions`)는 같은 날 기존 최종 무게 경로 복원으로 제거됐고, 신규 트리거는 `freezer_actions=None`으로만 기록됐다. 남은 소비자는 11-12 무렵 기록의 재생뿐이라 2026-11-25 타입·필드·직렬화·정산 경로를 삭제했다 |
+| **남긴 것** | 구 저널·YAML에 `freezer_actions` 키가 있어도 읽기는 되며 키만 무시하고 일반 순 무게 경로로 재생한다. 그래서 해당 기록의 재정산 결과는 당시와 다를 수 있다(`ses-1-1794471430` zone2·3이 `review` → `complete`, 청구는 양쪽 모두 0). 냉동 반납 SKU 연결은 현행 `freezer_return`·`freezer_movement` 경로가 담당한다 |
+| **재시도 선행** | ① 중간 구간을 행동으로 쪼개려면 무게 구간과 영상 경계 증거가 함께 성립하는 조건을 실기로 먼저 확정할 것. ② 증거가 모자랄 때 기존 최종 무게 판정을 취소하지 않는 fail-safe 방향을 지킬 것 — 11-12 실패는 그 반대 방향이었다 |
+
+### 3-12. 부수 정리 — 아카이브·리포트 필드와 구 아카이브 호환
 
 기제를 삭제하면 그 기제가 쓰던 관측 필드도 사라집니다. 아카이브는 **코드 버전이
 섞이는 자료**이므로(수 개월치 세션 YAML), 호환 정책은 **"폐기 필드는 조용히
@@ -250,6 +274,8 @@ env 노브 11종
 | `vote_summary.tube_shadow` | → `vote_summary.tube_diag` (의미 변경: 승격 대기 shadow → 진단 계측) | 2026-07-30 |
 | 리포트 `sigma_db.unit_residuals` | → `unit_residual.samples`, 제안 env가 `LIKELIHOOD_SIGMA_DB` → `COUNT_UNIT_SLACK` | 2026-07-30 |
 | analyze-sessions 섹션: 무게 우도 정오 / tray prior 개입 / 튜브 shadow 정오 | 삭제 | 2026-07-30 |
+| `trace.early_terminated` / reason `early_terminated` | 삭제 (조기 종료 폐기). 구 아카이브의 키는 무시 | 2026-11-25 |
+| `triggers[].freezer_actions` (저널·아카이브) | 삭제 (구 행동별 정산 폐기). 구 기록의 키는 무시하고 순 무게 경로로 재생 | 2026-11-25 |
 
 회귀 테스트로 고정돼 있습니다 —
 `tests/test_analyze_cli.py::test_old_archive_retired_shadow_fields_ignored`
@@ -312,7 +338,7 @@ ses-8/ses-5의 "정답 상품이 후보에 아예 없음" + hand_path 드랍 급
 
 | 방향 | 배제 사유 (문서 확정) |
 |---|---|
-| 냉동 조기 종료 허용 (I15 변경) | 3중 독립 근거 — 후반 프레임 증거 / `weight_is_discriminative=False` + ±15g count_gate의 오조합 성립률 / 다중 트레이·pool_exhaustion이 완전 투표 풀을 전제. 절감 대비 과금 오류 비대칭 |
+| 냉동 조기 종료 허용 (I15 변경) | 3중 독립 근거 — 후반 프레임 증거 / `weight_is_discriminative=False` + ±15g count_gate의 오조합 성립률 / 다중 트레이·pool_exhaustion이 완전 투표 풀을 전제. 절감 대비 과금 오류 비대칭. 조기 종료 기능 자체가 2026-11-25 냉장까지 포함해 삭제됐다(§3-10) — 재도입 제안 시 이 근거가 그대로 적용된다 |
 | DLA 오프로드 | **Orin Nano에 DLA가 없다**(NVIDIA 공식. 검색 상위 일부 블로그의 거짓 서술 주의) |
 | HW MJPEG 디코드 (NVDEC / NVJPG / nvjpegdec) | NVDEC 코덱 목록에 JPEG 없음, AVI MJPEG는 4:2:2(`yuvj422p`)라 NVJPG 경로도 차단, VGA에서 HW가 CPU에 일관 패배(25 vs 4.2fps), JP6.0 다중 파일 버그. **부수 확정: 기존 hwaccel 경로는 한 번도 성공한 적이 없다** |
 | CUDA multi-stream / 다중 context | Orin 실측 역효과(10스트림 18ms vs 1회 2ms), NVIDIA 내부 버그 미해결 |
@@ -331,7 +357,7 @@ ses-8/ses-5의 "정답 상품이 후보에 아예 없음" + hand_path 드랍 급
 | 불변식·지표 | 주의 |
 |---|---|
 | I16 (손 래치) | 래치 활성 중 스킵 금지 — 게이트·배치 어떤 변경도 이 불변식을 유지해야 한다 |
-| head 계측 | `pos`(디코드 위치) 기준이므로 게이트/ET로 **추론 수**를 줄이는 건 안전, **디코드 프레임 자체를 줄이는 건 위험**. 단 `track_held`의 `head_obs`는 관측 수 기준이라 스킵률 증가에 민감 |
+| head 계측 | `pos`(디코드 위치) 기준이므로 게이트로 **추론 수**를 줄이는 건 안전, **디코드 프레임 자체를 줄이는 건 위험**. 단 `track_held`의 `head_obs`는 관측 수 기준이라 스킵률 증가에 민감 |
 | 투표 분모 | 기본 분모가 게이트 통과 수라 스킵률을 올리면 ratio 게이트가 **자동 완화**된다 — 게이트 변경 배치에는 `MIN_VOTE_RATIO`/`SHARE` 재점검을 동봉 |
 | 배치 구성 | 속도 변경과 판정 변경을 **같은 배치에 섞지 않는다**(교락 방지). Tier 0/1은 판정 불변이라 즉시 가능 |
 | 재생 검증 | 게이트 변경 재생 시 `MODEL__VIDEO__DECODER=ffmpeg` 고정 — opencv 경로는 그레이 변환·리사이즈 방식이 달라 게이트 결정이 조용히 달라진다 |

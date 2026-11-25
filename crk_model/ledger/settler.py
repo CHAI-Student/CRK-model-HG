@@ -16,7 +16,6 @@ from __future__ import annotations
 import re
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import replace
 
 from crk_model.core.policy import ErrorSessionPolicy
 from crk_model.core.profiles import REFRIGERATOR, SensorProfile
@@ -24,7 +23,6 @@ from crk_model.core.types import (
     ActiveProduct,
     FinalizedSettlement,
     InterimSummary,
-    JudgmentResult,
     JudgmentStatus,
     ProductCount,
     ZoneBasket,
@@ -34,20 +32,24 @@ from crk_model.ledger.cross_zone import (
     apply_cross_zone_penalty,
 )
 from crk_model.ledger.events import EventLog, TriggerEvent
+from crk_model.ledger.freezer_carried_over import suppress_carried_over_partials
 from crk_model.ledger.freezer_movements import resolve_mixed_movements
 from crk_model.ledger.freezer_returns import (
+    ReturnMatch,
     TakeLot,
+    UnbilledTake,
+    cancel_unbilled_take,
     consume_take,
-    evidence_action_time,
     match_movement_return,
-    record_event_takes,
+    match_same_floor_return,
     record_take,
+    stable_movement_delta,
 )
-from crk_model.ledger.freezer_session import resolve_session_returns
 from crk_model.ledger.ghost_ledger import (
     GhostLedgerConfig,
     apply_ghost_demotion,
     detect_ghosts,
+    weight_backed_zones,
 )
 
 
@@ -130,6 +132,39 @@ def _notes_for_zone(notes: Sequence[str], zone: int) -> tuple[str, ...]:
     return tuple(n for n in notes if pattern.search(n))
 
 
+# 냉동 "청구 없이 빠진 무게" 문턱 (2026-11-25). 파일럿 최소 순 delta
+# (FREEZER.min_trigger_delta_grams=50g)와 같은 값 — 이 미만은 비전도 돌리지 않는
+# 흔들림이라 무시한다. 프로파일에 값이 없으면 같은 50g.
+_UNBILLED_DROP_DEFAULT_G = 50.0
+
+
+def _unbilled_drop_threshold(prof: SensorProfile) -> float:
+    return prof.min_trigger_delta_grams or _UNBILLED_DROP_DEFAULT_G
+
+
+def _unbilled_weight_drop(
+    zone: int,
+    events: Sequence[TriggerEvent],
+    basket: _Basket | None,
+    prof: SensorProfile,
+    net_adjustment: float,
+) -> float | None:
+    """청구 없이 빠진 무게(g). 냉동 한정, 해당 없으면 None.
+
+    문턱(50g) 이상 빠졌는데 청구 상품이 없는 판정(상품 없는 PARTIAL·NO_DETECTION)이
+    있고, 반납·층간 이동까지 반영한 층 순변화가 청구 무게보다 문턱 이상 더 빠졌을 때만
+    값을 돌려준다. 같은 층 반납으로 순변화가 문턱 안에 들어오면 무시한다."""
+    if prof.weight_is_discriminative:
+        return None
+    threshold = _unbilled_drop_threshold(prof)
+    zone_events = [e for e in events if e.zone == zone]
+    if not any(e.delta_weight <= -threshold and not e.judgment.products for e in zone_events):
+        return None
+    net = sum(e.delta_weight for e in zone_events) + net_adjustment
+    unexplained = -net - (basket.weight() if basket is not None else 0.0)
+    return unexplained if unexplained >= threshold else None
+
+
 def pass_same_zone(
     events: Sequence[TriggerEvent],
     profiles: Mapping[int, SensorProfile],
@@ -159,7 +194,8 @@ def _pass_returns(
     protected: set[int] = set()
     review: set[int] = set()
     take_lots: list[TakeLot] = []
-    for e in sorted(events, key=evidence_action_time):
+    unbilled: list[UnbilledTake] = []
+    for e in sorted(events, key=lambda e: e.ts):
         b = baskets[e.zone]
         prof = _profile(profiles, e.zone, default_profile)
         tol = prof.tolerance_grams
@@ -172,13 +208,6 @@ def _pass_returns(
                 e.freezer_movement, prof.min_trigger_delta_grams,
             )
             allocation, reason = matched.allocation, matched.reason
-            if reason == "matched_vision_presence":
-                review.add(e.zone)
-                if notes is not None:
-                    notes.append(
-                        f"zone{e.zone}:freezer_return_vision_presence:"
-                        f"take={matched.expected_weight:.1f}g:return={matched.return_weight:.1f}g"
-                    )
             if matched.measurement.startswith("stable_"):
                 if notes is not None:
                     notes.append(
@@ -187,6 +216,33 @@ def _pass_returns(
                     )
                 if abs(e.delta_weight - matched.return_weight) > 1e-6:
                     review.add(e.zone)
+            if not allocation:
+                # 2026-11-25 같은 층 반납 보완 — 비전이 반납 SKU를 정하지 못했을 때
+                # (a) 같은 층 취출 중 실측 무게가 맞는 SKU가 하나뿐이면 그 SKU로 차감,
+                # (b) 아니면 같은 층의 미청구 취출과 무게가 같을 때 서로 상쇄한다.
+                same_floor = match_same_floor_return(
+                    e.freezer_return, e.delta_weight, e.zone, take_lots, tol, reason,
+                )
+                if same_floor:
+                    if notes is not None:
+                        notes.append(
+                            f"zone{e.zone}:freezer_return_same_floor_weight:vision={reason}"
+                        )
+                    matched = ReturnMatch(
+                        same_floor, "matched_same_floor_weight", e.delta_weight,
+                        sum(lot.unit_weight * n for lot, n in same_floor), "bocpd_total",
+                    )
+                    allocation, reason = matched.allocation, matched.reason
+                elif e.freezer_return.stabilized and (cancelled := cancel_unbilled_take(
+                    unbilled, e.zone, e.delta_weight, prof.count_gate,
+                )):
+                    if notes is not None:
+                        notes.append(
+                            f"zone{e.zone}:freezer_unbilled_take_returned:"
+                            f"take=-{cancelled.weight:.1f}g:return={e.delta_weight:+.1f}g:"
+                            f"vision={reason}"
+                        )
+                    continue
             if not allocation:
                 affected = {z for z in baskets
                             if not _profile(profiles, z, default_profile).weight_is_discriminative}
@@ -239,75 +295,31 @@ def _pass_returns(
                         f"take={take_weight:.1f}g:return={matched_delta:.1f}g"
                     )
             continue
-        if e.freezer_actions is not None and not prof.weight_is_discriminative:
-            protected.add(e.zone)
-            for action in e.freezer_actions:
-                judgment = action.judgment
-                if judgment.status is not JudgmentStatus.COMPLETE or not judgment.products:
-                    # 종류/수량 미확정 반납이 뒤의 net 보정으로 다른 SKU를 지우지 못한다.
-                    affected = {
-                        z for z in baskets
-                        if not _profile(profiles, z, default_profile).weight_is_discriminative
-                    }
-                    protected.update(affected)
-                    review.update(affected | {e.zone})
-                    if notes is not None:
-                        notes.append(f"zone{e.zone}:freezer_action_unresolved:{judgment.reason}")
-                    continue
-                if action.delta_weight < 0:
-                    for pc in judgment.products:
-                        b.add(pc.product, pc.count)
-                    record_take(take_lots, e.zone, action.delta_weight, judgment.products)
-                    continue
-                if action.delta_weight <= 0:
-                    review.add(e.zone)
-                    continue
-                for pc in judgment.products:
-                    remaining = pc.count
-                    # SKU가 결정된 뒤에만 같은 층을 우선한다. 층이 다르다고 종류를 바꾸지 않는다.
-                    origins = [e.zone] + [z for z in baskets if z != e.zone]
-                    for origin in origins:
-                        if origin != e.zone and not freezer_cross_zone:
-                            continue
-                        if _profile(profiles, origin, default_profile).weight_is_discriminative:
-                            continue
-                        origin_basket = baskets[origin]
-                        count = min(remaining, origin_basket.counts.get(pc.product.product_id, 0))
-                        if count <= 0:
-                            continue
-                        for _ in range(count):
-                            origin_basket.remove_one(pc.product.product_id)
-                        consume_take(take_lots, origin, pc.product.product_id, count)
-                        remaining -= count
-                        protected.add(origin)
-                        if origin != e.zone:
-                            moved = pc.product.unit_weight * count
-                            net_adjustments[origin] += moved
-                            net_adjustments[e.zone] -= moved
-                        if notes is not None:
-                            notes.append(
-                                f"zone{origin}:freezer_identity_return:from_zone{e.zone}:"
-                                f"{pc.product.product_id}-{count}"
-                            )
-                        if remaining == 0:
-                            break
-                    if remaining:
-                        review.add(e.zone)
-                        if notes is not None:
-                            notes.append(
-                                f"zone{e.zone}:unmatched_identity_return:"
-                                f"{pc.product.product_id}:{remaining}"
-                            )
-            if not e.freezer_actions:
-                review.add(e.zone)
-            continue
         if e.delta_weight < 0:
             for pc in e.judgment.products:
                 b.add(pc.product, pc.count)
             if not prof.weight_is_discriminative:
-                record_event_takes(take_lots, e, tol)
+                record_take(
+                    take_lots, e.zone, e.delta_weight, e.judgment.products,
+                    stable_delta=stable_movement_delta(e.freezer_movement),
+                )
+                if (not e.judgment.products
+                        and -e.delta_weight >= _unbilled_drop_threshold(prof)):
+                    unbilled.append(UnbilledTake(e.zone, -e.delta_weight))
         elif e.delta_weight > 0:
             if _match_return(b, e.delta_weight, tol, take_lots=take_lots, zone=e.zone):
+                continue
+            # 무게 반납(영상 증거 없는 기록): 같은 층 청구 상품과 안 맞으면, 다른 층
+            # 상품을 찾기 전에 같은 층 미청구 취출과의 상쇄를 먼저 본다 (2026-11-25).
+            if not prof.weight_is_discriminative and (cancelled := cancel_unbilled_take(
+                unbilled, e.zone, e.delta_weight, prof.count_gate,
+            )):
+                if notes is not None:
+                    notes.append(
+                        f"zone{e.zone}:freezer_unbilled_take_returned:"
+                        f"take=-{cancelled.weight:.1f}g:return={e.delta_weight:+.1f}g:"
+                        "vision=none"
+                    )
                 continue
             if freezer_cross_zone and not prof.weight_is_discriminative:
                 matched = False
@@ -368,6 +380,10 @@ def _return_products(b: _Basket, ret_weight: float, tol: float) -> tuple[ActiveP
 # 결제 보고 전용 값이라 별도 상수로 둔다(판정 로직 어디에서도 이 문자열로
 # 분기하지 않는다 — Node로 나가는 zones[].status 표기 전용).
 PAYMENT_STATUS_REVIEW = "review"
+
+
+def _fmt_combo(combo: Iterable[tuple[ActiveProduct, int]]) -> str:
+    return ",".join(f"{prod.product_id}={n}" for prod, n in combo)
 
 
 def _is_ambiguous_complete(e: TriggerEvent, margin: float) -> bool:
@@ -479,31 +495,6 @@ class CloseSettler:
 
         notes: list[str] = []
         ok = _ok_events(events)
-        # 행동별로 분해한 이벤트를 순 delta용 재판정기로 다시 풀면 반납 영상이
-        # 취출 후보로 섞인다. 해당 이벤트는 SKU 원장 경로에서만 정산한다.
-        action_events = []
-        for e in ok:
-            if e.freezer_actions is None:
-                continue
-            # 같은 영상 쌍을 여러 층이 공유하면 방향만으로 층별 행동을 귀속할 수 없다.
-            # 순 delta용 오염 보정을 우회해 두 층에서 같은 행동을 확정하지 않는다.
-            shared = e.video_paths and any(
-                other.zone != e.zone and dict(other.video_paths) == dict(e.video_paths)
-                for other in ok
-            )
-            if shared:
-                unresolved = JudgmentResult(
-                    JudgmentStatus.NO_DETECTION,
-                    reason="freezer_shared_video_action_unresolved", strategy="freezer_action",
-                )
-                e = replace(e, freezer_actions=tuple(
-                    replace(action, judgment=unresolved) for action in e.freezer_actions
-                ), judgment=replace(
-                    e.judgment, status=JudgmentStatus.PARTIAL, products=(),
-                    reason=unresolved.reason,
-                ))
-            action_events.append(e)
-        ok = [e for e in ok if e.freezer_actions is None]
         # 0723 세션 고스트 원장 — cross_zone보다 먼저: active에서 유령 후보를
         # 강등해 두면 cross_zone 재판정의 채택 후보에서도 밀려난다 (ses-11).
         if self.ghost.mode != "off" and self._products_provider is not None:
@@ -537,13 +528,19 @@ class CloseSettler:
                 if e.status != "ok" or e.judgment.status is JudgmentStatus.ERROR
             }
         )
-        ok = sorted([*ok, *action_events], key=lambda e: e.ts)
+        ok = sorted(ok, key=lambda e: e.ts)
+        # 2026-11-19 carried-over 억제: 교차존 보정 뒤(어느 과금이 살아남았는지
+        # 확정된 뒤), 반납·혼합 분해 전에 앞선 과금 상품을 손에 든 채 열린
+        # 층의 무게 불일치 identity partial만 걷어낸다.
+        ok = suppress_carried_over_partials(
+            ok, profiles, self.default_profile, notes,
+            count_unit_slack=self.count_unit_slack,
+        )
         ok = resolve_mixed_movements(
             ok, profiles,
             tuple(self._products_provider()) if self._products_provider else (),
             self.default_profile, notes,
         )
-        ok = resolve_session_returns(ok, profiles, self.default_profile, notes)
 
         baskets, unmatched, net_adjustments, protected, return_review = _pass_returns(
             ok, profiles, self.default_profile, freezer_cross_zone=True, notes=notes
@@ -574,7 +571,6 @@ class CloseSettler:
             zone_events = [e for e in events if e.zone == zone]
             weight_delta = sum(e.delta_weight for e in zone_events)
             trigger_count = len(zone_events)
-            zone_notes = _notes_for_zone(notes, zone)
             # 결제 confidence는 최종 정산 입력(ok)에 남은 실제 상품 판정만
             # 대상으로 zone별 산술평균을 낸다. NO_DETECTION/반품 이벤트의 0.0이
             # 결제 상품 신뢰도를 희석하지 않게 COMPLETE/PARTIAL + products로 제한.
@@ -610,15 +606,48 @@ class CloseSettler:
                 notes.append(
                     f"zone{zone}:ambiguous_runner_up_complete:trigger_ts={e.ts:.3f}"
                 )
+            # 2026-11-19 ses-1-1795055066: 냉동 refit(unique_refit /
+            # refit_arbitrated)은 vision 1위 후보를 무게가 맞는 다른 상품으로
+            # 바꾼 COMPLETE다 — 정체성은 vision이 아닌 무게 적합이 골랐다
+            # (11-19 101→102 교체 3회, 무게 차 0g). 과금은 유지하되 "처음부터
+            # 명확히 일치"가 아니므로 review로 올린다.
+            refit_events = [
+                e for e in concluded_events
+                if e.judgment.status is JudgmentStatus.COMPLETE
+                and "refit" in (e.judgment.reason or "")
+            ]
+            for e in refit_events:
+                notes.append(
+                    f"zone{zone}:refit_identity_replaced:trigger_ts={e.ts:.3f}"
+                )
+            # 2026-11-25: 무게는 빠졌는데 청구가 없으면 complete로 숨기지 않는다
+            # (50g 미만·같은 층 반납으로 상쇄된 무게는 무시).
+            unbilled_drop = _unbilled_weight_drop(
+                zone, ok, baskets.get(zone), _profile(profiles, zone, self.default_profile),
+                net_adjustments.get(zone, 0.0),
+            )
+            if unbilled_drop is not None:
+                notes.append(
+                    f"zone{zone}:freezer_unbilled_weight_drop:unexplained={unbilled_drop:.1f}g"
+                )
             if any(j.status is JudgmentStatus.PARTIAL for j in concluded_judgments):
                 zone_status = JudgmentStatus.PARTIAL.value
-            elif (ambiguous_events or zone in return_review or any(
-                note.startswith(f"zone{zone}:cross_zone_fingerprint_ambiguous:")
+            elif (ambiguous_events or refit_events or unbilled_drop is not None
+                  or zone in return_review or any(
+                note.startswith((
+                    f"zone{zone}:cross_zone_fingerprint_ambiguous:",
+                    # carried-over 억제 뒤 남은 무게는 설명되지 않은 취출일 수
+                    # 있다(11-19 교자 세션 zone2 −205g = 실제 닭발) — 미청구로
+                    # 두되 complete로 숨기지 않는다.
+                    f"zone{zone}:freezer_carried_over_suppressed:",
+                ))
                 for note in notes
             )):
                 zone_status = PAYMENT_STATUS_REVIEW
             else:
                 zone_status = JudgmentStatus.COMPLETE.value
+            # zone 단위 notes는 위 ambiguous/refit 관측 note까지 기록한 뒤에 모은다.
+            zone_notes = _notes_for_zone(notes, zone)
             basket = baskets.get(zone)
             zb = (
                 basket.to_zone(
@@ -752,7 +781,7 @@ class CloseSettler:
         if self.combo_session_guard and self.vision_combo:
             if self.ghost.mode != "off":
                 ghosts = detect_ghosts(events, self.ghost, self.cross_zone)
-            backed_zones = self._backed_zones_by_class(events)
+            backed_zones = weight_backed_zones(events)
         for zone, b in list(baskets.items()):
             if zone in (protected_zones or ()):
                 notes.append(f"zone{zone}:freezer_identity_ledger_preserved")
@@ -847,20 +876,38 @@ class CloseSettler:
                     ):
                         notes.append(
                             f"freezer_combo_rejected_confident_snap:zone{zone}:"
-                            + ",".join(
-                                f"{prod.product_id}={n}" for prod, n in combo
-                            )
-                            + f":conf={zone_conf:.2f}"
+                            f"{_fmt_combo(combo)}:conf={zone_conf:.2f}"
                         )
                         combo = None
                         conf_rejected = True
                     elif strong_combo:
                         notes.append(
                             f"freezer_combo_override_strong_evidence:zone{zone}:"
-                            + ",".join(
-                                f"{prod.product_id}={n}" for prod, n in combo
-                            )
+                            f"{_fmt_combo(combo)}"
                         )
+                # ⑥ 동일 무게 콤보 거부 (2026-11-19 ses-3-1795062865: 청양
+                # 101×2 → 101+102). 콤보의 모든 상품 단위무게가 스냅 상품과
+                # count gate 안이면 무게는 두 가설을 전혀 가르지 못한다 —
+                # 콤보 전환은 무게 거부권 없는 순수 vision 정체성 교체다.
+                # 잔차도 5g 미만으로만 나아지면(11-19: 5g→5g) 게이트 통과
+                # 스냅을 유지한다. 76+75(100/95g, 잔차 5→0g)처럼 무게가 실제로
+                # 콤보를 더 잘 설명하는 경우는 그대로 콤보를 쓴다.
+                if combo is not None and snap_ok:
+                    equal_weight = all(
+                        abs(prod.unit_weight - p.unit_weight) <= gate
+                        for prod, _n in combo
+                    )
+                    snap_residual = abs(-net - count * p.unit_weight)
+                    combo_residual = abs(
+                        -net - sum(prod.unit_weight * n for prod, n in combo)
+                    )
+                    if equal_weight and snap_residual - combo_residual < 5.0:
+                        notes.append(
+                            f"freezer_combo_rejected_equal_weight:zone{zone}:"
+                            f"{_fmt_combo(combo)}:keep={p.product_id}={count}"
+                        )
+                        combo = None
+                        conf_rejected = True
                 # I8 관측 note: 자격 제외가 없었다면 나왔을 조합이 억제된 경우
                 # — analyze-sessions가 가드 정오(억제된 조합 vs GT)를 실측해
                 # ratio/conf/guard 파라미터를 검증·보정할 수 있게 한다.
@@ -873,10 +920,7 @@ class CloseSettler:
                     if unguarded is not None:
                         notes.append(
                             f"freezer_combo_suppressed:zone{zone}:"
-                            + ",".join(
-                                f"{prod.product_id}={n}" for prod, n in unguarded
-                            )
-                            + ":excluded="
+                            f"{_fmt_combo(unguarded)}:excluded="
                             + ",".join(
                                 f"class{cid}({r})"
                                 for cid, r in sorted(excluded.items())
@@ -887,10 +931,7 @@ class CloseSettler:
                         b.set_count(pid, 0)
                     for prod, n in combo:
                         b.add(prod, n)
-                    notes.append(
-                        f"freezer_close_resolve_combo:zone{zone}:"
-                        + ",".join(f"{prod.product_id}={n}" for prod, n in combo)
-                    )
+                    notes.append(f"freezer_close_resolve_combo:zone{zone}:{_fmt_combo(combo)}")
                 elif snap_ok:
                     b.set_count(p.product_id, count)
                     notes.append(f"freezer_close_resolve:zone{zone}:{p.product_id}={count}")
@@ -944,31 +985,11 @@ class CloseSettler:
         재사용하되, 실패한 원래 클래스(exclude_class)는 후보에서 뺀다."""
         if self._products_provider is None:
             return None
-        votes: dict[int, int] = {}
-        confs: dict[int, float] = {}
-        for e in events:
-            if e.zone != zone or e.delta_weight >= 0 or e.status != "ok":
-                continue
-            for c in e.vision_candidates:
-                if (
-                    c.class_id > 0
-                    and c.class_id != exclude_class
-                    and c.vote_count >= self._COMBO_VOTE_FLOOR
-                ):
-                    votes[c.class_id] = max(votes.get(c.class_id, 0), c.vote_count)
-                    confs[c.class_id] = max(confs.get(c.class_id, 0.0), c.confidence)
-        for cid in list(votes):
-            if ghosts and cid in ghosts:
-                del votes[cid]
-            elif backed_zones and backed_zones.get(cid) and zone not in backed_zones[cid]:
-                del votes[cid]
-        top_votes = max(votes.values(), default=0)
-        for cid in list(votes):
-            if (
-                votes[cid] < self.combo_min_vote_ratio * top_votes
-                and confs.get(cid, 0.0) < self.combo_min_conf
-            ):
-                del votes[cid]
+        votes, confs = self._zone_evidence(zone, events)
+        votes.pop(exclude_class, None)
+        excluded: dict[int, str] = {}
+        _exclude_session_explained(zone, votes, ghosts, backed_zones, excluded)
+        self._exclude_low_evidence(votes, confs, excluded)
         if not votes:
             return None
         best: tuple[tuple, ActiveProduct, int] | None = None
@@ -983,6 +1004,37 @@ class CloseSettler:
                 if best is None or score > best[0]:
                     best = (score, p, n)
         return (best[1], best[2]) if best else None
+
+    @classmethod
+    def _zone_evidence(
+        cls, zone: int, events: Sequence[TriggerEvent]
+    ) -> tuple[dict[int, int], dict[int, float]]:
+        """이 zone의 removal 이벤트들에서 자격 표(≥ _COMBO_VOTE_FLOOR)를 받은
+        클래스별 최대 표·conf — 콤보·단일 종 교체 공용 후보 풀."""
+        votes: dict[int, int] = {}
+        confs: dict[int, float] = {}
+        for e in events:
+            if e.zone != zone or e.delta_weight >= 0 or e.status != "ok":
+                continue
+            for c in e.vision_candidates:
+                if c.class_id > 0 and c.vote_count >= cls._COMBO_VOTE_FLOOR:
+                    votes[c.class_id] = max(votes.get(c.class_id, 0), c.vote_count)
+                    confs[c.class_id] = max(confs.get(c.class_id, 0.0), c.confidence)
+        return votes, confs
+
+    def _exclude_low_evidence(
+        self, votes: dict[int, int], confs: Mapping[int, float], excluded: dict[int, str],
+    ) -> None:
+        """③ 실존 증거 하한 — 남은 풀 기준 top 대비 득표율 ≥ combo_min_vote_ratio
+        "또는" conf ≥ combo_min_conf (많이 보였거나 확실하게 보였거나)."""
+        top_votes = max(votes.values(), default=0)
+        for cid in list(votes):
+            if (
+                votes[cid] < self.combo_min_vote_ratio * top_votes
+                and confs.get(cid, 0.0) < self.combo_min_conf
+            ):
+                excluded[cid] = "low_evidence"
+                del votes[cid]
 
     @staticmethod
     def _class_evidence(
@@ -1027,25 +1079,6 @@ class CloseSettler:
                 return True
         return False
 
-    @staticmethod
-    def _backed_zones_by_class(
-        events: Sequence[TriggerEvent],
-    ) -> dict[int, set[int]]:
-        """클래스별 무게 뒷받침 과금을 받은 존 집합 — ghost_ledger의
-        _weight_backed_classes와 동일 게이트(COMPLETE + refit/near_gate 아님)를
-        존 단위로 확장한 것. 콤보 자격 제외 ②(다른 존이 이미 설명한 정체성)의
-        판단 재료."""
-        backed: dict[int, set[int]] = defaultdict(set)
-        for e in events:
-            if e.status != "ok" or e.judgment.status is not JudgmentStatus.COMPLETE:
-                continue
-            reason = e.judgment.reason or ""
-            if "refit" in reason or "near_gate" in reason:
-                continue
-            for pc in e.judgment.products:
-                backed[pc.product.class_id].add(e.zone)
-        return backed
-
     def _vision_combo(
         self,
         zone: int,
@@ -1088,15 +1121,7 @@ class CloseSettler:
         guarded=False는 억제 관측 note(freezer_combo_suppressed) 계산 전용."""
         if self._products_provider is None:
             return None
-        votes: dict[int, int] = {}
-        confs: dict[int, float] = {}
-        for e in events:
-            if e.zone != zone or e.delta_weight >= 0 or e.status != "ok":
-                continue
-            for c in e.vision_candidates:
-                if c.class_id > 0 and c.vote_count >= self._COMBO_VOTE_FLOOR:
-                    votes[c.class_id] = max(votes.get(c.class_id, 0), c.vote_count)
-                    confs[c.class_id] = max(confs.get(c.class_id, 0.0), c.confidence)
+        votes, confs = self._zone_evidence(zone, events)
         if guarded:
             excluded = excluded_out if excluded_out is not None else {}
             # ④ 판단 재료: 판정층이 본 원본 풀의 득표 1위 (제외 적용 전 기준 —
@@ -1106,13 +1131,7 @@ class CloseSettler:
                 if votes
                 else None
             )
-            for cid in list(votes):
-                if ghosts and cid in ghosts:
-                    excluded[cid] = "ghost"
-                    del votes[cid]
-                elif backed_zones and backed_zones.get(cid) and zone not in backed_zones[cid]:
-                    excluded[cid] = "other_zone_backed"
-                    del votes[cid]
+            _exclude_session_explained(zone, votes, ghosts, backed_zones, excluded)
             # ④ 판정 중재 존중 (13차 ses-20 → 14차 ses-1 일반화): 이 존의
             # COMPLETE 판정이 "과금 클래스보다 표가 많거나 같은" 클래스를
             # 과금하지 않았다면(vision_top_not_billed / arbitrated 시그니처 —
@@ -1143,14 +1162,7 @@ class CloseSettler:
                         excluded[cid] = "rejected_by_judgment"
                         del votes[cid]
             # ③ 실존 증거 하한 — ①·②·④ 제외 후 남은 풀 기준 top 대비.
-            top_votes = max(votes.values(), default=0)
-            for cid in list(votes):
-                if (
-                    votes[cid] < self.combo_min_vote_ratio * top_votes
-                    and confs.get(cid, 0.0) < self.combo_min_conf
-                ):
-                    excluded[cid] = "low_evidence"
-                    del votes[cid]
+            self._exclude_low_evidence(votes, confs, excluded)
         if len(votes) < 2:
             return None
         products = [
@@ -1185,6 +1197,25 @@ class CloseSettler:
                         if best is None or score > best[0]:
                             best = (score, ((pa, na), (pb, nb)))
         return best[1] if best else None
+
+
+def _exclude_session_explained(
+    zone: int,
+    votes: dict[int, int],
+    ghosts: Mapping[int, tuple[int, ...]] | None,
+    backed_zones: Mapping[int, set[int]] | None,
+    excluded: dict[int, str],
+) -> None:
+    """콤보·단일 종 교체 자격 제외 ①·② — 세션 관측 증거가 이미 설명한 클래스:
+    ① ghost_ledger가 유령으로 판명한 클래스, ② 다른 존의 무게 뒷받침 과금이
+    설명한 클래스(동시 멀티존 취출의 공유 영상 표 유입 차단, 12차 ses-5)."""
+    for cid in list(votes):
+        if ghosts and cid in ghosts:
+            excluded[cid] = "ghost"
+            del votes[cid]
+        elif backed_zones and backed_zones.get(cid) and zone not in backed_zones[cid]:
+            excluded[cid] = "other_zone_backed"
+            del votes[cid]
 
 
 def interim_summary(

@@ -4,29 +4,7 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import dataclass, field
 
-from crk_model.core.types import JudgmentResult, ProductCount, VisionCandidate, WeightSegment
-
-
-@dataclass(frozen=True)
-class FreezerTakeEvidence:
-    """원본 트리거 상태와 별개로 검증된 상품 채널. 결제 수량 추가 명령이 아니다."""
-
-    channel: int
-    delta_weight: float
-    products: tuple[ProductCount, ...]
-    stable_delta: float | None = None
-
-
-@dataclass(frozen=True)
-class FreezerAction:
-    """이전 버전의 냉동 행동별 기록을 읽고 재생하기 위한 호환 형식.
-
-    +는 반납, -는 취출. 신규 트리거는 최종 무게 기준의 기존 경로를 사용하며
-    이 형식을 생성하지 않는다. 과거에 저장한 행동별 판정은 그대로 재생한다.
-    """
-
-    delta_weight: float
-    judgment: JudgmentResult
+from crk_model.core.types import JudgmentResult, VisionCandidate, WeightSegment
 
 
 @dataclass(frozen=True)
@@ -42,9 +20,8 @@ class FreezerReturnEvidence:
 class FreezerMovementEvidence:
     """최종 delta와 별도로 보존하는 냉동 영상·채널 증거.
 
-    방향 관측만으로 수량을 확정하지 않는다. CLOSE에서 취출 이력과 최종
-    순변화를 함께 검증하고, 실제 손 이탈/상품 잔류가 있으면 반납 연결을 보완한다.
-    원본 delta는 유지한다. take_order는 같은 영상 안의 관측 순서이며,
+    방향 관측만으로 행동을 확정하지 않는다. CLOSE에서 취출 이력과 최종
+    순변화를 함께 검증한다. take_order는 같은 영상 안의 관측 순서이며,
     프레임 번호를 벽시계 시간으로 환산한 값이 아니다.
     """
 
@@ -56,9 +33,6 @@ class FreezerMovementEvidence:
     # channel_deltas와 같은 채널 순서. 시작/종료 3샘플 중앙값 차이이며,
     # 양 끝의 흔들림 폭이 프로파일 기준 이내일 때만 전체 채널을 보존한다.
     stable_channel_deltas: tuple[float, ...] = ()
-    verified_takes: tuple[FreezerTakeEvidence, ...] = ()
-    vision_priority: bool = False
-    return_completed: bool = False  # 동일 손의 이탈 + 상품 잔류를 실제 관측한 경우만
 
 
 @dataclass(frozen=True)
@@ -82,8 +56,6 @@ class TriggerEvent:
     # 2차 패스가 재구성하는 근거. IO-BOARD 단일 클럭(F7)이라 존 간 비교 가능.
     # 구버전 카메라는 빈 튜플 — segments/ts 폴백 (cross_zone.sub_event_anchors).
     change_timestamps: tuple[float, ...] = ()
-    # 신규 트리거는 None(기존 무게 경로). 행동별 값/빈 튜플은 이전 기록의 재생용.
-    freezer_actions: tuple[FreezerAction, ...] | None = None
     # None은 구 기록/냉장. 신규 냉동 반납은 영상 증거가 없어도 빈 후보를 명시한다.
     freezer_return: FreezerReturnEvidence | None = None
     freezer_movement: FreezerMovementEvidence | None = None

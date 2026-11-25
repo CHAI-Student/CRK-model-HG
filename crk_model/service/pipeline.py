@@ -7,10 +7,9 @@
 - 취출/반납과 수량은 기존 무게 경로. 냉동 반납 영상은 이전 취출 상품과 연결
 - 로드셀 신뢰 불가 → vision_only 강제 (원본 _should_force_vision_only)
 - I1: 처리 예외 → status="error" 이벤트로 전파 (무검출로 조용히 바꾸지 않음)
-- L2: 조기 종료 시 추론만 중단 (I15 가드는 EarlyTerminator 내부)
 
 트레이스 (I8): processed_frames 의미 유지 + gate_skipped_frames 신설 +
-yolo_calls / early_terminated / reason_codes.
+yolo_calls / reason_codes.
 """
 from __future__ import annotations
 
@@ -34,14 +33,11 @@ from crk_model.ingest.loadcell import (
 from crk_model.judgment.interfaces import JudgmentContext
 from crk_model.judgment.router import JudgmentRouter
 from crk_model.ledger.events import (
-    FreezerAction,
     FreezerMovementEvidence,
     FreezerReturnEvidence,
-    FreezerTakeEvidence,
     TriggerEvent,
 )
 from crk_model.perception.detector import HAND_CLASS_ID, Detector
-from crk_model.perception.early_termination import EarlyTerminator
 from crk_model.perception.filters import DetectionFilterChain
 from crk_model.perception.motion_direction import MotionDirectionConfig
 from crk_model.perception.motion_evidence import MotionEvidence
@@ -95,7 +91,6 @@ class TriggerTrace:
     processed_frames: dict[str, int] = field(default_factory=dict)
     gate_skipped_frames: dict[str, int] = field(default_factory=dict)  # I8 신설
     yolo_calls: int = 0
-    early_terminated: bool = False
     reason_codes: list[str] = field(default_factory=list)
     # issue #6 진단(work item 3): vision_candidates=[]인데 yolo_calls는 높은
     # 케이스를 사후에 재구성하기 위한 클래스별/카메라별 요약
@@ -118,14 +113,9 @@ class TriggerTrace:
     directional_candidates: dict[str, tuple[VisionCandidate, ...]] = field(default_factory=dict)
     uncertain_directions: list[str] = field(default_factory=list)
     crossed_directions: list[str] = field(default_factory=list)
-    # 이전 행동별 아카이브/저널 호환용. 신규 트리거는 기존 무게 경로(None)를 쓴다.
-    freezer_actions: tuple[FreezerAction, ...] | None = None
     freezer_return: FreezerReturnEvidence | None = None
     freezer_movement: FreezerMovementEvidence | None = None
     directional_take_order: tuple[int, ...] = ()
-    verified_takes: list[FreezerTakeEvidence] = field(default_factory=list)
-    action_details: list[dict] = field(default_factory=list)
-    return_completed: bool = False
 
 
 @dataclass(frozen=True)
@@ -146,8 +136,6 @@ class TriggerPipeline:
         *,
         router: JudgmentRouter | None = None,
         filters: DetectionFilterChain | None = None,
-        early_termination_enabled: bool = False,
-        # 기본 off (이슈 #22 0805) — Settings 기본값과 단일 방향 유지.
         analyzer_factory=None,  # SensorProfile -> LoadcellAnalyzer (테스트/튜닝 주입점)
         default_profile: SensorProfile = REFRIGERATOR,
         # zone이 profiles dict에 없을 때 쓰는 폴백 프로파일. 기본은 기존
@@ -208,7 +196,7 @@ class TriggerPipeline:
         # T2-3 (MODEL__VIDEO__PREFETCH): 카메라별 백그라운드 선행 디코드 깊이.
         # 0 = 비활성(현행). 활성 시 트리거 시작 시점에 전 카메라 스트림을
         # 함께 열어 top 추론 중 side 디코드가 은닉된다 — side 디코드 실패가
-        # 조기 종료보다 먼저 드러날 수 있다 (I1 fail-closed 방향이라 허용).
+        # top 추론 결과보다 먼저 드러날 수 있다 (I1 fail-closed 방향이라 허용).
         tensor_input: bool = False,
         # T2-1 단독 (MODEL__VISION__TENSOR_INPUT): batch_size=1이어도 추론을
         # detect_batch(1프레임)로 보낸다 — GPU 전처리 효과만 분리 측정.
@@ -219,7 +207,6 @@ class TriggerPipeline:
         self._snapshots = snapshots
         self._router = router or JudgmentRouter()
         self._filters = filters or DetectionFilterChain()
-        self._et_enabled = early_termination_enabled
         self._side_hand_enabled = side_hand_enabled
         self._analyzer_factory = analyzer_factory or LoadcellAnalyzer
         self._default_profile = default_profile
@@ -348,10 +335,6 @@ class TriggerPipeline:
                 tuple(event.delta_grams for event in analysis.events),
                 trace.directional_take_order,
                 stable_channels,
-                vision_priority=bool(trace.directional_candidates.get(
-                    "take" if delta < 0 else "return",
-                )),
-                return_completed=trace.return_completed,
             )
             if (analysis.stabilized and not analysis.trailing_return_stabilized
                     and trace.freezer_movement.return_candidates):
@@ -368,11 +351,7 @@ class TriggerPipeline:
             profile=profile,
             delta_weight=delta,
             segments=analysis.segments,
-            vision_candidates=(
-                trace.freezer_movement.take_candidates
-                if delta < 0 and trace.freezer_movement and trace.freezer_movement.vision_priority
-                else candidates
-            ),
+            vision_candidates=candidates,
             active_products=snapshot.products,
             vision_only=vision_only,
         )
@@ -380,43 +359,13 @@ class TriggerPipeline:
             judgment = self._judge_tray_events(ctx, analysis, trace)
         else:
             judgment = self._router.judge(ctx)
-            if trace.freezer_movement and trace.freezer_movement.vision_priority:
-                judgment = self._preserve_action_identity(ctx, judgment)
-            else:
-                judgment = self._segment_target_retry(ctx, judgment, analysis, trace)
-        if trace.freezer_movement is not None:
-            if (not trace.verified_takes and len(analysis.events) == 1
-                    and delta < 0 and judgment.status is JudgmentStatus.COMPLETE):
-                trace.verified_takes.append(FreezerTakeEvidence(
-                    analysis.events[0].channel, delta, judgment.products,
-                    sum(trace.freezer_movement.stable_channel_deltas)
-                    if trace.freezer_movement.stable_channel_deltas else None,
-                ))
-            trace.freezer_movement = replace(
-                trace.freezer_movement, verified_takes=tuple(trace.verified_takes),
-            )
+            judgment = self._segment_target_retry(ctx, judgment, analysis, trace)
         top_code = _vision_top_not_billed(candidates, judgment)
         if top_code:
             trace.reason_codes.append(top_code)
         return self._outcome(
             session_id, req, delta, analysis.segments, judgment, trace, candidates
         )
-
-    def _preserve_action_identity(
-        self, ctx: JudgmentContext, judgment: JudgmentResult,
-    ) -> JudgmentResult:
-        """불완전 하중 때문에 무게 근접 후보로 정체성까지 교체하지 않는다."""
-        if ctx.delta_weight >= 0 or not ctx.vision_candidates:
-            return judgment
-        if judgment.status is JudgmentStatus.COMPLETE:
-            return judgment
-        top = max(ctx.vision_candidates, key=lambda c: (c.vote_count, c.confidence))
-        if any(p.product.class_id == top.class_id for p in judgment.products):
-            return judgment
-        retained = self._router.judge(replace(ctx, vision_candidates=(top,)))
-        if retained.products:
-            return replace(retained, reason="freezer_action_identity_preserved:" + retained.reason)
-        return judgment
 
     def _judge_tray_events(
         self,
@@ -438,20 +387,10 @@ class TriggerPipeline:
         trace.reason_codes.append(f"multi_tray_events:{len(analysis.events)}")
         results: list[tuple[ChannelWeightEvent, JudgmentResult]] = []
         for ev in analysis.events:
-            if (not ctx.profile.weight_is_discriminative
-                    and abs(ev.delta_grams) < (ctx.profile.min_trigger_delta_grams
-                                               or ctx.profile.min_weight_change_grams)):
-                trace.reason_codes.append(f"freezer_small_channel:ch{ev.channel}:{ev.delta_grams:+.2f}g")
-                continue
             ectx = replace(ctx, delta_weight=ev.delta_grams, segments=ev.segments)
             j = self._router.judge(ectx)
-            if trace.freezer_movement and trace.freezer_movement.vision_priority:
-                j = self._preserve_action_identity(ectx, j)
-            else:
-                j = self._segment_target_retry(ectx, j, ev, trace)
+            j = self._segment_target_retry(ectx, j, ev, trace)
             results.append((ev, j))
-        if not results:
-            return JudgmentResult(JudgmentStatus.NO_DETECTION, reason="no_product_channel")
         results = self._pool_exhaustion_retry(ctx, results, trace)
         results = self._collision_complete_retry(ctx, results, trace)
         results = self._collision_partial_retry(ctx, results, trace)
@@ -460,19 +399,6 @@ class TriggerPipeline:
             (ev, j) for ev, j in results
             if j.status is JudgmentStatus.COMPLETE and j.products
         ]
-        if not ctx.profile.weight_is_discriminative:
-            levels = {level.channel: level for level in getattr(analysis, "terminal_levels", ())}
-            for ev, j in complete:
-                if ev.delta_grams >= 0:
-                    continue
-                level = levels.get(ev.channel)
-                stable = (level.end_median - level.start_median if level
-                          and ctx.profile.final_stability_span_grams is not None
-                          and max(level.start_span, level.end_span)
-                          <= ctx.profile.final_stability_span_grams else None)
-                trace.verified_takes.append(FreezerTakeEvidence(
-                    ev.channel, ev.delta_grams, j.products, stable,
-                ))
         # 설계 4 (issue #16, docs/devdoc/design/0722_issue16_arbitration_design.md): 정산기는
         # 에러가 아닌 모든 판정의 products를 집계하므로(단일 트리거의 near-gate
         # PARTIAL은 과금된다 — #15 정답 경로), 병합만 COMPLETE 한정이면 두
@@ -780,8 +706,6 @@ class TriggerPipeline:
                 ),
             )
             voting.attach_motion_evidence(evidence)
-        terminator = EarlyTerminator(profile, enabled=self._et_enabled)
-        stopped = False
         filtered_out: dict[str, int] = {}  # 진단(work item 3): 카메라별 필터 제거 개수
         # P0-2 (원본 _inference_allowed_class_ids 동형): 판매중 상품의 매핑된
         # class만 추론 허용 — 미매핑 센티널(-1)은 제외. hand는 top에 항상,
@@ -802,8 +726,8 @@ class TriggerPipeline:
         self._filters.reset_trigger_state()
         # top ROI 방향 게이트 (P1-5): delta가 0이면 top ROI 미적용 (원본 동형)
         self._filters.set_trigger_delta(delta)
-        def consume(camera: str, pos: int, raw: list, latch: HandLatch) -> tuple[int, bool]:
-            """추론 1프레임 결과 소비 — 필터→기록→증거→투표→래치→조기종료.
+        def consume(camera: str, pos: int, raw: list, latch: HandLatch) -> int:
+            """추론 1프레임 결과 소비 — 필터→기록→증거→투표→래치. 필터 제거 수 반환.
 
             배치/비배치 공통 단일 경로: 순서·의미가 프레임별 detect와 동일해야
             배치 활성화가 판정을 바꾸지 않는다 (T2-2 승인 조건)."""
@@ -827,16 +751,7 @@ class TriggerPipeline:
                 hand_active=hand_now or latch.active,
             )
             latch.update_after_inference(hand_now)
-            # combine은 지연 콜러블로 — 냉동(I15)·반품·손 미퇴장
-            # 프레임에서는 O(누적 표²) 결합이 아예 실행되지 않는다
-            # (docs/devdoc/research/0728_freezer_latency_research.md T1-1).
-            stop = terminator.should_stop(
-                delta_weight=delta,
-                candidates=voting.combine,
-                active_products=snapshot.products,
-                frames_since_hand_exit=latch.frames_since_exit,
-            )
-            return len(raw) - len(detections), stop
+            return len(raw) - len(detections)
 
         # T2-2: batch_size > 1(마이크로배치) 또는 tensor_input(T2-1 단독 —
         # 1프레임 배치로 GPU 전처리만)일 때 배치 경로. detect_batch를 제공하지
@@ -878,12 +793,6 @@ class TriggerPipeline:
 
         try:
             for camera, frame_iter in _camera_iters():
-                # 냉동의 고정 top/side가 촬영한 영상은 각각 독립된 추적 구간이다.
-                # 같은 영상 내 프레임/배치는 persist=True로 연결하고, 새 트리거의
-                # 같은 시점 영상도 이전 영상의 손 ID를 이어 쓰지 않는다.
-                begin_clip = getattr(self._detector, "begin_clip", None)
-                if begin_clip is not None:
-                    begin_clip(camera)
                 latch = HandLatch()  # 카메라별 래치 (hand-path는 카메라별, L3 계약과 동형)
                 gate = MotionGate(profile, latch)
                 camera_filtered_out = 0
@@ -900,29 +809,18 @@ class TriggerPipeline:
                     _allowed=allowed,
                     _pending=pending,
                 ) -> None:
-                    """대기 배치 1회 추론 후 프레임별 순차 소비 (T2-2).
-
-                    조기 종료가 배치 중간 프레임에서 발동하면 **잔여 결과를
-                    폐기**한다 — 추론 비용은 이미 지불했지만 투표에 넣지 않아
-                    비배치 판정과의 동등성을 지킨다 (yolo_calls도 소비분만
-                    집계 — 40ms×yolo_calls 비용 모델의 오차 요인으로 기록)."""
-                    nonlocal camera_filtered_out, stopped
+                    """대기 배치 1회 추론 후 프레임별 순차 소비 (T2-2)."""
+                    nonlocal camera_filtered_out
                     results = batch_detect(
                         [f for _, f in _pending], allowed_class_ids=_allowed
                     )
                     for (bpos, _), raw in zip(_pending, results, strict=True):
-                        dropped, stop = consume(_camera, bpos, list(raw), _latch)
-                        camera_filtered_out += dropped
-                        if stop:
-                            stopped = True
-                            break
+                        camera_filtered_out += consume(_camera, bpos, list(raw), _latch)
                     _pending.clear()
 
                 try:
                     for frame in frame_iter:
                         pos += 1
-                        if stopped:
-                            break  # L2: 추론만 중단 (프레임 공급은 이미 완료 상태)
                         # FrameBundle이면 게이트는 다운스케일 뷰, 검출기는 풀 프레임
                         decision = gate.evaluate(getattr(frame, "gate_view", frame))
                         if not decision.infer:
@@ -934,10 +832,7 @@ class TriggerPipeline:
                                     allowed_class_ids=allowed,
                                 )
                             )
-                            dropped, stop = consume(camera, pos, raw, latch)
-                            camera_filtered_out += dropped
-                            if stop:
-                                stopped = True
+                            camera_filtered_out += consume(camera, pos, raw, latch)
                         else:
                             # I16 주의: 배치 대기 중에는 래치 갱신이 늦으므로
                             # 게이트가 최대 batch-1 프레임을 구식 래치로 판단
@@ -945,10 +840,10 @@ class TriggerPipeline:
                             pending.append((pos, getattr(frame, "full", frame)))
                             if len(pending) >= self._batch_size:
                                 flush_pending()
-                    if pending and not stopped:
+                    if pending:
                         flush_pending()  # 잔여분 — 어댑터가 배치 크기로 패딩
                 finally:
-                    # 조기 종료로 스트림을 버릴 때도 cv2/subprocess 리소스가 즉시
+                    # 예외로 스트림을 버릴 때도 cv2/subprocess 리소스가 즉시
                     # 해제되도록 제너레이터를 명시적으로 닫는다 (list 등 close 없는
                     # 이터레이터는 getattr로 안전 무시).
                     closer = getattr(frame_iter, "close", None)
@@ -958,7 +853,7 @@ class TriggerPipeline:
                 trace.gate_skipped_frames[camera] = gate.gate_skipped_frames
                 filtered_out[camera] = camera_filtered_out
         finally:
-            # 프리페처 백그라운드 스레드 정리 — 조기 종료로 아예 순회하지 않은
+            # 프리페처 백그라운드 스레드 정리 — 앞 카메라 예외로 아예 순회하지 않은
             # 카메라(side 등)의 선행 디코드도 여기서 멈춘다 (close 멱등).
             for stream in streams.values():
                 closer = getattr(stream, "close", None)
@@ -967,9 +862,6 @@ class TriggerPipeline:
                         closer()
                     except Exception:  # noqa: BLE001 — 정리 실패는 비치명
                         pass
-        trace.early_terminated = stopped
-        if stopped:
-            trace.reason_codes.append("early_terminated")
         trace.vote_summary = {
             "classes": voting.debug_summary(),
             "filtered_out_by_camera": filtered_out,
@@ -1000,7 +892,6 @@ class TriggerPipeline:
                 camera: self._voting_params.get(f"entry_conf_{camera}", 0.0)
                 for camera in CAMERAS
             })
-            trace.action_details = evidence.action_details
             for direction, observations in frames.items():
                 action_voting = VotingEnsemble(**self._voting_params)
                 for (camera, pos), detections in sorted(observations.items()):
@@ -1026,10 +917,6 @@ class TriggerPipeline:
                         trace.directional_take_order = orders[0]
             trace.uncertain_directions = sorted(uncertain)
             trace.crossed_directions = sorted(crossed)
-            returning = {c.class_id for c in trace.directional_candidates.get("return", ())}
-            completed = {d["class_id"] for d in trace.action_details if d["return_completed"]}
-            trace.return_completed = (bool(returning) and returning <= completed
-                                      and "return" not in uncertain)
         return voting.combine()
 
     def _record_frame_detections(
@@ -1060,7 +947,6 @@ class TriggerPipeline:
                         "conf": round(d.confidence, 4),
                         "bbox": [round(float(v), 1) for v in d.bbox],
                         "hand": d.is_hand,
-                        **({"track_id": d.track_id} if d.track_id is not None else {}),
                     }
                     for d in detections
                     if d.is_hand or d.confidence >= entry
@@ -1083,7 +969,6 @@ class TriggerPipeline:
             vision_candidates=tuple(candidates),
             video_paths=tuple(req.video_paths.items()),
             change_timestamps=tuple(req.change_timestamps),
-            freezer_actions=trace.freezer_actions,
             freezer_return=trace.freezer_return,
             freezer_movement=trace.freezer_movement,
         )

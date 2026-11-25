@@ -6,8 +6,8 @@ IO-BOARD 엣지 단이 5g 양자화를 적용한다(CRK-IO-BOARD 2.0.2). 따라�
 냉동고에서 무게는 "무엇인지"를 가리지 못하고(weight_is_discriminative=False)
 "몇 개인지"만 거친 게이트(±15g, I3)로 검증한다.
 
-게이트 임계·구간화 임계·조기 종료 허용 여부까지 전부 프로파일 소속이다
-(OPTIMIZED_ARCHITECTURE L1 승인 조건 ③, QA Q3 ②, I15).
+게이트 임계·구간화 임계까지 전부 프로파일 소속이다
+(OPTIMIZED_ARCHITECTURE L1 승인 조건 ③, QA Q3 ②).
 """
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ from dataclasses import dataclass
 @dataclass(frozen=True)
 class SensorProfile:
     name: str
-    # judge()와 조기 종료(D7)가 공유하는 단일 tolerance 소스 — 이중 기준 금지
+    # judge()와 CLOSE 정산이 공유하는 단일 tolerance 소스 — 이중 기준 금지
     tolerance_grams: float
     # 무게가 정체성 판별자 자격이 있는가 (냉동고 False → vision-first)
     weight_is_discriminative: bool
@@ -33,8 +33,6 @@ class SensorProfile:
     motion_gate_threshold: float
     # D6: 연속 스킵 시 강제 추론 keepalive 간격
     motion_gate_keepalive: int
-    # I15: freezer·반품에는 조기 종료 금지 (반품은 delta 부호로 별도 차단)
-    early_termination_allowed: bool
     # 파일럿용 최소 순 delta. 설정 시 이 값 미만이면 안정 여부와 무관하게
     # 비전 추론을 건너뛴다.
     min_trigger_delta_grams: float | None = None
@@ -64,7 +62,6 @@ REFRIGERATOR = SensorProfile(
     segment_step_grams=5.0,  # 5g 양자화 와이어에서 스텝은 5g 배수로만 옴
     motion_gate_threshold=0.02,
     motion_gate_keepalive=8,
-    early_termination_allowed=True,
     motion_evidence_floor_px=10.0,  # 원본 MOTION_MIN_DISPLACEMENT_PX
 )
 
@@ -79,6 +76,5 @@ FREEZER = SensorProfile(
     motion_gate_threshold=0.005,  # 김서림/성에 → 스킵 이득이 0에 수렴해도 정확도 무손실 (fail-safe)
     motion_gate_keepalive=4,
     min_trigger_delta_grams=50.0,  # 파일럿: 200g 이상 상품 구성에서 50g 미만 흔들림 추론 억제
-    early_termination_allowed=False,  # I15
     motion_evidence_floor_px=12.0,  # 원본 FREEZER_MOTION_MIN_DISPLACEMENT_PX
 )

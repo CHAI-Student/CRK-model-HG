@@ -1,8 +1,7 @@
 # `perception/` — 프레임 검출을 "클래스별 표"로 바꾸는 vision 계층
 
-> 계층 위치: 상위는 `service/pipeline.py`(조립·호출), 하위는 `core/`뿐 — 단
-> `early_termination.py`만 예외적으로 `judgment/strict.py`를 재사용한다(이중 tolerance 기준
-> 금지, §3). 검출기 구현체는 `adapters/`에서 주입된다(C1). · 상태성: 트리거 내 — 투표·변위
+> 계층 위치: 상위는 `service/pipeline.py`(조립·호출), 하위는 `core/`뿐이다.
+> 검출기 구현체는 `adapters/`에서 주입된다(C1). · 상태성: 트리거 내 — 투표·변위
 > 증거는 트리거마다 새 인스턴스, 필터 체인은 재사용 인스턴스를 트리거 시작마다 리셋
 > 런타임 의존성: 없음(표준 라이브러리) — YOLO·TensorRT·cv2 import 0
 
@@ -17,8 +16,7 @@
 이 계층의 유일한 산출물은 `tuple[VisionCandidate, ...]`다 — 클래스별
 `(class_id, weighted conf, vote_count, vote_ratio)` + 위치 계측 신호. **한다**:
 검출기 인터페이스와 allowlist 계약, 공간·손 근접 필터, **변위 증거**로
-"움직이지 않은 것"의 표 몰수, 클래스별 표 누적과 카메라 간 conf 결합,
-무게 전량 설명 시 **추론 중단 가능** 신호.
+"움직이지 않은 것"의 표 몰수, 클래스별 표 누적과 카메라 간 conf 결합.
 
 **하지 않는다**
 
@@ -36,8 +34,6 @@ flowchart LR
     F --> ME["motion_evidence.observe()<br/>트랙 연관 → 검출별 track_id"]
     ME --> V["voting.add_frame()<br/>카메라별 진입 컷 → 표 누적"]
     V --> C["voting.combine()<br/>변위 몰수 → 채택 게이트 3종"]
-    C --> ET{"early_termination<br/>should_stop()"}
-    ET -- "전량 설명" --> STOP["추론만 중단"]
     C --> OUT["VisionCandidate[...]"]
 ```
 
@@ -49,11 +45,11 @@ flowchart LR
 | `filters.py` | 공간·손 근접 필터 체인 (트리거 단위 상태 보유) | `DetectionFilterChain.apply` / `.reset_trigger_state` |
 | `motion_evidence.py` | 트랙 연관 + 변위 증거(표 몰수의 근거), 튜브 진단 | `.observe` / `.track_qualifies` / `.class_motion` / `.summary` |
 | `voting.py` | 표 누적·카메라 conf 결합·후보 채택 게이트 | `.add_frame` / `.combine` / `.debug_summary` |
-| `early_termination.py` | 추론 중단 판정 (취출 & 비freezer 한정) | `EarlyTerminator.should_stop` |
 | `__init__.py` | 공개 표면 5종 재수출 | — |
 
 합계 1,156행. 진단 산출물 4종은 `service/pipeline.py`가 `trace.vote_summary`로
-모아 세션 아카이브에 싣는다.
+모아 세션 아카이브에 싣는다. 조기 종료(`early_termination.py`, D7/L2)는
+2026-11-25 제거됐다 — 게이트를 통과한 프레임은 끝까지 추론한다.
 
 ## 3. 파일별 상세
 
@@ -187,14 +183,14 @@ top(프리롤에 이미 손)에서는 무력하고 side(hand 미추론)에서는
   깜빡인 결정적 소수 클래스"(의류 프린트 산탄의 시그니처)를 판정하지만,
   **이 판정으로 표를 몰수하지 않는다** — 몰수 경로는 냉동 실측 열세로
   폐기됐다([07. 배제·폐기 기록](../../docs/07-rejected-and-retired.md)).
-  냉동 `action_frames()`는 별도 방향 구간의 관측으로 행동별 상품 후보를 만든다.
+  냉동 `action_frames()`는 별도 방향 구간의 관측으로 방향별(취출/반납) 상품 후보를 만든다.
 
 트랙 상태의 단일 소유자는 이 모듈이며, 투표 계층은 `track_id`만 들고 다닌다.
 
 ### `voting.py`
 
 **vote_ratio 분모의 단일 정의**(함정 #4)가 이 파일의 첫 계약이다. 모션
-게이트(D6)·조기 종료(D7) 어떤 조합에서도 분모 의미가 바뀌지 않도록,
+게이트(D6)·T2 배치 어떤 조합에서도 분모 의미가 바뀌지 않도록,
 `add_frame()`은 **게이트를 통과해 실제로 추론된 프레임에서만** 호출한다.
 
 분모는 두 모드다(`ratio_denominator`).
@@ -252,40 +248,6 @@ top(프리롤에 이미 손)에서는 무력하고 side(hand 미추론)에서는
 `no_motion_unmeasurable`은 "측정 자체가 불가"(단편 트랙 = 빠른 취출 시그니처)이며,
 후자가 정답 클래스에서 반복되면 `MOTION_UNMEASURABLE=exempt` 승격 근거다.
 
-### `early_termination.py`
-
-무게가 이미 전량 설명됐으면 남은 프레임을 추론하지 않는다(D7). **기본 off**
-(이슈 #22 0805 냉장 20종 실기 강등 — env `MODEL__VISION__EARLY_TERMINATION=1`로
-opt-in).
-
-- **강등 근거 (이슈 #22 0805)**: "현재 후보 창 안의 설명"은 "남은 프레임이
-  판정을 못 바꾼다"의 근거가 되지 못한다 — 정답이 아직 화면에 등장하지 않았을
-  수 있고(2-9: zone3이 top 9컷 처리 후 종료 → 정답 표 0, 프리롤 진열 5표가
-  86×3=258로 Δ-260을 설명해 오과금), 리드 표가 진열·반사광 오검출일 수
-  있다(3-3). 무게 겹침이 흔한 20종 구성에서 이 전제 붕괴가 오판정의 지배
-  원인이었다. 프레임 처리량은 T2 배치 경로(`BATCH_SIZE`/`TENSOR_INPUT`)가
-  대체한다.
-- **전 재고 유일해 게이트** (재활성화 시에도 강제): |delta|를 단일 종 n개로
-  설명하는 (상품, n) 해가 판매중 전 재고에서 정확히 하나이고 그 상품이 현재
-  득표 리드일 때만 종료 — 후보 창 안 유일성은 정보가 아니고, 다품종 조합
-  설명은 종료 근거 자격이 없다(ses-46: 3종 조합 738이 Δ-735를 설명해 종료 →
-  정답 10×2 표 0).
-- **적용 한정 (I15)**: 취출(`delta < 0`) & 비freezer(`profile.early_termination_allowed`)
-  에서만. 반품과 냉동은 후반 프레임 증거가 중요하다.
-- **추론만 중단**한다. 디코드·손 경로·트레이스는 완주해야 하며 그것은 호출측
-  (`service/pipeline.py`) 책임이다 — 이 판정기는 "추론 중단 가능" 불리언만 준다.
-  트레이스 의미가 게이트 조합에 따라 흔들리지 않게 하기 위한 경계다.
-- **이중 기준 금지**: delta 설명 판정은 `judge()`와 동일한
-  `SensorProfile.tolerance_grams` **단일 소스**를 공유하고, 탐색 상한은
-  `StrictWeightMatcher.max_items`를 공유한다. 이 한 줄 때문에 perception이
-  judgment를 import하는 유일한 지점이 된다.
-- 수렴 조건: 1위 득표 ≥ `min_lead_votes`(5), 2위와의 격차 ≥ `lead_margin`(3),
-  손 퇴장 후 `hand_exit_frames`(5)프레임 경과, 그리고 무게 전량 설명.
-- **T1 최적화**: `candidates`를 시퀀스 대신 **지연 콜러블**(`voting.combine`)로
-  받아 값싼 가드를 전부 통과한 뒤에만 평가한다. 반환값이 무조건 `False`인
-  냉동에서 매 추론 프레임 `O(누적 표²)` 결합을 100% 폐기하던 낭비가 사라진다
-  (판정 무변경 — 평가 시점만 늦춤).
-
 ## 4. 계약과 불변식
 
 | # | 계약 | 위반 시 |
@@ -325,21 +287,21 @@ opt-in).
 | `MOTION_EVIDENCE_FLOOR_PX` | 미설정 = 프로파일(냉장 10 / 냉동 12) | 변위 임계 하한 |
 | `MOTION_UNMEASURABLE` / `MOTION_MEASURABLE_MIN_OBS` | `forfeit` / 3 | 측정 불가 클래스 면제 정책 |
 | `HELD_TRACK_DEMOTION` / `HELD_TRACK_MIN_HEAD` | `shadow` / 5 | carried-in 트랙 강등 모드 |
-| `EARLY_TERMINATION` | **false** (이슈 #22 0805 강등) | 조기 종료 opt-in — 켜도 전 재고 유일해 게이트 강제 |
 
-`EarlyTerminationConfig`(5/3/5)와 `MotionEvidence`의 트랙 파라미터(`size_scale`,
+`MotionEvidence`의 트랙 파라미터(`size_scale`,
 `max_jump_px`, `reassoc_*`, `held_min_stream`, `tube_minority_ratio`)는 **env로
 노출되지 않은 코드 상수**다 — 튜닝은 코드 수정 + 테스트 갱신이 함께 가야 한다.
 
+`EARLY_TERMINATION`은 2026-11-25 조기 종료와 함께 제거됐다(기존 `.env`에 남아 있어도 무시된다).
+
 ## 6. 테스트
 
-`tests/test_perception.py` 57건 (클래스 단위).
+`tests/test_perception.py` 50건 (클래스 단위).
 
 | 테스트 클래스 | 건수 | 무엇을 고정하는가 |
 |---|---|---|
 | `TestVoting` | 17 | 분모 = 게이트 통과 프레임 수, 진입 컷이 노이즈를 차단하고 `entry_dropped`로 계상됨, conf 결합 산식(양/단일 카메라·보너스·1.0 clamp·최대 vs 평균), `min_vote_share`의 상대 제거와 0=하위호환, 손 미투표, 위치 계측 신호(head/span/first)와 pos 미제공 시 기본값 |
 | `TestMotionEvidence` | 15 | 정지 클래스 몰수·이동 클래스 통과, 깜빡이는 정지 물체 몰수, zero-bbox 면제, 카메라별 독립 몰수, 몰수된 1위가 share 기준을 오염시키지 않음, 트랙릿 투표(진열 인스턴스만 몰수), G2 재연관(창 안/밖), held 판정의 3요건과 head 정지 트랙 비-held, held shadow/active 차이와 잘못된 모드 거부, `track_detail` 계측 |
-| `TestEarlyTermination` | 7 | 수렴 시 중단, freezer·반품 금지(I15), 손 미퇴장 차단, 설명 불가 delta 차단, 리드 마진 부족 차단, 지연 콜러블이 가드 통과 전 평가되지 않음 |
 | `TestMotionUnmeasurable` | 6 | 기본 `forfeit`에서 단일 관측 트랙 몰수, `exempt`의 면제 범위, "측정된 정지"는 exempt에서도 몰수, 측정 가능 형제가 있는 단편은 계속 몰수, `no_motion_unmeasurable` 라벨, 잘못된 정책 거부 |
 | `TestTubeDiagnostics` | 5 | **튜브 판정이 표를 절대 몰수하지 않음**(계약), 결정적 소수 계측, 근소 열세는 소수 아님, 별개 궤적은 튜브 분리, 같은 프레임 이중 박스 흡수, 증거 미부착 시 `None` |
 | `TestHandWindowRatio` | 4 | 손 활성 프레임만 분모, 손 못 본 카메라의 게이트 폴백, `gate` 모드는 `hand_active` 무시, 잘못된 모드 거부 |

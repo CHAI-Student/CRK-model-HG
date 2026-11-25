@@ -113,7 +113,7 @@ def decode_avi(
             yield first
             yield from gen
         finally:
-            gen.close()  # 조기 종료 시 cv2/subprocess 리소스 즉시 해제
+            gen.close()  # 중도 중단 시 cv2/subprocess 리소스 즉시 해제
 
     return _stream()
 

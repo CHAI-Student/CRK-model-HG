@@ -31,7 +31,7 @@
   판정층은 주어진 득표 순위를 신뢰하며 오검출 억제를 재시도하지 않는다(층별 단일 책임).
 - **금액·재고 계산·영속화**: 정산과 이벤트 기록은 `ledger/`.
 - **정책 결정**: tolerance·게이트 임계는 `core/profiles.py`의 `SensorProfile`이 소유하고,
-  이 계층은 주입받은 값을 쓸 뿐이다(이중 기준 금지 — 조기 종료도 같은 값을 쓴다).
+  이 계층은 주입받은 값을 쓸 뿐이다(이중 기준 금지 — CLOSE 정산도 같은 값을 쓴다).
 - **재시도·타임아웃·I/O**: 세그먼트 타깃 재판정 같은 "언제 다시 부를지"는 `service/`.
 
 ## 2. 구성 파일
@@ -196,9 +196,8 @@ confidence로 최종 선택한다(냉장 기본 경로).
   stage_count·relaxed·no_candidate)에 공유해 multi_tray 채널 판정까지
   일관 적용된다. `MODEL__JUDGMENT__STRICT_COUNT_OCCAM=0` = 구 동작.
 - **tolerance는 인자로 받는다** — `SensorProfile.tolerance_grams` 단일 소스이고,
-  조기 종료(`perception/early_termination.py`)도 같은 함수에 같은 값을 넘긴다.
-  이중 기준이 생기면 "조기 종료는 설명됐다고 판단했는데 judge는 아니라고 하는"
-  모순이 발생한다.
+  CLOSE 정산(`ledger/`)도 같은 프로파일 값을 쓴다. 이중 기준이 생기면 트리거
+  판정과 세션 정산이 같은 delta를 서로 다르게 설명하는 모순이 발생한다.
 
 ## 4. 계약과 불변식
 
@@ -211,7 +210,7 @@ confidence로 최종 선택한다(냉장 기본 경로).
 | I8 | 모든 결과에 `reason` 코드, 미스는 `miss_log` | 사유 없는 판정은 현장에서 디버깅 불가 |
 | I13/D9 | 모호하면 청구하지 않는다 (`weight_only_ambiguous`, ④ 복수 적합 불발) | 과청구 > 미청구가 더 나쁜 실패 |
 | 후보 쇼핑 금지 | conf 하한 미달 시 하위 후보로 내려가지 않고 `None` | 하한 통과 여부가 "청구되는 후보"를 고르게 되면 증거 순위가 무의미해짐 |
-| 단일 tolerance | 임계는 `SensorProfile`에서만 옴 | 조기 종료·판정·정산의 기준 불일치 방지 |
+| 단일 tolerance | 임계는 `SensorProfile`에서만 옴 | 판정·정산의 기준 불일치 방지 |
 | `class_id > 0` | `_product_by_class`가 hand(0)·미매핑(−1)을 정체성 조회에서 배제 | 미매핑 상품 여러 개가 −1로 뭉쳐 하나로 충돌하던 결함 |
 
 ## 5. 설정

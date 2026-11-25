@@ -24,7 +24,7 @@ preview와 달리 **운영 파이프라인이 그 순간 실제로 본 검출**�
   넘어도 여백에서 보이고, 헤더가 bbox 라벨을 가리지 않는다. 프레임 경계는
   회색 테두리로 표시.
 - 헤더: 세션/트리거/존/delta/판정/카메라, 프레임별 POS + INFER n 또는 SKIP
-  (기록이 없는 프레임 = 모션 게이트 스킵 또는 조기 종료 이후)
+  (기록이 없는 프레임 = 모션 게이트 스킵. 구 아카이브는 조기 종료 이후일 수 있음)
 - 크롭 기하: 아카이브의 camera_crops 스탬프(냉장 side=left 등)를 읽어 기록
   당시와 동일한 크롭으로 디코드한다 — 좌표계 무변환 계약의 유지 장치.
 
@@ -453,7 +453,6 @@ def render_trigger(
         template, status_y = _canvas_template(
             header_base + [f"CAM {camera} ({crop})"], decision_origin,
         )
-        ok = False
         try:
             for pos, bundle in enumerate(decode_avi(path, crop=crop)):
                 canvas = _compose_frame(
@@ -462,18 +461,18 @@ def render_trigger(
                     decision_origin,
                 )
                 sink.write(canvas)
-            ok = True
-        except OSError as exc:
-            # 카메라 1개의 디코드/인코드 실패가 나머지 렌더를 막지 않는다
+            sink.close()
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            # 카메라 1개의 디코드/인코드 실패(마무리 인코드 포함)가 나머지
+            # 카메라·트리거 렌더를 막지 않는다
+            sink.abort()
             print(f"  [trig {index}/{camera}] 실패: {exc}", file=sys.stderr)
-        finally:
-            if ok:
-                sink.close()
-            else:
-                sink.abort()
-        if ok:
-            outputs.append(dest)
-            print(f"  [trig {index}/{camera}] -> {dest}")
+            continue
+        except BaseException:
+            sink.abort()
+            raise
+        outputs.append(dest)
+        print(f"  [trig {index}/{camera}] -> {dest}")
     return outputs
 
 

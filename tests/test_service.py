@@ -462,30 +462,6 @@ class TestEndToEnd:
         assert close2["totalPrice"] == 1500
         assert close2["productCount"] == 1
 
-    def test_early_termination_saves_yolo_calls(self, cola):
-        # 기본 off (이슈 #22 0805) — 기제 자체는 env opt-in으로 유지되므로
-        # 명시적으로 켜서 검증한다. 단일 재고(cola)라 유일해 게이트 통과.
-        detector = FakeDetector()
-        svc = make_service(
-            detector,
-            settings=Settings(close_grace_s=0.0, early_termination_enabled=True),
-        )
-        svc.handle_multi_zone(open_payload(cola))
-        svc.handle_trigger(trigger_payload(n_frames=10))
-        svc.process_pending()
-        trace = svc.worker.outcomes[0].trace
-        assert trace.early_terminated  # L2: 증거 수렴 후 추론 중단
-        assert detector.calls < 20  # 전 프레임(10×2) 미만
-
-    def test_early_termination_default_off(self, cola):
-        # 이슈 #22 0805 강등: 기본 Settings에서는 전 프레임 완주
-        detector = FakeDetector()
-        svc = make_service(detector)
-        svc.handle_multi_zone(open_payload(cola))
-        svc.handle_trigger(trigger_payload(n_frames=10))
-        svc.process_pending()
-        assert not svc.worker.outcomes[0].trace.early_terminated
-
     def test_close_after_delivery_reports_no_active_session(self, cola):
         # 확정 결과는 1회 전달, 이후 CLOSE 재폴링은 원본 wire 계약
         # "No active door session to close"(success) — 에지는 이 응답으로
@@ -1055,11 +1031,9 @@ class TestSaveDetectionsTap:
         ])
         store = ActiveProductStore()
         store.update([cola])
-        # 조기 종료 off: top에서 합의가 서면 side가 아예 안 돌아 side ROI
-        # 제외 경로를 검증할 수 없다 — 여기서는 전 카메라 순회 고정.
         return TriggerPipeline(
             detector, {1: REFRIGERATOR}, store,
-            save_detections=save_detections, early_termination_enabled=False,
+            save_detections=save_detections,
             voting_params={"entry_conf_top": 0.5, "entry_conf_side": 0.5},
             camera_crops={"top": "center", "side": "left"},
         )

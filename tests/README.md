@@ -1,7 +1,8 @@
 # 테스트 가이드
 
 이 디렉터리는 CRK-model-HG의 판정·정산 불변식, 장치 연동 계약, 운영 진단 도구를
-검증한다. 2026-08-24 기준 P1 작업 트리에서 **450건**이 통과한다.
+검증한다. 2026-11-25 기준 작업 트리에서 **731건**이 수집되고 706건 통과·25건 skip이다
+(skip은 FastAPI·NumPy·ffmpeg 등 환경 의존 테스트).
 
 ## 삭제 가능성 점검 결과
 
@@ -10,6 +11,13 @@
 
 - 2026-07-30 폐기된 무게 우도와 세션 tray memory의 전용 테스트
   `test_likelihood.py`, `test_tray_memory.py`는 구현 파일과 함께 이미 삭제됐다.
+- 2026-11-25 제거된 조기 종료와 구 냉동 행동별 정산(`freezer_actions`)의 전용 테스트도
+  구현과 함께 삭제됐다(`test_perception.py`의 `TestEarlyTermination`, `test_service.py`·
+  `test_t2_batch.py`의 조기 종료 케이스, `test_freezer_returns.py`의 행동별 재생 케이스,
+  `test_freezer_session_returns.py`의 `legacy_action` 파라미터).
+- 2026-11-25 로드셀 무게 안정화 판단으로 11-18 비전 우선 설계(커밋 4390e7a·8433acf)를
+  되돌리면서 `test_freezer_vision_priority.py`, `test_hand_tracker.py`와 전용 fixture
+  `freezer_cross_floor_20261116_evening.json`을 함께 삭제했다.
 - `test_analyze_cli.py`의 폐기 shadow 필드 입력은 폐기 기능을 테스트하는 것이
   아니다. 과거 세션 아카이브를 새 분석기가 예외 없이 읽는 하위 호환 계약이다.
 - `test_perception.py`의 tube 테스트는 폐기된 tube 다수결 몰수가 아니라 현재 남은
@@ -58,8 +66,9 @@ CI는 FastAPI, NumPy, ffmpeg까지 설치해 환경 의존 테스트가 빠지�
 | `test_analyze_cli.py` | 29 | 운영 아카이브를 배포 후 분석하는 `analyze-sessions`의 정본 동작을 고정 | 청구 정오, 분위수, 개당 잔차, 트랙·held·ghost 계측, X/Y축 후보·왕복 구간·경계와 미기록 구분, 단건/기간 조회, 손상 파일 오류와 구 스키마 관용 파싱. 과거 운영 데이터 호환 때문에 유지한다. |
 | `test_motion_direction.py` | 32 | 동작 방향 진단과 카메라 보정 | 취출/반납·왕복·가림·흔들림, X/Y축·반전·시점별 임계·경계 여유, 투표 무영향 |
 | `test_freezer_camera_views.py` | 14 | 상단 top + 경사 side의 env 배선 | 두 카메라의 ROI·방향·손 검출 실제 파이프라인 기여, 공통 ROI와 side 경계 보정, 내부 ROI off, 냉장 경로 보존, 잘못된 설정 기동 실패 |
-| `test_freezer_returns.py` | 51 | 기존 무게 처리와 과거 기록 호환 | 실측 접촉 패턴과 0→+100→−370의 일반 취출, 경계 미통과·반대 방향의 상품 확인, 미검출/종류 충돌의 검토 유지, 저무게 스킵, 반납 안정화, 두 분석기, 아래 원점 ROI·기록, 과거 저널·YAML 재생 |
-| `test_freezer_return_matching.py` | 37 | 비전 SKU + 실측 delta의 층간 반납 | 실기4세션의 저장 판정 재정산, 등록 무게 편차, 동일 무게의 다른 SKU, 미검출/모호성/안정화 대기, 최종 delta 보존, 다개·여러 출발 층·재취출·이중 차감, 신구 저널·YAML 호환 |
+| `test_freezer_returns.py` | 40 | 냉동 기존 무게 판정 경로 복원 | 실측 접촉 패턴과 0→+100→−370의 일반 취출, 경계 미통과·반대 방향의 상품 확인, 미검출/종류 충돌 반납의 같은 층 무게 차감·다른 층 검토 유지, 저무게 스킵, 반납 안정화, 두 분석기, 아래 원점 ROI·기록, 신규 아카이브의 무게 이벤트·방향 진단 기록(`freezer_actions` 키 미기록) |
+| `test_freezer_return_matching.py` | 48 | 비전 SKU + 실측 delta의 층간 반납 | 실기4세션의 저장 판정 재정산, 등록 무게 편차, 동일 무게의 다른 SKU, 미검출/모호성/안정화 대기, 같은 층 무게 차감(동일 무게 SKU·영상 불일치 거부), 청구 없이 빠진 무게의 review·50g 무시·같은 층 반납 상쇄, 최종 delta 보존, 다개·여러 출발 층·재취출·이중 차감, 신구 저널·YAML 호환 |
+| `test_freezer_session_returns.py` | 41 | 저장 세션 재생으로 냉동 다른 층 반납과 잘못된 상쇄를 검증 | 저장 반납의 SKU·출발 층·실측 무게 보존, 채널 반납의 단일 상품 채널 요건, 동일 무게 중복의 취출 순서 일관성, 혼합 에피소드의 독립 증거 요건과 반납 대기, 미확정·구 기록 반납이 취출을 재사용시키지 않음, refit 대안 득표 요건, 이동 증거 YAML 왕복 |
 | `test_freezer_coordinates.py` | 17 | 냉동 아래 원점 좌표 계약 | top·side 아래쪽 350px와 경계 포함, 손/bbox 보존, 비대칭 Y 경계 통과, X축 보존, 렌더 중심 표시·박스 위치. 픽셀 검증 1건은 numpy 필요 |
 | `test_cross_zone.py` | 28 | 다른 존 영상이 섞여 발생한 오과금을 CLOSE 2차 패스에서 교정 | 시간 앵커, 오염 창, 상호 강등·self-fit·무게 가드, PARTIAL 재판정, 오염 PARTIAL 선택 제거와 정상 동일상품 PARTIAL 보존, 저널 왕복과 무겹침 진단. 승격된 기본 ON 기제이므로 핵심 회귀 테스트다. |
 | `test_frames.py` | 7 | 추론량을 줄이는 모션 게이트가 손 존재 시 증거를 버리지 않도록 검증 | 첫 프레임, 정지/움직임, 손 래치, exit 확인, keepalive, 직전 통과 프레임 기준 비교. 프레임 누락이 판정 누락으로 직결돼 유지한다. |
@@ -71,12 +80,13 @@ CI는 FastAPI, NumPy, ffmpeg까지 설치해 환경 의존 테스트가 빠지�
 | `test_ledger.py` | 28 | 트리거별 판정을 세션 단위 청구로 바꾸는 정산기를 검증 | 배리어, 멱등 확정, 반품·교차존·net delta, error policy, 냉동 재해석, 비전 조합 가드, 잠정 집계의 결제 차단. 금액 확정 안전성 때문에 유지한다. |
 | `test_lifecycle.py` | 33 | 장시간 운영에서 상태·파일·메모리가 무한히 자라지 않도록 검증 | 결과 deque 상한, 세션 prune, 저널 일자 회전·보존·replay, 동시 poll/drain, cabinet/profile 및 env 설정 배선. 24h soak 전 자동 방어선이다. |
 | `test_ops_logging.py` | 4 | 현장 장애 분석에 필요한 CLOSE 구조화 로그를 보장 | 정상·오류 세션 로그, 재폴링 중복 억제, 존별 무게·트리거 수·notes 포함. 기능 결과가 같아도 운영 관측성이 사라지는 회귀를 막는다. |
-| `test_perception.py` | 60 | 검출 결과를 판정 후보로 축약하는 지각 계층을 검증 | 투표 분모·가중 confidence, 조기 종료 안전 조건, 모션 변위·held shadow, tube 진단 무개입, side hand, hand-window 분모, 측정 불가 클래스 정책. 실기 오판의 주요 원인층이다. |
+| `test_perception.py` | 50 | 검출 결과를 판정 후보로 축약하는 지각 계층을 검증 | 투표 분모·가중 confidence, 모션 변위·held shadow, tube 진단 무개입, side hand, hand-window 분모, 측정 불가 클래스 정책. 실기 오판의 주요 원인층이다. |
 | `test_product_mapping.py` | 17 | Node 상품 필드를 YOLO class ID로 안정적으로 변환 | camel/snake 별칭, 영문명 대소문자 폴백, 미매핑 `-1`, OPEN 로그와 HTTP E2E. 매핑 실패로 allowlist가 비는 사고를 방지한다. |
 | `test_render_cli.py` | 12 | 저장된 bbox를 당시 영상 기하에 맞게 재현하는 `render-session`을 검증 | mp4/JPG 생성, 장치 경로 remap, 누락 자료 안내, crop 원점, 그리기 primitive, 구 `kept=false` 레코드 제외. `ffmpeg`/`numpy` 환경 의존이다. |
-| `test_service.py` | 44 | 7단계 파이프라인과 서비스 파사드의 통합 동작을 검증 | 멀티트레이, 전체 세션 E2E, snapshot fail-closed, 중복·저무게·예외, 허용 클래스, 필터·재시도, 저널 replay, frame detection 저장, env 배선. 계층 간 연결 회귀를 잡는다. |
-| `test_session_archive.py` | 30 | 오판정 사후 재구성용 세션 아카이브를 검증 | FINALIZED/ERROR 1회 저장, 보존기간, YAML→JSON 폴백, 저널 신규·누락 필드 호환, 정답 라벨 CLI, frame detection 포함. 운영 증거 보존 계약이다. |
-| `test_t2_batch.py` | 19 | Jetson 지연 개선용 마이크로배치·프리페치가 판정을 바꾸지 않도록 검증 | 배치/비배치 결과 등가성, 잔여 배치, 예외·close 전파, 정적 batch 엔진, stream open 시점, tensor input 및 env 배선. 기본 OFF여도 재활성화 가능한 현행 코드라 유지한다. |
+| `test_render_cli_failures.py` | 2 | render CLI 실패 격리 | 마무리 인코드(`sink.close`) 실패 시 해당 카메라만 건너뛰고 나머지 출력 유지, 예상 밖 예외는 sink 정리(`abort`) 후 전파. `ffmpeg`/`numpy` 없이 실행된다. |
+| `test_service.py` | 48 | 7단계 파이프라인과 서비스 파사드의 통합 동작을 검증 | 멀티트레이, 전체 세션 E2E, snapshot fail-closed, 중복·저무게·예외, 허용 클래스, 필터·재시도, 저널 replay, frame detection 저장, env 배선. 계층 간 연결 회귀를 잡는다. |
+| `test_session_archive.py` | 30 | 오판정 사후 재구성용 세션 아카이브를 검증 | FINALIZED/ERROR 1회 저장, 보존기간, YAML→JSON 폴백, 저널 신규·누락 필드 호환, 냉동 이동 증거의 표준 YAML 저장과 구 `!!python/tuple` 아카이브 읽기, 정답 라벨 CLI, frame detection 포함. 운영 증거 보존 계약이다. |
+| `test_t2_batch.py` | 18 | Jetson 지연 개선용 마이크로배치·프리페치가 판정을 바꾸지 않도록 검증 | 배치/비배치 결과 등가성, 잔여 배치, 예외·close 전파(앞 카메라 예외 시 미소비 side 프리페처 정리), 정적 batch 엔진, stream open 시점, tensor input 및 env 배선. 기본 OFF여도 재활성화 가능한 현행 코드라 유지한다. |
 | `test_wire_contract.py` | 6 | Node·카메라가 의존하는 HTTP 필드 계약을 별도 고정 | `/trigger` 성공·중복, `change_timestamps`, 비디오 파일 사전 검증, `/api/health` 필수 필드. 내부 E2E와 목적이 달라 별도 유지한다. |
 
 ## 테스트가 겹쳐 보일 때의 구분

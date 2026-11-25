@@ -18,7 +18,6 @@ predict 비용의 ~72%가 CPU(파이썬 letterbox/BGR→RGB/HWC→CHW//255 + NMS
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import replace
 
 from crk_model.perception.detector import HAND_CLASS_ID, Detection
 
@@ -34,7 +33,6 @@ class UltralyticsEngineDetector:
         hand_class_id: int = HAND_CLASS_ID,
         device: int | str = 0,
         batch: int = 1,
-        tracker: str = "off",
         # detect_batch의 패딩 목표 (D8 1안: 고정 배치 + 패딩, dynamic batch의
         # TRT 프로파일 재선택·할당자 파편화 리스크 회피). 1이면 detect_batch도
         # 들어온 개수 그대로 스택한다 (동적 엔진 전용).
@@ -48,82 +46,6 @@ class UltralyticsEngineDetector:
         self._hand_class = hand_class_id
         self._device = device
         self._batch = max(int(batch), 1)
-        if tracker not in ("off", "bytetrack", "botsort"):
-            raise ValueError(f"Unsupported tracker: {tracker}")
-        self._tracker = tracker
-        self._tracking_count = 0
-        self._tracking_raw: list[list[Detection]] = []
-        self._tracking_update = None
-        if tracker != "off":
-            # model.track가 등록하는 callback보다 먼저 실행한다. 원본 저신뢰
-            # 상품 검출은 보존하고, 패딩 영상은 tracker.update에 들어가지 않는다.
-            self._model.add_callback("on_predict_postprocess_end", self._capture_tracking_input)
-
-    def begin_clip(self, camera: str) -> None:
-        """고정 top/side의 새 촬영 영상을 시작한다. 영상 안에서는 ID를 유지한다.
-
-        엔진 한 개로 top 전체, side 전체를 순서대로 추론하므로 새 영상의 첫
-        프레임 전에만 추적기를 비운다. 물리적인 카메라 전환 신호는 사용하지
-        않는다. 같은 손 ID 숫자도 (camera, 이번 영상) 안에서만 의미가 있다.
-        """
-        predictor = getattr(self._model, "predictor", None)
-        for tracker in getattr(predictor, "trackers", ()):
-            tracker.reset()
-        self._tracking_raw = []
-
-    def _capture_tracking_input(self, predictor) -> None:
-        if getattr(predictor.args, "mode", None) != "track":
-            return
-        # 공식 track callback을 실제 프레임에만 실행한 뒤 결과 개수를 복원한다.
-        # predictor의 출력/저장 루프는 엔진 batch 크기만큼 결과를 기대한다.
-        callbacks = predictor.callbacks["on_predict_postprocess_end"]
-        for callback in list(callbacks):
-            function = getattr(callback, "func", callback)
-            if (getattr(function, "__module__", "") == "ultralytics.trackers.track"
-                    and getattr(function, "__name__", "") == "on_predict_postprocess_end"):
-                self._tracking_update = callback
-                callbacks.remove(callback)
-        if self._tracking_update is None:
-            raise RuntimeError("Unsupported Ultralytics tracking callback API")
-        padding = predictor.results[self._tracking_count:]
-        predictor.results = predictor.results[:self._tracking_count]
-        self._tracking_raw = [self._to_detections(r) for r in predictor.results]
-        # 손만 tracker에 전달한다. 상품과 손이 겹쳐도 같은 ID를 서로
-        # 빼앗지 않으며 상품의 기존 투표/튜브 경로는 원본 검출을 사용한다.
-        predictor.results = [r[[i for i, d in enumerate(raw) if d.is_hand]]
-                             for r, raw in zip(predictor.results, self._tracking_raw, strict=True)]
-        try:
-            self._tracking_update(predictor)
-        finally:
-            predictor.results.extend(padding)
-
-    def _infer(self, source, count: int, **kwargs):
-        if self._tracker == "off":
-            return self._model.predict(source, **kwargs)
-        self._tracking_count = count
-        self._tracking_raw = []
-        return self._model.track(
-            source, persist=True, tracker=f"{self._tracker}.yaml", **kwargs,
-        )
-
-    def _tracked_detections(self, results, count: int) -> list[list[Detection]]:
-        if self._tracker == "off":
-            return [self._to_detections(r) for r in results[:count]]
-        if len(self._tracking_raw) != count or len(results) < count:
-            raise RuntimeError("Ultralytics tracking callback did not preserve real frames")
-        output = []
-        for raw, result in zip(self._tracking_raw, results[:count], strict=True):
-            hands = [d for d in self._to_detections(result) if d.is_hand and d.track_id is not None]
-            linked = []
-            for detection in raw:
-                if detection.is_hand and hands:
-                    best = max(hands, key=lambda d: _iou(d.bbox, detection.bbox))
-                    if _iou(best.bbox, detection.bbox) >= .5:
-                        detection = replace(detection, track_id=best.track_id)
-                        hands.remove(best)
-                linked.append(detection)
-            output.append(linked)
-        return output
 
     @property
     def class_names(self) -> dict:
@@ -152,8 +74,8 @@ class UltralyticsEngineDetector:
             if not classes:
                 return []
         full = getattr(frame, "full", frame)  # FrameBundle 언랩
-        results = self._infer(
-            full, 1,
+        results = self._model.predict(
+            full,
             imgsz=self._imgsz,
             conf=self._conf,
             max_det=self._max_det,
@@ -161,7 +83,7 @@ class UltralyticsEngineDetector:
             classes=classes,
             verbose=False,
         )
-        return self._tracked_detections(results, 1)[0]
+        return self._to_detections(results[0])
 
     def detect_batch(
         self, frames: Sequence, allowed_class_ids: Sequence[int] | None = None
@@ -220,8 +142,8 @@ class UltralyticsEngineDetector:
         # BGR→RGB(채널 역순) + BCHW + 0~1 — 엔진 정밀도에 맞춘 dtype
         # 캐스팅은 ultralytics predictor가 처리한다 (float32로 넘긴다).
         t = t.permute(0, 3, 1, 2)[:, [2, 1, 0], :, :].contiguous().float().div_(255.0)
-        results = self._infer(
-            t, n,
+        results = self._model.predict(
+            t,
             imgsz=self._imgsz,
             conf=self._conf,
             max_det=self._max_det,
@@ -229,7 +151,7 @@ class UltralyticsEngineDetector:
             classes=classes,
             verbose=False,
         )
-        return self._tracked_detections(results, n)
+        return [self._to_detections(r) for r in results[:n]]  # 패딩 결과 폐기
 
     def _to_detections(self, result) -> list[Detection]:
         detections: list[Detection] = []
@@ -245,16 +167,6 @@ class UltralyticsEngineDetector:
                     confidence=float(box.conf[0]),
                     is_hand=(cls == self._hand_class),
                     bbox=(x1, y1, x2, y2),
-                    track_id=(int(box.id[0]) if getattr(box, "id", None) is not None else None),
                 )
             )
         return detections
-
-
-def _iou(a, b) -> float:
-    intersection = max(0., min(a[2], b[2]) - max(a[0], b[0])) * max(
-        0., min(a[3], b[3]) - max(a[1], b[1]),
-    )
-    area = max(0., a[2] - a[0]) * max(0., a[3] - a[1])
-    area += max(0., b[2] - b[0]) * max(0., b[3] - b[1]) - intersection
-    return intersection / area if area > 0 else 0.

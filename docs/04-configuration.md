@@ -118,7 +118,6 @@ flowchart TD
 | `HAND_CONFIDENCE_THRESHOLD` | `0.5` (0805 상향) | `0.30` |
 | `SIDE_HAND_ENABLED` / 전용 conf | `1` / `0.5` (0805 — side 손 근접 게이팅) | (미기재 → 기본 off) |
 | `FREEZER_ROI_*` | 미사용 (dual 레이아웃) | `upper` / `350.0` |
-| `EARLY_TERMINATION` | `0` — 이슈 #22 0805 강등 (켜면 냉장에서 동작) | `0` — freezer 프로파일에서는 켜도 I15로 항상 비활성 |
 
 ---
 
@@ -233,11 +232,13 @@ dataclass 기본값과 `from_env()` 기본값이 일치함을 확인한 값입�
 | `MODEL__VISION__SIDE_HAND_ENABLED` | `0` | side 카메라 hand 추론 (이슈 #18). 켜면 side allowlist에 hand(0)이 포함되고 side에서도 래치·hand_path 필터가 작동해 정지 진열 오투표를 거릅니다. **원본에 없는 신설 동작이라 코드 기본 off. `dual_top_proxy`(냉동)에서는 의미가 다르니 냉장 전용으로 켜십시오** — 냉장 템플릿은 0805부터 on(전용 conf `0.5`) |
 | `MODEL__VISION__SIDE_HAND_CONFIDENCE_THRESHOLD` | `-1.0` | side 전용 손 conf 하한. side는 손 1건이 hand_path를 무장시키는 방아쇠라 top보다 조일 수 있게 분리. **음수 = `HAND_CONFIDENCE_THRESHOLD` 상속** |
 
-### 4.6 모션 게이트 · 변위 증거 · 조기 종료
+### 4.6 모션 게이트 · 변위 증거
+
+`MODEL__VISION__EARLY_TERMINATION`(조기 종료, D7)은 2026-11-25 제거됐습니다. 기존 `.env`에
+남아 있어도 무시됩니다 — 처리량은 4.13의 배치·텐서 입력 경로로 확보합니다.
 
 | 환경변수 | 기본값 | 의미 / 언제 만지나 |
 | --- | --- | --- |
-| `MODEL__VISION__EARLY_TERMINATION` | `0` | 조기 종료 (D7) — **기본 off** (이슈 #22 0805 냉장 20종 실기: 정답 등장 전에 프리롤 진열·반사광 표가 delta를 설명해 종료되는 오과금이 지배적 — 2-9는 top 9컷 처리 후 종료로 정답 표 0). 처리량은 T2 배치(`BATCH_SIZE`/`TENSOR_INPUT`)로 확보. 켜면 **전 재고 유일해 게이트**(단일 종 (상품,n) 해 유일 + 득표 리드 일치)가 강제되고, removal & 비freezer에서만 유효(freezer는 I15로 항상 비활성) |
 | `MODEL__VISION__MOTION_GATE_THRESHOLD` | (프로파일) | 모션 게이트 변화 픽셀 비율 임계 **오버라이드**. 비우면 프로파일 기본(냉장 0.02 / 냉동 0.005). 올리면 스킵 증가(처리 절약), 내리면 거의 전 프레임 추론 |
 | `MODEL__VISION__MOTION_GATE_KEEPALIVE` | (프로파일) | 연속 스킵 상한 **오버라이드**. 비우면 냉장 8 / 냉동 4. 스킵이 길어져도 이 간격마다 강제 추론합니다 |
 | `MODEL__VISION__MOTION_EVIDENCE` | `1` | 모션 변위 증거 몰수. 클래스 트랙의 누적 변위가 `max(floor, bbox×0.10)`을 못 넘으면 그 카메라의 표를 결합에서 몰수 — "집어간 상품은 움직이고 진열 상품은 안 움직인다"의 직접 검사. `0`=롤백 |
@@ -370,16 +371,15 @@ soft 페널티로 보정합니다. **Phase 3 승격 완료(2026-07-21) — 기�
 | `segment_step_grams` | `5.0` | `20.0` | 냉장은 5g 양자화 와이어에서 스텝이 5g 배수로만 옴. 냉동은 컴프레서 사이클·드리프트의 가짜 세그먼트 방지 |
 | `motion_gate_threshold` | `0.02` | `0.005` | 냉동은 김서림·AE 스윙 때문에 보수적으로 낮게 — 스킵 이득이 0에 수렴해도 정확도 무손실(fail-safe) |
 | `motion_gate_keepalive` | `8` | `4` | 연속 스킵 시 강제 추론 간격 |
-| `early_termination_allowed` | `True` | `False` | 냉동·반품에는 조기 종료 금지 (I15). 반품은 delta 부호로 별도 차단 |
 | `motion_evidence_floor_px` | `10.0` | `12.0` | 냉동은 김서림·AE 스윙 노이즈 때문에 +2px 보수적 |
 
 **왜 env가 아닌가**: 이 값들은 센서·냉기의 **물리**에서 나온 상수이고 판정 기준선
 그 자체입니다. 배포 설정으로 흔들리면 기기마다 판정 기준이 달라져 아카이브 간
 비교와 사후 재구성이 성립하지 않습니다 (원칙 ③).
 
-`judge()`와 조기 종료가 **같은 `tolerance_grams` 하나**를 공유한다는 점도
-불변식입니다 — 이중 기준을 만들면 "판정은 통과했는데 조기 종료가 먼저 끊는"
-모순이 생깁니다.
+`judge()`와 CLOSE 정산이 **같은 `tolerance_grams` 하나**를 공유한다는 점도
+불변식입니다 — 이중 기준을 만들면 트리거 판정과 세션 정산이 같은 delta를 서로
+다르게 설명하는 모순이 생깁니다.
 
 ---
 

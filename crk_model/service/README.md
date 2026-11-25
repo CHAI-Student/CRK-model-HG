@@ -167,22 +167,22 @@ CLOSE 재폴링이 재계산돼 다른 결과를 낼 수 있어, 현재+최근 �
 
 **배치·프리페치·텐서 입력이 판정을 바꿀 수 없는 이유.** `_run_vision` 안에
 `consume(camera, pos, raw, latch)` **단일 경로**가 있고, 프레임별 루프와 배치
-루프가 모두 이 함수를 호출한다. 필터 → 기록 → 변위 증거 → 투표 → 손 래치 →
-조기 종료의 순서와 의미가 양쪽에서 동일하다.
+루프가 모두 이 함수를 호출한다. 필터 → 기록 → 변위 증거 → 투표 → 손 래치의
+순서와 의미가 양쪽에서 동일하다.
 
 | 스위치 | 경로 | 동등성 장치 |
 |---|---|---|
 | 기본 (`BATCH_SIZE=1`, `TENSOR_INPUT=0`) | 프레임별 `detector.detect` | — |
 | `TENSOR_INPUT=1` | `detect_batch([frame])` (1프레임 배치) | 같은 `consume()` |
-| `BATCH_SIZE=N>1` | 게이트 통과 프레임 N장 모아 `detect_batch` 1회 | 배치 결과를 **프레임 순서대로** 순차 `consume()`. 중간에 조기 종료가 발동하면 **잔여 결과를 폐기**해 투표 누적이 비배치와 같아진다(비용은 이미 지불, `yolo_calls`는 소비분만 집계) |
+| `BATCH_SIZE=N>1` | 게이트 통과 프레임 N장 모아 `detect_batch` 1회 | 배치 결과를 **프레임 순서대로** 순차 `consume()`해 투표 누적이 비배치와 같다. 잔여분은 루프 끝에서 flush한다 |
 | `PREFETCH=N>0` | 카메라 스트림을 트리거 시작 시점에 **함께** 열어 top 추론 중 side 디코드를 은닉 | 기본값은 카메라 차례에 여는 현행 동작 유지 — `LazyAviFrames.__getitem__`이 곧 ffmpeg spawn이라 오픈 시점이 곧 동작이다 |
 | 검출기가 `detect_batch`를 제공하지 않음 | 자동으로 프레임별 경로 (duck-typing) | 기존 페이크·구현 무변경 |
 
 배치의 알려진 트레이드오프: 대기 중에는 손 래치(I16) 갱신이 최대 `batch_size-1`
 프레임 지연된다 — keepalive가 강제 추론 상한이라 위험 창은 유계이나, 승격 전
 재생 검증(과금 diff)이 조건이다. 리소스 정리는 2중으로, 카메라별 `finally`가
-프레임 이터레이터를 닫고(조기 종료 시 ffmpeg/cv2 즉시 해제) 바깥 `finally`가
-순회하지 않은 카메라의 프리페처 스레드까지 멈춘다.
+프레임 이터레이터를 닫고(예외로 중단 시 ffmpeg/cv2 즉시 해제) 바깥 `finally`가
+앞 카메라 예외로 순회하지 않은 카메라의 프리페처 스레드까지 멈춘다.
 
 **트레이스(I8) 구성.** `TriggerTrace`는 아카이브·`analyze-sessions`의 1차 자료다.
 
@@ -190,7 +190,7 @@ CLOSE 재폴링이 재계산돼 다른 결과를 낼 수 있어, 현재+최근 �
 |---|---|
 | `processed_frames` / `gate_skipped_frames` | 카메라별 추론 프레임 수 / 게이트 스킵 수 |
 | `yolo_calls` | `consume()` 실행 횟수 = 실제 소비한 추론 프레임 수 |
-| `early_terminated` / `reason_codes` | 조기 종료 여부 / 위 표의 경로 코드 목록 |
+| `reason_codes` | 위 표의 경로 코드 목록 |
 | `vote_summary` | `classes`(클래스별 득표·탈락 사유), `filtered_out_by_camera`, `filter_drops_by_stage`, `entry_dropped_by_camera`, `motion_evidence`, `held_shadow`, `tube_diag`(+`tubes`), `ratio_denominator`(기본 `gate`가 아닐 때만) |
 | `frame_detections` | `save_detections` 시 프레임별 bbox (아래) |
 | `camera_crops` | `frame_detections`의 좌표계 스탬프 |
@@ -333,14 +333,15 @@ top의 축/방향/최소 이동량, 카메라별 ROI 유지 방향, 위 공통 �
 `freezer_return`에 반납 방향 후보(없으면 전체 영상 후보), 무게 안정 여부와 증거 출처를
 보존한다. CLOSE는 비전으로 같은 SKU의 앞선 취출을 찾고, 등록 무게 대신 취출 실측 delta로
 반납 수량을 검증한다. 후보 누락/모호/안정화 대기는 다른 SKU를 대신 지우지 않고 검토로 남긴다.
-이전 `freezer_actions` 형식과 `freezer_return` 없는 구 기록은 기존 의미대로 재생한다.
+`freezer_return` 없는 구 기록은 기존 의미대로 재생한다. 2026-11-12 무렵의 구 행동별 정산
+기록에 남은 `freezer_actions` 키는 무시되고 일반 순 무게 경로로 재생된다.
 
 ## 6. 테스트
 
 | 테스트 파일 | 무엇을 고정하는가 |
 |---|---|
-| `tests/test_service.py` (42건) | 멀티트레이 판정(동시 2트레이 과금, 동일 상품 병합, #16 표 지배 회복, near-band distractor 회복, 고유 PARTIAL 과금, 상호 중복 PARTIAL 미과금, 단일 이벤트 레거시 경로) · E2E(OPEN→trigger→CLOSE, 조기 종료 절감, 확정 후 CLOSE의 "활성 세션 없음", 재폴링 로그 1회, 연속 세션 독립, ERROR 세션의 다음 OPEN 복구) · allowlist(top=상품+hand / side=상품만, side_hand 옵트인, -1 센티널 배제) · 가드(빈 allowlist fail-closed, last_valid 폴백, 저무게 스킵의 YOLO 0회, 예외의 error 이벤트화, 중복 드롭, **기동 프로브 fail-fast**) · 저널 재생 정산 등가성 · `vision_top_not_billed` 관측 · 필터 체인 배선 · `_segment_target_retry` 3케이스 · `save_detections` 탭(기본 off, 기여 검출만, env 배선) |
-| `tests/test_t2_batch.py` (19건) | **배치 동등성**(batch4 == 비배치, 잔여분 flush, `detect_batch` 없으면 무시, 배치 중간 조기 종료 동등) · `PrefetchFrames`(순서 보존, 프레임 이후 예외 전파, close 전파) · 프리페치 판정 동등성과 미소비 카메라 정리 · **스트림 오픈 시점 계약**(기본은 카메라 차례, 프리페치는 시작 시 전 카메라) · `TENSOR_INPUT` 단독 스위치 · 정적 batch 엔진 어댑터 계약(단일 detect의 배치 위임, non-square 예외/폴백, 빈 allowlist가 predict 없이 반환) · env 배선 |
+| `tests/test_service.py` (48건) | 멀티트레이 판정(동시 2트레이 과금, 동일 상품 병합, #16 표 지배 회복, near-band distractor 회복, 고유 PARTIAL 과금, 상호 중복 PARTIAL 미과금, 단일 이벤트 레거시 경로) · E2E(OPEN→trigger→CLOSE, 확정 후 CLOSE의 "활성 세션 없음", 재폴링 로그 1회, 연속 세션 독립, ERROR 세션의 다음 OPEN 복구) · allowlist(top=상품+hand / side=상품만, side_hand 옵트인, -1 센티널 배제) · 가드(빈 allowlist fail-closed, last_valid 폴백, 저무게 스킵의 YOLO 0회, 예외의 error 이벤트화, 중복 드롭, **기동 프로브 fail-fast**) · 저널 재생 정산 등가성 · `vision_top_not_billed` 관측 · 필터 체인 배선 · `_segment_target_retry` 3케이스 · `save_detections` 탭(기본 off, 기여 검출만, env 배선) |
+| `tests/test_t2_batch.py` (18건) | **배치 동등성**(batch4 == 비배치, 잔여분 flush, `detect_batch` 없으면 무시) · `PrefetchFrames`(순서 보존, 프레임 이후 예외 전파, close 전파) · 프리페치 판정 동등성과 앞 카메라 예외 시 미소비 카메라 정리 · **스트림 오픈 시점 계약**(기본은 카메라 차례, 프리페치는 시작 시 전 카메라) · `TENSOR_INPUT` 단독 스위치 · 정적 batch 엔진 어댑터 계약(단일 detect의 배치 위임, non-square 예외/폴백, 빈 allowlist가 predict 없이 반환) · env 배선 |
 | `tests/test_ops_logging.py` (4건) | CLOSE 확정 시 `[OPS][CLOSE]` 요약 1줄 + 존별 줄, **재폴링 3회에도 요약 1회 유지**, ERROR 세션의 `[OPS][CLOSE_ERROR]` 1회, 존 바스켓의 weight_delta·trigger_count·notes |
 | `tests/test_frames_streaming.py` 중 `TestPipelineWithGeneratorFrames` | 파이프라인이 dict-of-list뿐 아니라 **dict-of-generator** frames로도 동작하고, 스트림을 정확히 1회만 순회 |
 | `tests/test_product_mapping.py` 중 `TestOpenMappingLog` | OPEN 로그의 `mapped=X/Y unmapped=[...]` 형식 |
