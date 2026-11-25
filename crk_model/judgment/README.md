@@ -239,9 +239,10 @@ confidence로 최종 선택한다(냉장 기본 경로).
 
 **env로 노출되지 않은 코드 상수**: `tolerance_grams`·`count_gate`·
 `min_weight_change_grams`(전부 `core/profiles.py`의 프로파일 상수),
-`StrictWeightMatcher(max_items=6, max_kinds=3)`, `relax_factor=2.0`,
-`detected_single`의 `tolerance_factor=3.0`, `FreezerVisionFirst`의
-`max_kinds=4`·`identity_pool=6`·`max_total_items=12`.
+`StrictWeightMatcher(max_items=6, max_kinds=3)`, `RelaxedStrategy._RELAX_FACTOR=2.0`,
+`detected_single`의 `_TOLERANCE_FACTOR=3.0`, `FreezerVisionFirst`의
+`_MAX_KINDS=4`·`_IDENTITY_POOL=6`·`_MAX_TOTAL_ITEMS=12` (2026-11-25 아무도 넘기지 않던
+생성자 인자를 클래스 상수로 바꿨다. 값은 같다).
 
 ## 6. 테스트
 
@@ -280,7 +281,7 @@ confidence로 최종 선택한다(냉장 기본 경로).
    고르는 전략이라면 `precondition`에 `ctx.profile.weight_is_discriminative`를
    반드시 넣어야 한다 — 빠뜨리면 냉동에서 178g 사건 계열이 재발한다.
 3. **tolerance를 로컬 상수로 만들지 말 것.** 항상 `ctx.profile`에서 받고,
-   완화가 필요하면 배수(`relax_factor`, `tolerance_factor`)로 표현해 단일 소스
+   완화가 필요하면 배수(`_RELAX_FACTOR`, `_TOLERANCE_FACTOR`)로 표현해 단일 소스
    추적이 유지되게 한다.
 4. **conf 하한에서 `continue`하지 말 것.** 하한 미달은 `return None`이다.
    하위 후보로 내려가면 "하한을 통과한 후보"가 청구 대상이 되어 증거 순위가

@@ -5,29 +5,26 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field
+from collections.abc import Callable
+from dataclasses import MISSING, dataclass, field, fields
+from typing import Any
 
 from crk_model.core.policy import ErrorSessionPolicy
 
+# env 파서 공통 시그니처: (env 키, 필드 기본값) -> 값. 기본값은 Settings 필드
+# 기본값이 단일 소스 — from_env가 dataclass 필드에서 꺼내 넘긴다.
+_Parser = Callable[[str, Any], Any]
 
-def _env_float(key: str, default: float) -> float:
+
+def _env_float(key: str, default: float | None) -> float | None:
+    # 미설정/빈 문자열 → default (Optional 필드는 default=None이라 None)
     raw = os.environ.get(key)
     return float(raw) if raw else default
 
 
-def _env_int(key: str, default: int) -> int:
+def _env_int(key: str, default: int | None) -> int | None:
     raw = os.environ.get(key)
     return int(raw) if raw else default
-
-
-def _env_opt_float(key: str) -> float | None:
-    raw = os.environ.get(key)
-    return float(raw) if raw not in (None, "") else None
-
-
-def _env_opt_int(key: str) -> int | None:
-    raw = os.environ.get(key)
-    return int(raw) if raw not in (None, "") else None
 
 
 def _env_bool(key: str, default: bool) -> bool:
@@ -37,9 +34,21 @@ def _env_bool(key: str, default: bool) -> bool:
     return raw.strip().lower() in ("1", "true", "yes", "on")
 
 
-def _env_zones(key: str) -> tuple[int, ...]:
-    raw = os.environ.get(key, "")
+def _env_str(key: str, default: str) -> str:
+    # 미설정일 때만 default — 빈 문자열도 그대로 채택 (예: 아카이브 경로 ""=비활성)
+    return os.environ.get(key, default)
+
+
+def _env_zones(key: str, default: tuple[int, ...]) -> tuple[int, ...]:
+    raw = os.environ.get(key)
+    if not raw:
+        return default
     return tuple(int(z) for z in raw.split(",") if z.strip())
+
+
+def _env_error_policy(key: str, default: ErrorSessionPolicy) -> ErrorSessionPolicy:
+    # 미설정일 때만 default — 빈 문자열은 그대로 enum 변환되어 ValueError.
+    return ErrorSessionPolicy(os.environ.get(key, default.value))
 
 
 _VALID_CABINET_TYPES = ("refrigerated", "freezer")
@@ -59,6 +68,11 @@ def _env_choice(key: str, default: str, valid: tuple[str, ...]) -> str:
     return normalized
 
 
+def _choice(*valid: str) -> _Parser:
+    """허용값을 묶은 `_env_choice` 파서 (_ENV_FIELDS용)."""
+    return lambda key, default: _env_choice(key, default, valid)
+
+
 def _env_cabinet_type(key: str, default: str) -> str:
     raw = os.environ.get(key)
     if not raw:
@@ -70,6 +84,120 @@ def _env_cabinet_type(key: str, default: str) -> str:
         # 프로파일로 동작하는 사고 재발 방지).
         raise ValueError(f"Invalid cabinet type: {raw}")
     return normalized
+
+
+# Settings 필드명 → (env 키, 파서). 기본값은 여기 두지 않는다 (필드 기본값이 단일
+# 소스). 순서 = from_env 평가 순서(구 from_env 인자 순서 그대로) — 잘못된 값이
+# 여럿이면 앞선 항목의 예외가 난다. 여기 없는 필드는 env로 읽지 않는다.
+_ENV_FIELDS: dict[str, tuple[str, _Parser]] = {
+    "close_timeout_s": ("MODEL__CLOSE__BARRIER_TIMEOUT_S", _env_float),
+    "close_grace_s": ("MODEL__CLOSE__GRACE_S", _env_float),
+    "worker_stall_timeout_s": ("MODEL__CLOSE__WORKER_STALL_TIMEOUT_S", _env_float),
+    "close_vision_combo": ("MODEL__CLOSE__VISION_COMBO", _env_bool),
+    "close_combo_min_vote_ratio": ("MODEL__CLOSE__COMBO_MIN_VOTE_RATIO", _env_float),
+    "close_combo_min_conf": ("MODEL__CLOSE__COMBO_MIN_CONF", _env_float),
+    "close_combo_session_guard": ("MODEL__CLOSE__COMBO_SESSION_GUARD", _env_bool),
+    "close_combo_override_max_conf": ("MODEL__CLOSE__COMBO_OVERRIDE_MAX_CONF", _env_float),
+    "close_ambiguous_runner_up_margin": ("MODEL__CLOSE__AMBIGUOUS_RUNNER_UP_MARGIN", _env_float),
+    "batch_size": ("MODEL__VISION__BATCH_SIZE", _env_int),
+    "prefetch_depth": ("MODEL__VIDEO__PREFETCH", _env_int),
+    "tensor_input": ("MODEL__VISION__TENSOR_INPUT", _env_bool),
+    "freezer_zones": ("MODEL__ZONES__FREEZER", _env_zones),
+    "cabinet_type": ("MODEL__MACHINE__CABINET_TYPE", _env_cabinet_type),
+    "error_policy": ("MODEL__SESSION__ERROR_POLICY", _env_error_policy),
+    "idempotency_ttl_s": ("MODEL__TRIGGER__IDEMPOTENCY_TTL_S", _env_float),
+    "outcomes_keep": ("MODEL__TRIGGER__OUTCOMES_KEEP", _env_int),
+    "keep_sessions": ("MODEL__LEDGER__KEEP_SESSIONS", _env_int),
+    "journal_retention_days": ("MODEL__LEDGER__JOURNAL_RETENTION_DAYS", _env_int),
+    "session_archive_dir": ("MODEL__SESSION__ARCHIVE_DIR", _env_str),
+    "session_archive_retention_days": ("MODEL__SESSION__ARCHIVE_RETENTION_DAYS", _env_int),
+    "save_detections": ("MODEL__SESSION__SAVE_DETECTIONS", _env_bool),
+    "top_confidence_threshold": ("MODEL__VISION__TOP_CONFIDENCE_THRESHOLD", _env_float),
+    "side_confidence_threshold": ("MODEL__VISION__SIDE_CONFIDENCE_THRESHOLD", _env_float),
+    "min_vote_ratio": ("MODEL__VISION__MIN_VOTE_RATIO", _env_float),
+    "min_vote_count": ("MODEL__VISION__MIN_VOTE_COUNT", _env_int),
+    "vote_ratio_denominator": (
+        "MODEL__VISION__VOTE_RATIO_DENOMINATOR", _choice("gate", "hand_window")
+    ),
+    "min_vote_share": ("MODEL__VISION__MIN_VOTE_SHARE", _env_float),
+    "vote_conf_floor": ("MODEL__VISION__CONF_FLOOR", _env_float),
+    "conf_weight_top": ("MODEL__VISION__CONF_WEIGHT_TOP", _env_float),
+    "conf_weight_side": ("MODEL__VISION__CONF_WEIGHT_SIDE", _env_float),
+    "conf_weight_top_only": ("MODEL__VISION__CONF_WEIGHT_TOP_ONLY", _env_float),
+    "conf_weight_side_only": ("MODEL__VISION__CONF_WEIGHT_SIDE_ONLY", _env_float),
+    "conf_common_class_bonus": ("MODEL__VISION__CONF_COMMON_CLASS_BONUS", _env_float),
+    "side_roi_max_center_x": ("MODEL__VISION__SIDE_ROI_MAX_CENTER_X", _env_float),
+    "side_camera_crop": ("MODEL__VIDEO__SIDE_CROP", _choice("center", "left")),
+    "camera_layout": ("MODEL__VISION__CAMERA_LAYOUT", _choice(*_VALID_CAMERA_LAYOUTS)),
+    "freezer_roi_vertical_region": (
+        "MODEL__VISION__FREEZER_ROI_VERTICAL_REGION", _choice("upper", "lower", "off")
+    ),
+    "freezer_roi_y_split": ("MODEL__VISION__FREEZER_ROI_Y_SPLIT", _env_float),
+    "freezer_side_roi_y_split": ("MODEL__VISION__FREEZER_SIDE_ROI_Y_SPLIT", _env_float),
+    "freezer_side_direction_axis": (
+        "MODEL__VISION__FREEZER_SIDE_DIRECTION_AXIS", _choice("x", "y")
+    ),
+    "freezer_side_return_direction": (
+        "MODEL__VISION__FREEZER_SIDE_RETURN_DIRECTION", _choice("increasing", "decreasing")
+    ),
+    "freezer_side_direction_min_displacement_px": (
+        "MODEL__VISION__FREEZER_SIDE_DIRECTION_MIN_DISPLACEMENT_PX", _env_float
+    ),
+    "freezer_top_return_boundary_px": ("MODEL__VISION__FREEZER_TOP_RETURN_BOUNDARY_PX", _env_float),
+    "freezer_side_return_boundary_px": (
+        "MODEL__VISION__FREEZER_SIDE_RETURN_BOUNDARY_PX", _env_float
+    ),
+    "top_roi_enabled": ("MODEL__VISION__TOP_ROI_ENABLED", _env_bool),
+    "top_roi_y_split": ("MODEL__VISION__TOP_ROI_Y_SPLIT", _env_float),
+    "hand_confidence_threshold": ("MODEL__VISION__HAND_CONFIDENCE_THRESHOLD", _env_float),
+    "side_hand_enabled": ("MODEL__VISION__SIDE_HAND_ENABLED", _env_bool),
+    "side_hand_confidence_threshold": ("MODEL__VISION__SIDE_HAND_CONFIDENCE_THRESHOLD", _env_float),
+    "segment_retry_gap_grams": ("MODEL__WEIGHT__SEGMENT_RETRY_GAP_GRAMS", _env_float),
+    "judgment_single_share": ("MODEL__JUDGMENT__SINGLE_SHARE", _env_float),
+    "judgment_combo_share": ("MODEL__JUDGMENT__COMBO_SHARE", _env_float),
+    "judgment_near_factor": ("MODEL__JUDGMENT__NEAR_FACTOR", _env_float),
+    "judgment_refit_share": ("MODEL__JUDGMENT__REFIT_SHARE", _env_float),
+    "judgment_count_unit_slack": ("MODEL__JUDGMENT__COUNT_UNIT_SLACK", _env_float),
+    "judgment_conf_override": ("MODEL__JUDGMENT__CONF_OVERRIDE", _env_float),
+    "judgment_conf_margin": ("MODEL__JUDGMENT__CONF_MARGIN", _env_float),
+    "judgment_partial_min_confidence": ("MODEL__JUDGMENT__PARTIAL_MIN_CONFIDENCE", _env_float),
+    "judgment_partial_impossible_factor": (
+        "MODEL__JUDGMENT__PARTIAL_IMPOSSIBLE_FACTOR", _env_float
+    ),
+    "judgment_strict_count_occam": ("MODEL__JUDGMENT__STRICT_COUNT_OCCAM", _env_bool),
+    "judgment_refit_arb_conf_floor": ("MODEL__JUDGMENT__REFIT_ARB_CONF_FLOOR", _env_float),
+    "judgment_count_occam": ("MODEL__JUDGMENT__COUNT_OCCAM", _env_bool),
+    "judgment_segment_combo": ("MODEL__JUDGMENT__SEGMENT_COMBO", _env_bool),
+    "judgment_segment_combo_min_segments": (
+        "MODEL__JUDGMENT__SEGMENT_COMBO_MIN_SEGMENTS", _env_int
+    ),
+    "judgment_mixed_kind_demotion": ("MODEL__JUDGMENT__MIXED_KIND_DEMOTION", _env_bool),
+    "motion_gate_threshold": ("MODEL__VISION__MOTION_GATE_THRESHOLD", _env_float),
+    "motion_evidence_enabled": ("MODEL__VISION__MOTION_EVIDENCE", _env_bool),
+    "motion_evidence_floor_px": ("MODEL__VISION__MOTION_EVIDENCE_FLOOR_PX", _env_float),
+    "motion_unmeasurable_policy": (
+        "MODEL__VISION__MOTION_UNMEASURABLE", _choice("forfeit", "exempt")
+    ),
+    "motion_measurable_min_obs": ("MODEL__VISION__MOTION_MEASURABLE_MIN_OBS", _env_int),
+    "held_track_demotion": (
+        "MODEL__VISION__HELD_TRACK_DEMOTION", _choice("off", "shadow", "active")
+    ),
+    "held_track_min_head": ("MODEL__VISION__HELD_TRACK_MIN_HEAD", _env_int),
+    "motion_gate_keepalive": ("MODEL__VISION__MOTION_GATE_KEEPALIVE", _env_int),
+    "loadcell_analyzer": ("MODEL__LOADCELL__ANALYZER", _choice("plateau", "bocpd")),
+    "loadcell_stable_window": ("MODEL__WEIGHT__STABLE_WINDOW", _env_int),
+    "loadcell_stability_threshold_grams": ("MODEL__WEIGHT__STABILITY_THRESHOLD_GRAMS", _env_float),
+    "cross_zone_penalty_enabled": ("MODEL__CROSS_ZONE__PENALTY_ENABLED", _env_bool),
+    "cross_zone_replay_s": ("MODEL__CROSS_ZONE__REPLAY_S", _env_float),
+    "cross_zone_trigger_s": ("MODEL__CROSS_ZONE__TRIGGER_S", _env_float),
+    "cross_zone_epsilon_s": ("MODEL__CROSS_ZONE__EPSILON_S", _env_float),
+    "cross_zone_alpha": ("MODEL__CROSS_ZONE__ALPHA", _env_float),
+    "cross_zone_source_conf_min": ("MODEL__CROSS_ZONE__SOURCE_CONF_MIN", _env_float),
+    "ghost_mode": ("MODEL__GHOST__MODE", _choice("off", "shadow", "active")),
+    "ghost_min_zones": ("MODEL__GHOST__MIN_ZONES", _env_int),
+    "ghost_vote_floor": ("MODEL__GHOST__VOTE_FLOOR", _env_int),
+    "ghost_alpha": ("MODEL__GHOST__ALPHA", _env_float),
+}
 
 
 @dataclass(frozen=True)
@@ -345,182 +473,10 @@ class Settings:
 
     @classmethod
     def from_env(cls) -> Settings:
-        policy_raw = os.environ.get("MODEL__SESSION__ERROR_POLICY", "block_payment")
-        return cls(
-            close_timeout_s=_env_float("MODEL__CLOSE__BARRIER_TIMEOUT_S", 10.0),
-            close_grace_s=_env_float("MODEL__CLOSE__GRACE_S", 5.0),
-            worker_stall_timeout_s=_env_float("MODEL__CLOSE__WORKER_STALL_TIMEOUT_S", 120.0),
-            close_vision_combo=_env_bool("MODEL__CLOSE__VISION_COMBO", True),
-            close_combo_min_vote_ratio=_env_float(
-                "MODEL__CLOSE__COMBO_MIN_VOTE_RATIO", 0.5
-            ),
-            close_combo_min_conf=_env_float("MODEL__CLOSE__COMBO_MIN_CONF", 0.8),
-            close_combo_session_guard=_env_bool(
-                "MODEL__CLOSE__COMBO_SESSION_GUARD", True
-            ),
-            close_combo_override_max_conf=_env_float(
-                "MODEL__CLOSE__COMBO_OVERRIDE_MAX_CONF", 0.92
-            ),
-            close_ambiguous_runner_up_margin=_env_float(
-                "MODEL__CLOSE__AMBIGUOUS_RUNNER_UP_MARGIN", 0.03
-            ),
-            batch_size=_env_int("MODEL__VISION__BATCH_SIZE", 1),
-            prefetch_depth=_env_int("MODEL__VIDEO__PREFETCH", 0),
-            tensor_input=_env_bool("MODEL__VISION__TENSOR_INPUT", False),
-            freezer_zones=_env_zones("MODEL__ZONES__FREEZER"),
-            cabinet_type=_env_cabinet_type("MODEL__MACHINE__CABINET_TYPE", "refrigerated"),
-            error_policy=ErrorSessionPolicy(policy_raw),
-            idempotency_ttl_s=_env_float("MODEL__TRIGGER__IDEMPOTENCY_TTL_S", 5.0),
-            outcomes_keep=_env_int("MODEL__TRIGGER__OUTCOMES_KEEP", 256),
-            keep_sessions=_env_int("MODEL__LEDGER__KEEP_SESSIONS", 4),
-            journal_retention_days=_env_int("MODEL__LEDGER__JOURNAL_RETENTION_DAYS", 14),
-            session_archive_dir=os.environ.get("MODEL__SESSION__ARCHIVE_DIR", "data/sessions"),
-            session_archive_retention_days=_env_int(
-                "MODEL__SESSION__ARCHIVE_RETENTION_DAYS", 14
-            ),
-            save_detections=_env_bool("MODEL__SESSION__SAVE_DETECTIONS", False),
-            top_confidence_threshold=_env_float(
-                "MODEL__VISION__TOP_CONFIDENCE_THRESHOLD", 0.70
-            ),
-            side_confidence_threshold=_env_float(
-                "MODEL__VISION__SIDE_CONFIDENCE_THRESHOLD", 0.70
-            ),
-            min_vote_ratio=_env_float("MODEL__VISION__MIN_VOTE_RATIO", 0.05),
-            min_vote_count=_env_int("MODEL__VISION__MIN_VOTE_COUNT", 3),
-            vote_ratio_denominator=_env_choice(
-                "MODEL__VISION__VOTE_RATIO_DENOMINATOR",
-                "gate",
-                ("gate", "hand_window"),
-            ),
-            min_vote_share=_env_float("MODEL__VISION__MIN_VOTE_SHARE", 0.1),
-            vote_conf_floor=_env_float("MODEL__VISION__CONF_FLOOR", 0.0),
-            conf_weight_top=_env_float("MODEL__VISION__CONF_WEIGHT_TOP", 0.60),
-            conf_weight_side=_env_float("MODEL__VISION__CONF_WEIGHT_SIDE", 0.40),
-            conf_weight_top_only=_env_float(
-                "MODEL__VISION__CONF_WEIGHT_TOP_ONLY", 0.60
-            ),
-            conf_weight_side_only=_env_float(
-                "MODEL__VISION__CONF_WEIGHT_SIDE_ONLY", 0.40
-            ),
-            conf_common_class_bonus=_env_float(
-                "MODEL__VISION__CONF_COMMON_CLASS_BONUS", 0.2
-            ),
-            side_roi_max_center_x=_env_float("MODEL__VISION__SIDE_ROI_MAX_CENTER_X", 400.0),
-            side_camera_crop=_env_choice(
-                "MODEL__VIDEO__SIDE_CROP", "center", ("center", "left")
-            ),
-            camera_layout=_env_choice(
-                "MODEL__VISION__CAMERA_LAYOUT", "dual", _VALID_CAMERA_LAYOUTS
-            ),
-            freezer_roi_vertical_region=_env_choice(
-                "MODEL__VISION__FREEZER_ROI_VERTICAL_REGION",
-                "lower",
-                ("upper", "lower", "off"),
-            ),
-            freezer_roi_y_split=_env_float("MODEL__VISION__FREEZER_ROI_Y_SPLIT", 350.0),
-            freezer_side_roi_y_split=_env_opt_float(
-                "MODEL__VISION__FREEZER_SIDE_ROI_Y_SPLIT"
-            ),
-            freezer_side_direction_axis=_env_choice(
-                "MODEL__VISION__FREEZER_SIDE_DIRECTION_AXIS", "y", ("x", "y")
-            ),
-            freezer_side_return_direction=_env_choice(
-                "MODEL__VISION__FREEZER_SIDE_RETURN_DIRECTION",
-                "increasing", ("increasing", "decreasing"),
-            ),
-            freezer_side_direction_min_displacement_px=_env_float(
-                "MODEL__VISION__FREEZER_SIDE_DIRECTION_MIN_DISPLACEMENT_PX", 20.0
-            ),
-            freezer_top_return_boundary_px=_env_opt_float(
-                "MODEL__VISION__FREEZER_TOP_RETURN_BOUNDARY_PX"
-            ),
-            freezer_side_return_boundary_px=_env_opt_float(
-                "MODEL__VISION__FREEZER_SIDE_RETURN_BOUNDARY_PX"
-            ),
-            top_roi_enabled=_env_bool("MODEL__VISION__TOP_ROI_ENABLED", False),
-            top_roi_y_split=_env_float("MODEL__VISION__TOP_ROI_Y_SPLIT", 240.0),
-            hand_confidence_threshold=_env_float(
-                "MODEL__VISION__HAND_CONFIDENCE_THRESHOLD", 0.30
-            ),
-            side_hand_enabled=_env_bool("MODEL__VISION__SIDE_HAND_ENABLED", False),
-            side_hand_confidence_threshold=_env_float(
-                "MODEL__VISION__SIDE_HAND_CONFIDENCE_THRESHOLD", -1.0
-            ),
-            segment_retry_gap_grams=_env_float(
-                "MODEL__WEIGHT__SEGMENT_RETRY_GAP_GRAMS", 5.0
-            ),
-            judgment_single_share=_env_float("MODEL__JUDGMENT__SINGLE_SHARE", 0.5),
-            judgment_combo_share=_env_float("MODEL__JUDGMENT__COMBO_SHARE", 0.3),
-            judgment_near_factor=_env_float("MODEL__JUDGMENT__NEAR_FACTOR", 2.0),
-            judgment_refit_share=_env_float("MODEL__JUDGMENT__REFIT_SHARE", 0.1),
-            judgment_count_unit_slack=_env_float(
-                "MODEL__JUDGMENT__COUNT_UNIT_SLACK", 5.0
-            ),
-            judgment_conf_override=_env_float("MODEL__JUDGMENT__CONF_OVERRIDE", 0.9),
-            judgment_conf_margin=_env_float("MODEL__JUDGMENT__CONF_MARGIN", 0.15),
-            judgment_partial_min_confidence=_env_float(
-                "MODEL__JUDGMENT__PARTIAL_MIN_CONFIDENCE", 0.18
-            ),
-            judgment_partial_impossible_factor=_env_float(
-                "MODEL__JUDGMENT__PARTIAL_IMPOSSIBLE_FACTOR", 3.0
-            ),
-            judgment_strict_count_occam=_env_bool(
-                "MODEL__JUDGMENT__STRICT_COUNT_OCCAM", True
-            ),
-            judgment_refit_arb_conf_floor=_env_float(
-                "MODEL__JUDGMENT__REFIT_ARB_CONF_FLOOR", 0.8
-            ),
-            judgment_count_occam=_env_bool("MODEL__JUDGMENT__COUNT_OCCAM", True),
-            judgment_segment_combo=_env_bool(
-                "MODEL__JUDGMENT__SEGMENT_COMBO", False
-            ),
-            judgment_segment_combo_min_segments=_env_int(
-                "MODEL__JUDGMENT__SEGMENT_COMBO_MIN_SEGMENTS", 2
-            ),
-            judgment_mixed_kind_demotion=_env_bool(
-                "MODEL__JUDGMENT__MIXED_KIND_DEMOTION", False
-            ),
-            motion_gate_threshold=_env_opt_float("MODEL__VISION__MOTION_GATE_THRESHOLD"),
-            motion_evidence_enabled=_env_bool("MODEL__VISION__MOTION_EVIDENCE", True),
-            motion_evidence_floor_px=_env_opt_float(
-                "MODEL__VISION__MOTION_EVIDENCE_FLOOR_PX"
-            ),
-            motion_unmeasurable_policy=_env_choice(
-                "MODEL__VISION__MOTION_UNMEASURABLE",
-                "forfeit",
-                ("forfeit", "exempt"),
-            ),
-            motion_measurable_min_obs=_env_int(
-                "MODEL__VISION__MOTION_MEASURABLE_MIN_OBS", 3
-            ),
-            held_track_demotion=_env_choice(
-                "MODEL__VISION__HELD_TRACK_DEMOTION",
-                "shadow",
-                ("off", "shadow", "active"),
-            ),
-            held_track_min_head=_env_int("MODEL__VISION__HELD_TRACK_MIN_HEAD", 5),
-            motion_gate_keepalive=_env_opt_int("MODEL__VISION__MOTION_GATE_KEEPALIVE"),
-            loadcell_analyzer=_env_choice(
-                "MODEL__LOADCELL__ANALYZER", "bocpd", ("plateau", "bocpd")
-            ),
-            loadcell_stable_window=_env_int("MODEL__WEIGHT__STABLE_WINDOW", 3),
-            loadcell_stability_threshold_grams=_env_float(
-                "MODEL__WEIGHT__STABILITY_THRESHOLD_GRAMS", 2.5
-            ),
-            cross_zone_penalty_enabled=_env_bool(
-                "MODEL__CROSS_ZONE__PENALTY_ENABLED", True
-            ),
-            cross_zone_replay_s=_env_float("MODEL__CROSS_ZONE__REPLAY_S", 4.0),
-            cross_zone_trigger_s=_env_float("MODEL__CROSS_ZONE__TRIGGER_S", 4.0),
-            cross_zone_epsilon_s=_env_float("MODEL__CROSS_ZONE__EPSILON_S", 1.0),
-            cross_zone_alpha=_env_float("MODEL__CROSS_ZONE__ALPHA", 0.5),
-            cross_zone_source_conf_min=_env_float(
-                "MODEL__CROSS_ZONE__SOURCE_CONF_MIN", 0.35
-            ),
-            ghost_mode=_env_choice(
-                "MODEL__GHOST__MODE", "shadow", ("off", "shadow", "active")
-            ),
-            ghost_min_zones=_env_int("MODEL__GHOST__MIN_ZONES", 2),
-            ghost_vote_floor=_env_int("MODEL__GHOST__VOTE_FLOOR", 3),
-            ghost_alpha=_env_float("MODEL__GHOST__ALPHA", 0.5),
-        )
+        defaults = {
+            f.name: f.default if f.default_factory is MISSING else f.default_factory()
+            for f in fields(cls)
+        }
+        return cls(**{
+            name: parse(key, defaults[name]) for name, (key, parse) in _ENV_FIELDS.items()
+        })

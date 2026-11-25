@@ -34,6 +34,7 @@ import re
 import sys
 from pathlib import Path
 
+from crk_model.adapters._archive_cli import add_dir_argument, find_session
 from crk_model.ledger.archive import SessionArchive, _load_document
 
 
@@ -97,22 +98,26 @@ def _billed_multiset(products: list[dict]) -> list[tuple[int, int]] | None:
     return sorted(out.items())
 
 
+def _epoch_or_mtime(name: str, path: str | Path | None) -> float | None:
+    """name(session_id 또는 파일명 stem) 말미의 epoch, 없으면 path의 mtime
+    (path가 비었거나 stat 실패면 None) — _session_epoch/_path_epoch 공통 규칙."""
+    tail = name.rsplit("-", 1)[-1]
+    if tail.isdigit() and len(tail) >= 9:  # epoch초(10자리대)만 신뢰
+        return float(tail)
+    if not path:
+        return None
+    try:
+        return Path(path).stat().st_mtime
+    except OSError:
+        return None
+
+
 def _session_epoch(doc: dict) -> float | None:
     """세션 발생 시각 추정 — session_id 말미의 epoch(ses-1-1784790155),
     실패 시 파일 mtime. 코드 버전이 섞인 아카이브에서 '이 배포 이후'만
     골라내는 --since 필터의 기준이다 (finalized_at은 monotonic clock이라
     벽시계 비교에 못 쓴다)."""
-    sid = str(doc.get("session_id") or "")
-    tail = sid.rsplit("-", 1)[-1]
-    if tail.isdigit() and len(tail) >= 9:  # epoch초(10자리대)만 신뢰
-        return float(tail)
-    path = doc.get("_path")
-    if path:
-        try:
-            return Path(path).stat().st_mtime
-        except OSError:
-            return None
-    return None
+    return _epoch_or_mtime(str(doc.get("session_id") or ""), doc.get("_path"))
 
 
 def parse_since(raw: str) -> float:
@@ -132,13 +137,7 @@ def _path_epoch(path: Path) -> float | None:
     (SessionArchive._write 계약)이므로 _session_epoch과 같은 규칙을
     파일명에 적용한다. --since 프리필터용 (대상 밖 대형 YAML의 파싱 자체를
     건너뛰는 게 목적)."""
-    tail = path.stem.rsplit("-", 1)[-1]
-    if tail.isdigit() and len(tail) >= 9:  # epoch초(10자리대)만 신뢰
-        return float(tail)
-    try:
-        return path.stat().st_mtime
-    except OSError:
-        return None
+    return _epoch_or_mtime(path.stem, path)
 
 
 def load_documents(
@@ -391,10 +390,11 @@ def analyze(docs: list[dict]) -> dict:
 
             # 트랙릿 T1 (report 키 주석 참조) — 라벨 없이도 트랙 수 분포는
             # 집계, head_obs의 GT 분리 실측은 라벨 트리거 한정
-            me = (trace.get("vote_summary") or {}).get("motion_evidence") or {}
+            vote_summary = trace.get("vote_summary") or {}
+            me = vote_summary.get("motion_evidence") or {}
+            tk = report["tracklet"]
+            gt_ids = {cid for cid, _ in gt_zone}
             if isinstance(me, dict):
-                tk = report["tracklet"]
-                gt_ids = {cid for cid, _ in gt_zone}
                 saw_detail = False
                 for camera, classes in me.items():
                     if not isinstance(classes, dict):
@@ -447,10 +447,8 @@ def analyze(docs: list[dict]) -> dict:
 
             # T2 held 강등 관측 (report 키 주석 참조) — 라벨 없는 트리거의
             # held는 정오를 가릴 수 없어 비정답 쪽으로 세지 않고 건너뛴다
-            held = (trace.get("vote_summary") or {}).get("held_shadow") or {}
+            held = vote_summary.get("held_shadow") or {}
             if isinstance(held, dict) and gt_zone:
-                tk = report["tracklet"]
-                gt_ids = {cid for cid, _ in gt_zone}
                 for camera, by_class in held.items():
                     if not isinstance(by_class, dict):
                         continue
@@ -886,9 +884,7 @@ def main(argv: list[str] | None = None) -> int:
         prog="analyze-sessions",
         description="세션 아카이브 shadow 정오·conformal 보정 리포트",
     )
-    parser.add_argument(
-        "--dir", default="data/sessions", help="아카이브 루트 (기본: data/sessions)"
-    )
+    add_dir_argument(parser)
     parser.add_argument("--json", action="store_true", help="JSON으로 출력")
     parser.add_argument(
         "--session",
@@ -921,9 +917,8 @@ def main(argv: list[str] | None = None) -> int:
         # (SessionArchive._write 계약)라 find()로 해당 파일만 파싱하면 되고,
         # 전량 로드는 SAVE_DETECTIONS 대형 YAML이 쌓일수록 O(아카이브 전체
         # 바이트)로 늘어난다 (실측: 세션 단건 조회가 분 단위까지 악화).
-        path = archive.find(args.session)
+        path = find_session(archive, args.session, f"세션을 찾을 수 없습니다: {args.session}")
         if path is None:
-            print(f"세션을 찾을 수 없습니다: {args.session}", file=sys.stderr)
             return 1
         try:
             doc = _load_document(path)
@@ -944,21 +939,19 @@ def main(argv: list[str] | None = None) -> int:
             print(f"--since 형식 오류: {args.since}", file=sys.stderr)
             return 1
     docs = load_documents(args.dir, since=cutoff)
-    if not docs:
-        if args.since:
-            print(f"--since {args.since} 이후 세션이 없습니다", file=sys.stderr)
-        else:
-            print(f"아카이브가 비어 있습니다: {args.dir}", file=sys.stderr)
-        return 1
     if cutoff is not None:
         # 프리필터(파일명 epoch)가 못 거른 시각 미상 파일의 최종 판정
         docs = [
             d for d in docs
             if (ep := _session_epoch(d)) is not None and ep >= cutoff
         ]
-        if not docs:
+    if not docs:
+        if cutoff is not None:
             print(f"--since {args.since} 이후 세션이 없습니다", file=sys.stderr)
-            return 1
+        else:
+            print(f"아카이브가 비어 있습니다: {args.dir}", file=sys.stderr)
+        return 1
+    if cutoff is not None:
         print(f"(대상: --since {args.since} 이후 {len(docs)} 세션)")
     report = analyze(docs)
     if args.json:

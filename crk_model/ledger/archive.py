@@ -32,7 +32,7 @@ from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from crk_model.core.types import FinalizedSettlement, ZoneBasket
+from crk_model.core.types import FinalizedSettlement, ProductCount, VisionCandidate, ZoneBasket
 from crk_model.ledger.events import TriggerEvent
 from crk_model.ledger.journal import movement_to_dict
 
@@ -70,6 +70,52 @@ def _load_document(path: Path) -> dict:
     return yaml.load(path.read_text(encoding="utf-8"), Loader=ArchiveLoader)
 
 
+def _dump_json(path: Path, doc: dict) -> None:
+    import json
+
+    path.write_text(
+        json.dumps(doc, ensure_ascii=False, indent=2, default=str),
+        encoding="utf-8",
+    )
+
+
+def _dump_yaml(yaml, path: Path, doc: dict) -> None:
+    """yaml: 호출측이 저장 시점에 import한 모듈 (런타임 의존성 0 원칙)."""
+    # C 더머 우선 (가용 시): SAVE_DETECTIONS 세션의 대형 문서 직렬화가
+    # finalize 경로(워커 락 안)에서 CLOSE 응답을 지연시키지 않게 한다.
+    # 튜플도 표준 YAML 목록으로 저장해 SafeLoader와 읽기 계약을 맞춘다.
+    dumper = getattr(yaml, "CSafeDumper", yaml.SafeDumper)
+    path.write_text(
+        yaml.dump(
+            doc, Dumper=dumper,
+            default_flow_style=False, allow_unicode=True, sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+
+def _candidate_brief(c: VisionCandidate) -> dict:
+    """후보 요약 4필드 — 방향별 후보·반납 증거 공용 (vision_candidates는 계측 필드 추가)."""
+    return {"class_id": c.class_id, "confidence": c.confidence,
+            "vote_count": c.vote_count, "vote_ratio": c.vote_ratio}
+
+
+def _product_count_to_dict(pc: ProductCount) -> dict:
+    """판정 products·존 products 공용 항목."""
+    return {
+        "product_id": pc.product.product_id,
+        "name": pc.product.name,
+        # class_id/unit_weight: 정답 라벨(ground_truth, class_id
+        # 기반)·σ_db 잔차 실측(analyze-sessions)이 아카이브만으로
+        # 대조 가능하도록 기록 (가격만으로는 불가능했다).
+        "class_id": pc.product.class_id,
+        "unit_weight": pc.product.unit_weight,
+        "count": pc.count,
+        "unit_price": pc.product.unit_price,
+        "total_price": pc.total_price,
+    }
+
+
 def _trace_to_dict(trace: TriggerTrace | None) -> dict:
     if trace is None:
         return {}
@@ -95,11 +141,7 @@ def _trace_to_dict(trace: TriggerTrace | None) -> dict:
         out["loadcell_terminal_levels"] = trace.loadcell_terminal_levels
     if trace.directional_candidates:
         out["directional_candidates"] = {
-            action: [
-                {"class_id": c.class_id, "confidence": c.confidence,
-                 "vote_count": c.vote_count, "vote_ratio": c.vote_ratio}
-                for c in candidates
-            ]
+            action: [_candidate_brief(c) for c in candidates]
             for action, candidates in trace.directional_candidates.items()
         }
         out["uncertain_directions"] = trace.uncertain_directions
@@ -125,29 +167,12 @@ def _event_to_dict(
             "strategy": j.strategy,
             "reason": j.reason,
             "confidence": j.confidence,
-            "products": [
-                {
-                    "product_id": pc.product.product_id,
-                    "name": pc.product.name,
-                    # class_id/unit_weight: 정답 라벨(ground_truth, class_id
-                    # 기반)·σ_db 잔차 실측(analyze-sessions)이 아카이브만으로
-                    # 대조 가능하도록 기록 (가격만으로는 불가능했다).
-                    "class_id": pc.product.class_id,
-                    "unit_weight": pc.product.unit_weight,
-                    "count": pc.count,
-                    "unit_price": pc.product.unit_price,
-                    "total_price": pc.total_price,
-                }
-                for pc in j.products
-            ],
+            "products": [_product_count_to_dict(pc) for pc in j.products],
         },
         # 진단 핵심: 채택 안 된 후보 포함 전체 — 오판정 시 "무엇과 경쟁했는지"
         "vision_candidates": [
             {
-                "class_id": c.class_id,
-                "confidence": c.confidence,
-                "vote_count": c.vote_count,
-                "vote_ratio": c.vote_ratio,
+                **_candidate_brief(c),
                 # held-object A-1 계측 (0713 §3) — carried-in 시간 구조 신호
                 "head_votes": c.head_votes,
                 "span_ratio": c.span_ratio,
@@ -159,11 +184,8 @@ def _event_to_dict(
         # 0711 교차존 오염 (Phase 1 계측): 에피소드 내 서브이벤트 앵커
         "change_timestamps": list(event.change_timestamps),
         "freezer_return": (
-            {"candidates": [
-                {"class_id": c.class_id, "confidence": c.confidence,
-                 "vote_count": c.vote_count, "vote_ratio": c.vote_ratio}
-                for c in event.freezer_return.candidates
-             ], "stabilized": event.freezer_return.stabilized,
+            {"candidates": [_candidate_brief(c) for c in event.freezer_return.candidates],
+             "stabilized": event.freezer_return.stabilized,
              "source": event.freezer_return.source}
             if event.freezer_return is not None else None
         ),
@@ -182,18 +204,7 @@ def _zone_to_dict(zb: ZoneBasket) -> dict:
         "trigger_count": zb.trigger_count,
         "confidence": zb.confidence,
         "notes": list(zb.notes),
-        "products": [
-            {
-                "product_id": pc.product.product_id,
-                "name": pc.product.name,
-                "class_id": pc.product.class_id,
-                "unit_weight": pc.product.unit_weight,
-                "count": pc.count,
-                "unit_price": pc.product.unit_price,
-                "total_price": pc.total_price,
-            }
-            for pc in zb.products
-        ],
+        "products": [_product_count_to_dict(pc) for pc in zb.products],
     }
 
 
@@ -358,26 +369,11 @@ class SessionArchive:
             import yaml  # type: ignore
         except ImportError:
             path = date_dir / f"{session_id}.json"
-            import json
-
-            path.write_text(
-                json.dumps(doc, ensure_ascii=False, indent=2, default=str),
-                encoding="utf-8",
-            )
+            _dump_json(path, doc)
             return path
 
         path = date_dir / f"{session_id}.yaml"
-        # C 더머 우선 (가용 시): SAVE_DETECTIONS 세션의 대형 문서 직렬화가
-        # finalize 경로(워커 락 안)에서 CLOSE 응답을 지연시키지 않게 한다.
-        # 튜플도 표준 YAML 목록으로 저장해 SafeLoader와 읽기 계약을 맞춘다.
-        dumper = getattr(yaml, "CSafeDumper", yaml.SafeDumper)
-        path.write_text(
-            yaml.dump(
-                doc, Dumper=dumper,
-                default_flow_style=False, allow_unicode=True, sort_keys=False,
-            ),
-            encoding="utf-8",
-        )
+        _dump_yaml(yaml, path, doc)
         return path
 
     def find(self, session_id: str) -> Path | None:
@@ -428,23 +424,11 @@ class SessionArchive:
     @staticmethod
     def _rewrite(path: Path, doc: dict) -> None:
         if path.suffix == ".json":
-            import json
-
-            path.write_text(
-                json.dumps(doc, ensure_ascii=False, indent=2, default=str),
-                encoding="utf-8",
-            )
+            _dump_json(path, doc)
             return
         import yaml  # yaml 파일이 존재한다 = PyYAML로 저장됐다 (폴백 규칙)
 
-        dumper = getattr(yaml, "CSafeDumper", yaml.SafeDumper)
-        path.write_text(
-            yaml.dump(
-                doc, Dumper=dumper,
-                default_flow_style=False, allow_unicode=True, sort_keys=False,
-            ),
-            encoding="utf-8",
-        )
+        _dump_yaml(yaml, path, doc)
 
     def _prune_old(self, current: datetime.date) -> None:
         """보존기간(MODEL__SESSION__ARCHIVE_RETENTION_DAYS) 초과 날짜 디렉토리

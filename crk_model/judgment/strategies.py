@@ -21,6 +21,7 @@ detected_single_item_fallback(top 고정) — 전부 "정체성은 vision, 무�
 from __future__ import annotations
 
 import itertools
+from collections.abc import Iterable, Sequence
 from dataclasses import replace
 
 from crk_model.core.types import (
@@ -31,7 +32,7 @@ from crk_model.core.types import (
     VisionCandidate,
 )
 from crk_model.judgment.interfaces import JudgmentContext
-from crk_model.judgment.strict import StrictWeightMatcher
+from crk_model.judgment.strict import Combination, StrictWeightMatcher
 
 
 def enforce_full_delta_match(
@@ -70,6 +71,55 @@ def _product_by_class(ctx: JudgmentContext) -> dict[int, ActiveProduct]:
     }  # I5
 
 
+def _ranked_by_votes(ctx: JudgmentContext) -> list[VisionCandidate]:
+    """vision 후보 득표 순위 — 득표 내림차순, 동률은 conf 내림차순 (안정 정렬)."""
+    return sorted(ctx.vision_candidates, key=lambda c: (-c.vote_count, -c.confidence))
+
+
+def _fit_count(target: float, p: ActiveProduct) -> tuple[int, float]:
+    """단일 정체성 개수 역산: n = round(target/unit_weight)를 [1, stock]으로 자르고(I12)
+    잔차 |target − n×unit_weight|와 함께 반환. unit_weight 가드는 호출부 몫."""
+    n = min(max(1, round(target / p.unit_weight)), p.stock_qty)  # I12
+    return n, abs(target - n * p.unit_weight)
+
+
+def _match_segments(
+    matcher: StrictWeightMatcher,
+    candidates: Sequence[VisionCandidate],
+    deltas: Iterable[float],
+    ctx: JudgmentContext,
+) -> tuple[list[Combination], dict[str, ProductCount]] | None:
+    """구간마다 strict 매칭 후 product_id별 개수 합산 (segment·stage 공유).
+    한 구간이라도 매칭 실패면 None."""
+    bests: list[Combination] = []
+    merged: dict[str, ProductCount] = {}
+    for delta in deltas:
+        best = matcher.best(candidates, delta, ctx.active_products, ctx.profile.tolerance_grams)
+        if best is None:
+            return None
+        bests.append(best)
+        for pc in best.products:
+            pid = pc.product.product_id
+            prev = merged.get(pid)
+            merged[pid] = ProductCount(pc.product, (prev.count if prev else 0) + pc.count)
+    return bests, merged
+
+
+def _merged_segment_result(
+    merged: dict[str, ProductCount], scores: list[float], reason: str
+) -> JudgmentResult | None:
+    """구간 합산 COMPLETE (product_id 순, 구간 점수 평균). 합산 count > stock이면 무효(I12)."""
+    for pc in merged.values():
+        if pc.count > pc.product.stock_qty:  # I12
+            return None
+    return JudgmentResult(
+        JudgmentStatus.COMPLETE,
+        tuple(sorted(merged.values(), key=lambda pc: pc.product.product_id)),
+        confidence=sum(scores) / len(scores),
+        reason=reason,
+    )
+
+
 class VisionOnlyStrategy:
     """순위 0: 로드셀 없음/강제 vision — count=1, conf×0.7."""
 
@@ -80,8 +130,7 @@ class VisionOnlyStrategy:
 
     def solve(self, ctx: JudgmentContext) -> JudgmentResult | None:
         by_class = _product_by_class(ctx)
-        ranked = sorted(ctx.vision_candidates, key=lambda c: (-c.vote_count, -c.confidence))
-        for cand in ranked:
+        for cand in _ranked_by_votes(ctx):
             if cand.class_id in by_class:
                 p = by_class[cand.class_id]
                 return JudgmentResult(
@@ -173,12 +222,13 @@ class FreezerVisionFirstStrategy:
     # 사설 안전판 상수라 노브로 노출하지 않는다.
     _NEAR_TIE_VOTE_GAP = 1
     _NEAR_TIE_RESIDUAL_MARGIN_G = 10.0
+    # 탐색 상한 (노브 비노출 코드 상수): ③ 종류 수 · 득표순 정체성 풀 · ③ 총 개수
+    _MAX_KINDS = 4
+    _IDENTITY_POOL = 6
+    _MAX_TOTAL_ITEMS = 12
 
     def __init__(
         self,
-        max_kinds: int = 4,
-        identity_pool: int = 6,
-        max_total_items: int = 12,
         single_share: float = 0.5,
         combo_share: float = 0.3,
         near_factor: float = 2.0,
@@ -226,9 +276,6 @@ class FreezerVisionFirstStrategy:
         # 따로 두지 않고 segment_combo_min_segments와 "표 1개 이상"을 재사용한다.
         # 기본 off (레포 관행 — 신규 판정 기제는 기본값 = 기존 동작).
     ):
-        self._max_kinds = max_kinds
-        self._identity_pool = identity_pool
-        self._max_total_items = max_total_items
         self._single_share = single_share
         self._combo_share = combo_share
         self._near_factor = near_factor
@@ -257,15 +304,18 @@ class FreezerVisionFirstStrategy:
         segment_combo_min_segments 문턱을 쓰고(분리 취출 증언), 경쟁 종은
         "실제로 한 표라도 받았는가"만 본다(완전 미탐지는 구제 대상이 아니라
         판단 재료도 아니다 — 임의 최소 득표수를 새로 정하지 않는다)."""
-        if count < 2:
-            return False
-        removals = sum(1 for s in ctx.segments if s.delta_grams < 0)
-        if removals < self._segment_combo_min_segments:
+        if count < 2 or self._split_removals(ctx) is None:
             return False
         return any(
             p.class_id != winner_product.class_id and cand.vote_count > 0
             for p, cand in identities
         )
+
+    def _split_removals(self, ctx: JudgmentContext) -> int | None:
+        """removal 세그먼트 수(분리 취출 증언), segment_combo_min_segments 미달이면
+        None — ①⁺ 도전 ⓒ와 _mixed_kind_suspect가 공유하는 문턱."""
+        removals = sum(1 for s in ctx.segments if s.delta_grams < 0)
+        return None if removals < self._segment_combo_min_segments else removals
 
     @staticmethod
     def _occam_filter(
@@ -273,7 +323,7 @@ class FreezerVisionFirstStrategy:
     ) -> list[tuple[ActiveProduct, VisionCandidate, int, float]]:
         """① 개수 오컴 — "무게가 지어낸 n≥2 가설"의 실격 (0730 시나리오 실측).
 
-        `fit()`은 개수를 무게에서 역산하고(n = round(target/unit_weight)),
+        `_fit_count()`는 개수를 무게에서 역산하고(n = round(target/unit_weight)),
         게이트는 gate_n(n) = gate + slack×(n−1)로 n에 비례해 넓어진다. 그래서
         저중량 상품은 n을 키워 거의 모든 중량대를 덮는 "만능 filler"가 된다 —
         라라스윗 70g은 n=2에서 [120,160], n=3에서 [185,235]. 그런데 ①의 중재는
@@ -330,19 +380,14 @@ class FreezerVisionFirstStrategy:
         target = abs(ctx.delta_weight)
         gate = ctx.profile.count_gate
         by_class = _product_by_class(ctx)
-        ranked = sorted(ctx.vision_candidates, key=lambda c: (-c.vote_count, -c.confidence))
         identities = [
             (by_class[c.class_id], c)
-            for c in ranked
+            for c in _ranked_by_votes(ctx)
             if c.class_id in by_class and by_class[c.class_id].unit_weight > 0
-        ][: self._identity_pool]
+        ][: self._IDENTITY_POOL]
         if not identities:
             return None
         top_p, top_c = identities[0]
-
-        def fit(p: ActiveProduct) -> tuple[int, float]:
-            n = min(max(1, round(target / p.unit_weight)), p.stock_qty)  # I12
-            return n, abs(target - n * p.unit_weight)
 
         def gate_n(n: int) -> float:
             # n-스케일 게이트 (설계 3a): DB 편차·접촉 오염은 개수에 비례 누적
@@ -362,7 +407,7 @@ class FreezerVisionFirstStrategy:
         for p, cand in identities:
             if not eligible(cand):
                 continue
-            count, residual = fit(p)
+            count, residual = _fit_count(target, p)
             if residual <= gate_n(count):
                 fits.append((p, cand, count, residual))
         if self._count_occam:
@@ -439,7 +484,7 @@ class FreezerVisionFirstStrategy:
             )
 
         # ② top 근접 실패 → 정체성 교체 대신 오염 가정, 개수 보존 PARTIAL
-        n_top, r_top = fit(top_p)
+        n_top, r_top = _fit_count(target, top_p)
         if r_top <= self._near_factor * gate_n(n_top):
             confidence = top_c.confidence * 0.6
             if confidence < self._partial_min_conf:
@@ -479,7 +524,7 @@ class FreezerVisionFirstStrategy:
         for p, cand in identities[1:]:
             if cand.vote_count < self._refit_share * top_c.vote_count:
                 continue
-            count, residual = fit(p)
+            count, residual = _fit_count(target, p)
             if residual <= gate_n(count):
                 fits_gate.append((p, cand, count))
             elif residual <= self._near_factor * gate_n(count):
@@ -546,7 +591,7 @@ class FreezerVisionFirstStrategy:
             for p, c in identities[1:]
             if c.vote_count >= self._combo_share * top_c.vote_count
         ]
-        for k in range(2, min(self._max_kinds, len(rest) + 1) + 1):
+        for k in range(2, min(self._MAX_KINDS, len(rest) + 1) + 1):
             best: tuple[tuple[float, int], tuple, tuple] | None = None
             for tail in itertools.combinations(rest, k - 1):
                 subset = (identities[0],) + tail
@@ -616,8 +661,8 @@ class FreezerVisionFirstStrategy:
         _, _, count, residual = winner
         if count < 2 or residual <= 0:  # ⓐⓑ
             return None
-        removals = sum(1 for s in ctx.segments if s.delta_grams < 0)
-        if removals < self._segment_combo_min_segments:  # ⓒ
+        removals = self._split_removals(ctx)
+        if removals is None:  # ⓒ
             return None
         combo = self._best_combo(identities, top_c, target, gate)  # ⓓ
         if combo is None:
@@ -645,7 +690,7 @@ class FreezerVisionFirstStrategy:
             p = products[i]
             for c in range(1, p.stock_qty + 1):  # I12
                 w = weight + c * p.unit_weight
-                if w > target + gate or items + c > self._max_total_items:
+                if w > target + gate or items + c > self._MAX_TOTAL_ITEMS:
                     break
                 counts.append(c)
                 yield from rec(i + 1, counts, w, items + c)
@@ -690,39 +735,23 @@ class SegmentWeightMatchingStrategy:
 
     def solve(self, ctx: JudgmentContext) -> JudgmentResult | None:
         removal = [s for s in ctx.segments if s.delta_grams < 0]
-        merged: dict[str, ProductCount] = {}
-        scores: list[float] = []
-        best_by_segment = []
-        for seg in removal:
-            best = self._matcher.best(
-                ctx.vision_candidates, seg.delta_grams, ctx.active_products,
-                ctx.profile.tolerance_grams,
-            )
-            if best is None:
-                return None  # 한 구간이라도 실패 → aggregate 경로로 폴백
-            best_by_segment.append(best)
-            scores.append(best.match_score)
-            for pc in best.products:
-                pid = pc.product.product_id
-                prev = merged.get(pid)
-                merged[pid] = ProductCount(pc.product, (prev.count if prev else 0) + pc.count)
+        matched = _match_segments(
+            self._matcher, ctx.vision_candidates, (s.delta_grams for s in removal), ctx
+        )
+        if matched is None:
+            return None  # 한 구간이라도 실패 → aggregate 경로로 폴백
+        best_by_segment, merged = matched
+        scores = [best.match_score for best in best_by_segment]
         repeated = self._strong_repeated_candidate(ctx, removal, best_by_segment)
         if repeated is not None:
             candidate, product = repeated
             merged = {product.product_id: ProductCount(product, len(removal))}
             scores = [candidate.confidence] * len(removal)
-        # I12: 구간 합산 count가 stock을 넘으면 무효
-        for pc in merged.values():
-            if pc.count > pc.product.stock_qty:
-                return None
-        return JudgmentResult(
-            JudgmentStatus.COMPLETE,
-            tuple(sorted(merged.values(), key=lambda pc: pc.product.product_id)),
-            confidence=sum(scores) / len(scores),
-            reason=(
-                "segment_weight_matching+strong_repeated_candidate"
-                if repeated is not None else "segment_weight_matching"
-            ),
+        return _merged_segment_result(
+            merged,
+            scores,
+            "segment_weight_matching+strong_repeated_candidate"
+            if repeated is not None else "segment_weight_matching",
         )
 
     @staticmethod
@@ -808,30 +837,17 @@ class StageCountCombinationStrategy:
         candidates = ctx.vision_candidates or tuple(
             VisionCandidate(p.class_id, 0.0, 0, 0.0) for p in pool
         )
-        merged: dict[str, ProductCount] = {}
-        scores: list[float] = []
-        for target in targets:
-            best = self._matcher.best(
-                candidates, -abs(target), ctx.active_products, ctx.profile.tolerance_grams
-            )
-            if best is None:
-                return None
-            scores.append(best.match_score)
-            for pc in best.products:
-                pid = pc.product.product_id
-                prev = merged.get(pid)
-                merged[pid] = ProductCount(pc.product, (prev.count if prev else 0) + pc.count)
+        matched = _match_segments(
+            self._matcher, candidates, (-abs(target) for target in targets), ctx
+        )
+        if matched is None:
+            return None
+        bests, merged = matched
         total_count = sum(pc.count for pc in merged.values())
         if total_count < 2:  # 원본: 단일 매치는 이 전략의 몫이 아님
             return None
-        for pc in merged.values():
-            if pc.count > pc.product.stock_qty:  # I12
-                return None
-        return JudgmentResult(
-            JudgmentStatus.COMPLETE,
-            tuple(sorted(merged.values(), key=lambda pc: pc.product.product_id)),
-            confidence=sum(scores) / len(scores),
-            reason="stage_count_combo",
+        return _merged_segment_result(
+            merged, [best.match_score for best in bests], "stage_count_combo"
         )
 
 
@@ -1053,10 +1069,10 @@ class RelaxedStrategy:
     """
 
     name = "relaxed"
+    _RELAX_FACTOR = 2.0  # tolerance 배수 (env 비노출 코드 상수)
 
-    def __init__(self, matcher: StrictWeightMatcher | None = None, relax_factor: float = 2.0):
+    def __init__(self, matcher: StrictWeightMatcher | None = None):
         self._matcher = matcher or StrictWeightMatcher()
-        self._relax = relax_factor
 
     def precondition(self, ctx: JudgmentContext) -> bool:
         # I-V (이슈 #15): tolerance×2 무게 조합 — freezer 배제. freezer의
@@ -1065,7 +1081,7 @@ class RelaxedStrategy:
         return ctx.profile.weight_is_discriminative and bool(ctx.vision_candidates)
 
     def solve(self, ctx: JudgmentContext) -> JudgmentResult | None:
-        relaxed_tol = ctx.profile.tolerance_grams * self._relax
+        relaxed_tol = ctx.profile.tolerance_grams * self._RELAX_FACTOR
         best = self._matcher.best(
             ctx.vision_candidates, ctx.delta_weight, ctx.active_products, relaxed_tol
         )
@@ -1117,7 +1133,7 @@ class RelaxedIdentityPartialStrategy:
 
     def solve(self, ctx: JudgmentContext) -> JudgmentResult | None:
         by_class = _product_by_class(ctx)
-        ranked = sorted(ctx.vision_candidates, key=lambda c: (-c.vote_count, -c.confidence))
+        ranked = _ranked_by_votes(ctx)
         # 취출 1개 가설의 무게 상한: 최대 removal 세그먼트(동일 트리거 안에
         # 반품이 섞여 net delta가 줄어든 경우 보호) 또는 |delta| 중 큰 쪽.
         removal_bound = max(
@@ -1182,14 +1198,12 @@ class VisionFirstIdentityPartialStrategy:
         target = abs(ctx.delta_weight)
         tol = ctx.profile.tolerance_grams
         by_class = _product_by_class(ctx)
-        ranked = sorted(ctx.vision_candidates, key=lambda c: (-c.vote_count, -c.confidence))
-        for cand in ranked:
+        for cand in _ranked_by_votes(ctx):
             p = by_class.get(cand.class_id)
             if p is None or p.unit_weight <= 0:
                 continue
-            count = min(max(1, round(target / p.unit_weight)), p.stock_qty)  # I12
-            expected = count * p.unit_weight
-            if abs(target - expected) <= tol:
+            count, residual = _fit_count(target, p)
+            if residual <= tol:
                 return JudgmentResult(
                     JudgmentStatus.COMPLETE,
                     (ProductCount(p, count),),
@@ -1281,26 +1295,20 @@ class DetectedSingleItemFallbackStrategy:
     """
 
     name = "detected_single_item_fallback"
-
-    def __init__(self, tolerance_factor: float = 3.0):
-        self._tolerance_factor = tolerance_factor
+    _TOLERANCE_FACTOR = 3.0  # tolerance 배수 (env 비노출 코드 상수, docstring)
 
     def precondition(self, ctx: JudgmentContext) -> bool:
         return ctx.delta_weight < 0 and bool(ctx.vision_candidates)
 
     def solve(self, ctx: JudgmentContext) -> JudgmentResult | None:
         target = abs(ctx.delta_weight)
-        tol = ctx.profile.tolerance_grams * self._tolerance_factor
+        tol = ctx.profile.tolerance_grams * self._TOLERANCE_FACTOR
         by_class = _product_by_class(ctx)
-        ranked = sorted(
-            ctx.vision_candidates, key=lambda c: (-c.vote_count, -c.confidence)
-        )
-        top = ranked[0]
+        top = _ranked_by_votes(ctx)[0]
         p = by_class.get(top.class_id)
         if p is None or p.unit_weight <= 0:
             return None
-        n = min(max(1, round(target / p.unit_weight)), p.stock_qty)  # I12
-        residual = abs(target - n * p.unit_weight)
+        n, residual = _fit_count(target, p)
         if residual > tol:
             return None
         weight_score = max(0.0, 1.0 - residual / tol) if tol > 0 else 0.0

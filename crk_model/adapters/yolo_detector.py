@@ -22,6 +22,15 @@ from collections.abc import Sequence
 from crk_model.perception.detector import HAND_CLASS_ID, Detection
 
 
+def _allowed_classes(allowed_class_ids: Sequence[int] | None) -> list[int] | None:
+    """classes 허용목록 (P0-2, 원본 yolo_wrapper 동형): None = 무제한,
+    빈 목록 = fail-closed(호출부가 predict 없이 즉시 빈 결과) — 노이즈 클래스가
+    max_det 슬롯을 잠식해 저신뢰 실상품을 밀어내는 것을 원천 차단."""
+    if allowed_class_ids is None:
+        return None
+    return [int(c) for c in allowed_class_ids]
+
+
 class UltralyticsEngineDetector:
     def __init__(
         self,
@@ -65,25 +74,11 @@ class UltralyticsEngineDetector:
             # 실기 사고, 2026-07-29 커밋 코멘트). 단일 프레임도 패딩 배치
             # 경로로 우회한다.
             return self.detect_batch([frame], allowed_class_ids=allowed_class_ids)[0]
-        # classes 허용목록 (P0-2, 원본 yolo_wrapper 동형): None = 무제한,
-        # 빈 목록 = fail-closed(predict 호출 없이 즉시 []) — 노이즈 클래스가
-        # max_det 슬롯을 잠식해 저신뢰 실상품을 밀어내는 것을 원천 차단.
-        classes: list[int] | None = None
-        if allowed_class_ids is not None:
-            classes = [int(c) for c in allowed_class_ids]
-            if not classes:
-                return []
+        classes = _allowed_classes(allowed_class_ids)
+        if classes == []:
+            return []  # fail-closed (_allowed_classes)
         full = getattr(frame, "full", frame)  # FrameBundle 언랩
-        results = self._model.predict(
-            full,
-            imgsz=self._imgsz,
-            conf=self._conf,
-            max_det=self._max_det,
-            device=self._device,
-            classes=classes,
-            verbose=False,
-        )
-        return self._to_detections(results[0])
+        return self._to_detections(self._predict(full, classes)[0])
 
     def detect_batch(
         self, frames: Sequence, allowed_class_ids: Sequence[int] | None = None
@@ -102,11 +97,9 @@ class UltralyticsEngineDetector:
         - 기동 프로브(ModelService)가 이 경로를 1회 실행해 엔진 batch/dtype
           불일치를 배포 시점에 fail-fast로 드러낸다 (리뷰 #1 동형).
         """
-        classes: list[int] | None = None
-        if allowed_class_ids is not None:
-            classes = [int(c) for c in allowed_class_ids]
-            if not classes:
-                return [[] for _ in frames]  # fail-closed (detect와 동형)
+        classes = _allowed_classes(allowed_class_ids)
+        if classes == []:
+            return [[] for _ in frames]  # fail-closed (detect와 동형)
         fulls = [getattr(f, "full", f) for f in frames]
         if not fulls:
             return []
@@ -142,8 +135,13 @@ class UltralyticsEngineDetector:
         # BGR→RGB(채널 역순) + BCHW + 0~1 — 엔진 정밀도에 맞춘 dtype
         # 캐스팅은 ultralytics predictor가 처리한다 (float32로 넘긴다).
         t = t.permute(0, 3, 1, 2)[:, [2, 1, 0], :, :].contiguous().float().div_(255.0)
-        results = self._model.predict(
-            t,
+        results = self._predict(t, classes)
+        return [self._to_detections(r) for r in results[:n]]  # 패딩 결과 폐기
+
+    def _predict(self, source, classes: list[int] | None):
+        """detect/detect_batch 공용 predict 호출 — 현행 파라미터 고정 (모듈 docstring)."""
+        return self._model.predict(
+            source,
             imgsz=self._imgsz,
             conf=self._conf,
             max_det=self._max_det,
@@ -151,7 +149,6 @@ class UltralyticsEngineDetector:
             classes=classes,
             verbose=False,
         )
-        return [self._to_detections(r) for r in results[:n]]  # 패딩 결과 폐기
 
     def _to_detections(self, result) -> list[Detection]:
         detections: list[Detection] = []

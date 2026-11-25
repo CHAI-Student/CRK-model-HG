@@ -2534,3 +2534,55 @@ ruff (crk_model, tests): 기존 경고 2건만 (gateway/state_machine.py:365 E50
 - 루트 `README.md`의 조기 종료 언급 2줄(120·137행)은 사용자 수정이 있어 손대지 않았다.
 
 이 절의 변경도 작업 트리에만 있고 커밋·push하지 않았다. 되돌리기 전 작업 트리는 세션 스크래치패드에 백업했다.
+
+<a id="dedupe-20261125"></a>
+
+# 2026-11-25 중복 코드 정리 (경량화 검토 A의 나머지)
+
+[11-25 코드 경량화](#refactor-20261125)에서 cross_zone·settler만 하고 남긴 A 항목(동작 변화 없는 중복)을 모두 정리했다.
+같은 날 [무게 안정화 되돌림](#freezer-20261125) 이후의 코드가 기준이다.
+
+| 영역 | 정리한 중복 | 줄 수 |
+|---|---|---:|
+| `core/config.py` | 설정 87개의 기본값이 필드와 `from_env()`에 두 번 적혀 있던 것을 필드 하나로. `from_env`는 (필드 → env 키, 파서) 표로 읽는다 | 526 → 482 |
+| `perception/voting.py` | `combine`·`debug_summary`가 같은 게이트를 각자 계산하고 클래스별 유효표를 4번씩 다시 세던 것을 `_evaluate()` 하나로 | 412 → 405 |
+| `perception/motion_evidence.py`, `ingest/bocpd.py`, `adapters/yolo_detector.py` | 트랙·튜브 매칭 루프, 임계 산식, 구간→세그먼트 변환, 허용 클래스 정규화, predict 호출 반복 | 975 → 962 (세 파일 합) |
+| `service/pipeline.py` | 트레이 이벤트 재판정·재시도 3곳 반복을 `_judge_event`·`_complete_retry`로 | 975 → 970 |
+| `ledger/archive.py` | 상품·후보 dict와 json/yaml 쓰기 반복 | 465 → 449 |
+| `judgment/strategies.py` | 세그먼트 매칭 병합, 냉동 분리 취출 게이트, 표 순위 정렬 5곳, 개수 맞춤 3곳, 아무도 넘기지 않던 생성자 인자 5개(→ 클래스 상수, 값 동일) | 1327 → 1335 |
+| `adapters/analyze_cli.py`·`render_cli.py`·`label_cli.py`·`http_app.py` | 세 CLI의 세션 지정·조회 흐름을 `adapters/_archive_cli.py`(신규)로, 효과 없는 코드 | 1996 → 2040 (신규 51줄 포함) |
+
+`journal.py`는 helper를 만들면 오히려 길어져 그대로 뒀다. `crk_model` Python 코드 합계는 13,398 → 13,365줄이다.
+strategies·CLI는 줄 수가 늘었지만 같은 로직·메시지가 한 곳에만 있게 됐다.
+
+## 검증
+
+정리 전 작업 트리 복사본과 새 코드를 별도 프로세스에서 같은 입력으로 돌려 출력을 바이트 단위로 비교했다.
+모두 동일했다. 영역별 최종 합본에서도 다시 돌렸다.
+
+| 영역 | 비교 범위 |
+|---|---|
+| config | env 7,746가지(빈 값, 예시 env 3종, 키별 65개 값, 무작위 조합) — 결과·예외 메시지 |
+| perception | voting·motion 2만 시드 × 해시 시드 2, BOCPD 2만, YOLO 5천(가짜 모듈) |
+| pipeline·저장 | `TriggerPipeline.process` 2,500건, 재시도 3,500건, 저널·아카이브 직렬화·YAML 저장 |
+| judgment | JudgmentContext 5.6만 × 라우터 설정 8종, 약 160만 줄 + telemetry·miss_log |
+| CLI·http_app | 세 CLI 인자 조합(출력·종료 코드·생성 파일), http_app TestClient |
+
+```text
+.venv/bin/python -m pytest -q
+706 passed, 25 skipped
+저장 YAML 18세션 재정산: 정리 전과 출력 전체 동일
+ruff: 기존 경고 2건만
+```
+
+실행하지 못한 것: 실제 ultralytics/TensorRT, ffmpeg·numpy 렌더링(이 PC에 없음). 해당 코드는 바꾸지 않았다.
+
+## 정리 중 발견한 기존 문제 (수정하지 않음)
+
+- `judgment/strategies.py` `_strong_repeated_candidate`: 상품 조회에 `class_id > 0` 필터가 없어 손(0)·미매핑(-1) 상품이 대안으로 뽑힐 수 있다.
+- `analyze_cli`: unit 잔차 폴백에서 `break`가 안쪽 루프만 빠져, 같은 클래스가 여러 층에 있으면 마지막 층 값이 앞 값을 덮는다.
+  `--session X`의 파일이 매핑이 아닌 JSON/YAML이면 TypeError로 종료한다.
+- `config`: `MODEL__SESSION__ERROR_POLICY`만 빈 값·대소문자·공백을 기본값으로 넘기지 않고 오류를 낸다.
+  bool env는 오타(`ture`)를 조용히 False로 읽는다. 숫자 env의 공백 값은 오류다.
+
+이 절의 변경도 작업 트리에만 있고 커밋·push하지 않았다.

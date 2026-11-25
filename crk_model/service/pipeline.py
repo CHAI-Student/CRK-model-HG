@@ -385,12 +385,9 @@ class TriggerPipeline:
         빼고 미확정 이벤트를 1회 재판정한다 (_pool_exhaustion_retry, 이슈 #16).
         """
         trace.reason_codes.append(f"multi_tray_events:{len(analysis.events)}")
-        results: list[tuple[ChannelWeightEvent, JudgmentResult]] = []
-        for ev in analysis.events:
-            ectx = replace(ctx, delta_weight=ev.delta_grams, segments=ev.segments)
-            j = self._router.judge(ectx)
-            j = self._segment_target_retry(ectx, j, ev, trace)
-            results.append((ev, j))
+        results: list[tuple[ChannelWeightEvent, JudgmentResult]] = [
+            (ev, self._judge_event(ctx, ev, trace)) for ev in analysis.events
+        ]
         results = self._pool_exhaustion_retry(ctx, results, trace)
         results = self._collision_complete_retry(ctx, results, trace)
         results = self._collision_partial_retry(ctx, results, trace)
@@ -464,6 +461,27 @@ class TriggerPipeline:
             strategy=f"multi_tray[{strategies}]",
         )
 
+    def _judge_event(
+        self, ctx: JudgmentContext, ev: ChannelWeightEvent, trace: TriggerTrace, **overrides
+    ) -> JudgmentResult:
+        """트레이 이벤트 1건을 자기 무게(delta/segments)로 판정 + 세그먼트
+        타깃 재시도. overrides는 컨텍스트 추가 치환(재판정의 남은 후보 풀)."""
+        ectx = replace(ctx, delta_weight=ev.delta_grams, segments=ev.segments, **overrides)
+        return self._segment_target_retry(ectx, self._router.judge(ectx), ev, trace)
+
+    def _complete_retry(
+        self, ctx: JudgmentContext, ev: ChannelWeightEvent,
+        remaining: tuple[VisionCandidate, ...], trace: TriggerTrace, code: str, suffix: str,
+    ) -> JudgmentResult | None:
+        """남은 후보 풀로 이벤트를 1회 재판정 — 시도 자체를 trace에 기록하고
+        (I8), COMPLETE로 개선될 때만 reason에 suffix를 붙여 반환한다.
+        개선 실패면 None — 호출측이 원 판정을 유지한다 (악화 금지, I3 태도)."""
+        trace.reason_codes.append(f"{code}:ch{ev.channel}")
+        retried = self._judge_event(ctx, ev, trace, vision_candidates=remaining)
+        if retried.status is JudgmentStatus.COMPLETE and retried.products:
+            return replace(retried, reason=(retried.reason or retried.status.value) + suffix)
+        return None
+
     def _pool_exhaustion_retry(
         self,
         ctx: JudgmentContext,
@@ -508,22 +526,11 @@ class TriggerPipeline:
             if not remaining or len(remaining) == len(ctx.vision_candidates):
                 out.append((ev, j))  # 풀 변화 없음(소진 정체성 미포함) 또는 전멸
                 continue
-            trace.reason_codes.append(f"multi_tray_pool_exhaustion_retry:ch{ev.channel}")
-            rectx = replace(
-                ctx,
-                delta_weight=ev.delta_grams,
-                segments=ev.segments,
-                vision_candidates=remaining,
+            rj = self._complete_retry(
+                ctx, ev, remaining, trace,
+                "multi_tray_pool_exhaustion_retry", "+pool_exhaustion",
             )
-            rj = self._router.judge(rectx)
-            rj = self._segment_target_retry(rectx, rj, ev, trace)
-            if rj.status is JudgmentStatus.COMPLETE and rj.products:
-                rj = replace(
-                    rj, reason=(rj.reason or rj.status.value) + "+pool_exhaustion"
-                )
-                out.append((ev, rj))
-            else:
-                out.append((ev, j))  # 악화 금지 — 원 판정 유지
+            out.append((ev, rj if rj is not None else j))  # 악화 금지 — 원 판정 유지
         return out
 
     def _collision_complete_retry(
@@ -575,23 +582,11 @@ class TriggerPipeline:
             )
             if not remaining:
                 continue
-            trace.reason_codes.append(
-                f"multi_tray_collision_complete_retry:ch{ev.channel}"
+            retried = self._complete_retry(
+                ctx, ev, remaining, trace,
+                "multi_tray_collision_complete_retry", "+collision_complete_retry",
             )
-            retry_ctx = replace(
-                ctx,
-                delta_weight=ev.delta_grams,
-                segments=ev.segments,
-                vision_candidates=remaining,
-            )
-            retried = self._router.judge(retry_ctx)
-            retried = self._segment_target_retry(retry_ctx, retried, ev, trace)
-            if retried.status is JudgmentStatus.COMPLETE and retried.products:
-                retried = replace(
-                    retried,
-                    reason=(retried.reason or retried.status.value)
-                    + "+collision_complete_retry",
-                )
+            if retried is not None:
                 out[index] = (ev, retried)
                 consumed.update(
                     product_count.product.class_id for product_count in retried.products

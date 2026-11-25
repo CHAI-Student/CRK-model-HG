@@ -19,6 +19,11 @@ import argparse
 import datetime
 import sys
 
+from crk_model.adapters._archive_cli import (
+    add_session_arguments,
+    latest_session,
+    require_one_session,
+)
 from crk_model.ledger.archive import SessionArchive
 
 
@@ -50,12 +55,10 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="label-session", description="세션 아카이브에 정답 라벨 기입"
     )
-    parser.add_argument("session_id", nargs="?", help="세션 id (예: ses-10-1784698526)")
-    parser.add_argument(
-        "--latest", action="store_true", help="가장 최근 세션 파일에 기입 (실험 직후용)"
-    )
-    parser.add_argument(
-        "--dir", default="data/sessions", help="아카이브 루트 (기본: data/sessions)"
+    add_session_arguments(
+        parser,
+        session_help="세션 id (예: ses-10-1784698526)",
+        latest_help="가장 최근 세션 파일에 기입 (실험 직후용)",
     )
     parser.add_argument("--zone", type=int, default=None, help="--take의 기본 존")
     parser.add_argument(
@@ -78,8 +81,7 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--none과 --take는 함께 쓸 수 없습니다")
     if not args.take and not args.none_taken:
         parser.error("--take를 1개 이상 지정하거나 --none을 사용해야 합니다")
-    if bool(args.session_id) == args.latest:
-        parser.error("session_id 또는 --latest 중 정확히 하나를 지정해야 합니다")
+    require_one_session(parser, args)
 
     try:
         items = [_parse_take(raw, args.zone) for raw in args.take]
@@ -88,9 +90,8 @@ def main(argv: list[str] | None = None) -> int:
 
     archive = SessionArchive(args.dir)
     if args.latest:
-        path = archive.latest()
+        path = latest_session(archive, args.dir)
         if path is None:
-            print(f"아카이브가 비어 있습니다: {args.dir}", file=sys.stderr)
             return 1
         session_id = path.stem
     else:

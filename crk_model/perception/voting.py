@@ -177,18 +177,16 @@ class VotingEnsemble:
     def attach_motion_evidence(self, evidence) -> None:
         self._motion_evidence = evidence
 
-    def _effective_votes(self, camera: str, cid: int) -> list[float]:
-        """변위 증거 반영 후의 유효 표(conf 리스트).
+    def _effective_votes(self, camera: str, cid: int) -> list[tuple[float, int | None]]:
+        """변위 증거 반영 후의 유효 표((conf, track_id|None) 리스트, 원 순서).
 
         트랙 귀속이 있는 표는 **트랙 단위**로 검증한다 (트랙릿 투표 — 같은
         클래스의 진열 인스턴스 표는 몰수되고 움직인 트랙의 표만 남는다).
         귀속 없는 표(tid None: zero-bbox 면제 또는 직접 사용)는 클래스 단위
         판정으로 폴백."""
         votes = self._votes[camera].get(cid, [])
-        if not votes:
-            return []
-        if self._motion_evidence is None:
-            return [conf for conf, _ in votes]
+        if not votes or self._motion_evidence is None:
+            return list(votes)
         ev = self._motion_evidence
         out = []
         class_ok: bool | None = None  # lazy — tid 없는 표가 있을 때만 평가
@@ -201,12 +199,12 @@ class VotingEnsemble:
                     # 트랙(별개 tid, head 0)은 유지된다. share 분모(_top_votes)
                     # 도 이 경로를 지나므로 자동 정화 (0713 §10 ses-8 문제).
                     continue
-                out.append(conf)
+                out.append((conf, tid))
                 continue
             if class_ok is None:
                 class_ok = ev.class_motion(camera, cid)
             if class_ok:
-                out.append(conf)
+                out.append((conf, tid))
         return out
 
     def held_summary(self) -> dict | None:
@@ -245,18 +243,17 @@ class VotingEnsemble:
             return None
         by_class: dict[int, dict] = {}
         for camera in ("top", "side"):
-            for cid, votes in self._votes[camera].items():
+            for cid in self._votes[camera]:
                 rec = by_class.setdefault(
                     cid, {"votes": 0, "minority": 0, "tube_conf": 0.0}
                 )
-                rec["votes"] += len(self._effective_votes(camera, cid))
+                effective = self._effective_votes(camera, cid)
+                rec["votes"] += len(effective)
                 by_tid: dict[int, list[float]] = {}
                 minority = 0
-                for conf, tid in votes:
-                    if tid is None or not ev.track_qualifies(tid):
-                        continue
-                    if self._held_mode == "active" and ev.track_held(tid):
-                        continue
+                for conf, tid in effective:
+                    if tid is None:
+                        continue  # 트랙 귀속 표만 튜브에 속한다
                     by_tid.setdefault(tid, []).append(conf)
                     if ev.tube_minority(tid):
                         minority += 1
@@ -288,18 +285,12 @@ class VotingEnsemble:
             weighted = s * self._side_only_weight
         return min(weighted, 1.0)
 
-    def _top_votes(self) -> int:
+    @staticmethod
+    def _top_votes(effective: dict[int, tuple[list[float], list[float]]]) -> int:
         """상대 하한(min_vote_share)의 기준값 — 전 class 중 최다 득표.
         1위 자신은 share=1.0이라 절대 잘리지 않는다. 변위 몰수 반영 후 기준
         (몰수된 배경 1위가 share 기준을 오염시키면 안 된다)."""
-        classes = set(self._votes["top"]) | set(self._votes["side"])
-        return max(
-            (
-                len(self._effective_votes("top", cid)) + len(self._effective_votes("side", cid))
-                for cid in classes
-            ),
-            default=0,
-        )
+        return max((len(top) + len(side) for top, side in effective.values()), default=0)
 
     def _ratio_denominator(self) -> int:
         """vote_ratio 분모 (combine/debug_summary 공유 — 이중 기준 금지).
@@ -317,25 +308,59 @@ class VotingEnsemble:
             )
         return max(1, self.gate_passed_frames)
 
-    def combine(self) -> tuple[VisionCandidate, ...]:
+    def _evaluate(self) -> list[tuple[int, int, float, float, str | None]]:
+        """combine/debug_summary 공유 게이트 판정 (이중 기준 금지) — 클래스별
+        (cid, votes, ratio, weighted_conf, rejected_by).
+
+        유효표는 카메라×클래스당 1회만 계산해 share 기준(_top_votes)과 클래스별
+        게이트가 공유한다. no_motion 거부의 votes는 원 득표(진단용)다."""
         classes = set(self._votes["top"]) | set(self._votes["side"])
+        effective = {
+            cid: (
+                [conf for conf, _ in self._effective_votes("top", cid)],
+                [conf for conf, _ in self._effective_votes("side", cid)],
+            )
+            for cid in classes
+        }
         denominator = self._ratio_denominator()
-        vote_floor = self._top_votes() * self._min_share
-        out: list[VisionCandidate] = []
-        for cid in classes:
-            top = self._effective_votes("top", cid)
-            side = self._effective_votes("side", cid)
+        vote_floor = self._top_votes(effective) * self._min_share
+        rows: list[tuple[int, int, float, float, str | None]] = []
+        for cid, (top, side) in effective.items():
+            raw_votes = len(self._votes["top"].get(cid, [])) + len(
+                self._votes["side"].get(cid, [])
+            )
             weighted = self._weighted_confidence(top, side)
             votes = len(top) + len(side)
-            if votes == 0:
-                continue  # 변위 몰수로 전멸 (debug_summary가 no_motion으로 보고)
             ratio = votes / denominator
-            if not (ratio >= self._min_ratio or votes >= self._min_count):
-                continue
-            if votes < vote_floor:
-                continue  # 이슈 #10: 1위 대비 미미한 득표 = 노이즈/오염 잔재
-            if weighted < self._conf_floor:
-                continue
+            passes_ratio_gate = ratio >= self._min_ratio or votes >= self._min_count
+            if votes == 0 and raw_votes > 0:
+                # 변위 증거 없음 — 단, "측정된 정지"(진열/배경)와 "측정 불가"
+                # (1~2관측 단편 — 빠른 취출 시그니처)를 라벨로 구분한다.
+                # 후자가 정답 클래스에서 반복되면 MOTION_UNMEASURABLE=exempt
+                # 승격 근거 (motion_evidence.py unmeasurable_policy).
+                ev = self._motion_evidence
+                unmeasured = ev is not None and any(
+                    self._votes[c].get(cid) and ev.class_unmeasurable(c, cid)
+                    for c in ("top", "side")
+                )
+                rejected_by = "no_motion_unmeasurable" if unmeasured else "no_motion"
+                votes = raw_votes  # 진단에는 원 득표를 남긴다 (얼마나 몰수됐나)
+            elif not passes_ratio_gate:
+                rejected_by = "ratio"
+            elif votes < vote_floor:
+                rejected_by = "share"  # 이슈 #10: 1위 대비 미미한 득표 = 노이즈/오염 잔재
+            elif weighted < self._conf_floor:
+                rejected_by = "conf_floor"
+            else:
+                rejected_by = None
+            rows.append((cid, votes, ratio, weighted, rejected_by))
+        return rows
+
+    def combine(self) -> tuple[VisionCandidate, ...]:
+        out: list[VisionCandidate] = []
+        for cid, votes, ratio, weighted, rejected_by in self._evaluate():
+            if rejected_by is not None or votes == 0:
+                continue  # 거부 사유는 debug_summary가 보고 (변위 몰수 전멸 = no_motion)
             head, span, first = self._position_signals(cid)
             out.append(
                 VisionCandidate(
@@ -366,47 +391,15 @@ class VotingEnsemble:
 
     def debug_summary(self) -> dict:
         """issue #6 진단: combine()이 왜 특정 class_id를 버렸는지(vote_ratio
-        게이트 vs conf_floor) class_id별로 보고한다. combine()과 동일한 게이트
-        로직을 읽기 전용으로 중복 계산할 뿐, combine()의 동작·성능에는 영향
+        게이트 vs conf_floor) class_id별로 보고한다. combine()과 같은
+        _evaluate() 판정을 읽기 전용으로 보고할 뿐, combine()의 동작에는 영향
         없다(공유 mutable state 없음, 호출하지 않으면 오버헤드 0)."""
-        classes = set(self._votes["top"]) | set(self._votes["side"])
-        denominator = self._ratio_denominator()
-        vote_floor = self._top_votes() * self._min_share
-        summary: dict[int, dict] = {}
-        for cid in classes:
-            raw_votes = len(self._votes["top"].get(cid, [])) + len(
-                self._votes["side"].get(cid, [])
-            )
-            top = self._effective_votes("top", cid)
-            side = self._effective_votes("side", cid)
-            weighted = self._weighted_confidence(top, side)
-            votes = len(top) + len(side)
-            ratio = votes / denominator
-            passes_ratio_gate = ratio >= self._min_ratio or votes >= self._min_count
-            if votes == 0 and raw_votes > 0:
-                # 변위 증거 없음 — 단, "측정된 정지"(진열/배경)와 "측정 불가"
-                # (1~2관측 단편 — 빠른 취출 시그니처)를 라벨로 구분한다.
-                # 후자가 정답 클래스에서 반복되면 MOTION_UNMEASURABLE=exempt
-                # 승격 근거 (motion_evidence.py unmeasurable_policy).
-                ev = self._motion_evidence
-                unmeasured = ev is not None and any(
-                    self._votes[c].get(cid) and ev.class_unmeasurable(c, cid)
-                    for c in ("top", "side")
-                )
-                rejected_by = "no_motion_unmeasurable" if unmeasured else "no_motion"
-                votes = raw_votes  # 진단에는 원 득표를 남긴다 (얼마나 몰수됐나)
-            elif not passes_ratio_gate:
-                rejected_by = "ratio"
-            elif votes < vote_floor:
-                rejected_by = "share"
-            elif weighted < self._conf_floor:
-                rejected_by = "conf_floor"
-            else:
-                rejected_by = None
-            summary[cid] = {
+        return {
+            cid: {
                 "votes": votes,
                 "ratio": ratio,
                 "weighted_conf": weighted,
                 "rejected_by": rejected_by,
             }
-        return summary
+            for cid, votes, ratio, weighted, rejected_by in self._evaluate()
+        }

@@ -43,6 +43,12 @@ import subprocess
 import sys
 from pathlib import Path
 
+from crk_model.adapters._archive_cli import (
+    add_session_arguments,
+    find_session,
+    latest_session,
+    require_one_session,
+)
 from crk_model.adapters.avi_frames import decode_avi
 from crk_model.ledger.archive import SessionArchive, _load_document
 from crk_model.perception.coordinates import y_from_image
@@ -361,7 +367,8 @@ def _compose_frame(
     canvas = template.copy()
     canvas[FRAME_Y : FRAME_Y + FRAME_SIZE, FRAME_X : FRAME_X + FRAME_SIZE] = frame
 
-    for d in _influential(record):
+    influential = _influential(record)
+    for d in influential:
         bbox = d.get("bbox") or (0, 0, 0, 0)
         if tuple(bbox) == (0, 0, 0, 0):
             continue  # 공간 정보 없는 검출 (테스트 더미 등)
@@ -388,7 +395,7 @@ def _compose_frame(
         status = f"POS {pos:03d} SKIP"
         color = (160, 160, 160)
     else:
-        status = f"POS {pos:03d} INFER {len(_influential(record))}"
+        status = f"POS {pos:03d} INFER {len(influential)}"
         color = (0, 255, 0)
     _text(canvas, 3, status_y, status, color, scale=2)
     return canvas
@@ -445,9 +452,8 @@ def render_trigger(
             print(f"  [trig {index}/{camera}] 영상 없음: {path}", file=sys.stderr)
             continue
         cam_fps = fps or _probe_fps(path) or 20.0
-        dest = out_dir / f"trig{index}_{camera}" if fmt == "jpg" else (
-            out_dir / f"trig{index}_{camera}.mp4"
-        )
+        name = f"trig{index}_{camera}"
+        dest = out_dir / (name if fmt == "jpg" else f"{name}.mp4")
         sink = FfmpegSink(dest, fmt, cam_fps)
         crop = crops.get(camera, "center")
         template, status_y = _canvas_template(
@@ -481,12 +487,10 @@ def main(argv: list[str] | None = None) -> int:
         prog="render-session",
         description="세션 아카이브의 bbox 기록을 AVI 위에 오버레이한 검증 영상 생성",
     )
-    parser.add_argument("session_id", nargs="?", help="세션 id (예: ses-3-1784788285)")
-    parser.add_argument(
-        "--latest", action="store_true", help="가장 최근 세션 (실험 직후용)"
-    )
-    parser.add_argument(
-        "--dir", default="data/sessions", help="아카이브 루트 (기본: data/sessions)"
+    add_session_arguments(
+        parser,
+        session_help="세션 id (예: ses-3-1784788285)",
+        latest_help="가장 최근 세션 (실험 직후용)",
     )
     parser.add_argument(
         "--out", default="data/render", help="출력 루트 (기본: data/render/<세션id>/)"
@@ -513,8 +517,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    if bool(args.session_id) == args.latest:
-        parser.error("session_id 또는 --latest 중 정확히 하나를 지정해야 합니다")
+    require_one_session(parser, args)
     if shutil.which("ffmpeg") is None:
         print("ffmpeg가 필요합니다 (인코드/디코드)", file=sys.stderr)
         return 1
@@ -536,18 +539,15 @@ def main(argv: list[str] | None = None) -> int:
 
     archive = SessionArchive(args.dir)
     if args.latest:
-        path = archive.latest()
-        if path is None:
-            print(f"아카이브가 비어 있습니다: {args.dir}", file=sys.stderr)
-            return 1
+        path = latest_session(archive, args.dir)
     else:
-        path = archive.find(args.session_id)
-        if path is None:
-            print(
-                f"세션 아카이브를 찾을 수 없습니다: {args.session_id} (dir={args.dir})",
-                file=sys.stderr,
-            )
-            return 1
+        path = find_session(
+            archive,
+            args.session_id,
+            f"세션 아카이브를 찾을 수 없습니다: {args.session_id} (dir={args.dir})",
+        )
+    if path is None:
+        return 1
     doc = _load_document(path)
     session_id = doc.get("session_id") or path.stem
     out_dir = Path(args.out) / session_id

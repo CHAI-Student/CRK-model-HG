@@ -87,8 +87,12 @@ class _Track:
         self.matched_frame = frame_idx
         return step
 
+    def threshold(self, floor_px: float, size_scale: float) -> float:
+        """통과 임계 thr = max(floor_px, size_scale × 평균 bbox 크기) (모듈 docstring)."""
+        return max(floor_px, size_scale * (self.size_sum / self.n)) if self.n else floor_px
+
     def passes(self, floor_px: float, size_scale: float) -> bool:
-        thr = max(floor_px, size_scale * (self.size_sum / self.n)) if self.n else floor_px
+        thr = self.threshold(floor_px, size_scale)
         return self.path >= thr or self.max_disp >= thr
 
 
@@ -206,20 +210,8 @@ class MotionEvidence:
             cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
             size = max(x2 - x1, y2 - y1)
             tracks = self._tracks[(camera, d.class_id)]
-            best, best_dist = None, float("inf")
-            for t in tracks:
-                if t.matched_frame == idx:
-                    continue  # 이 프레임에서 이미 소비된 트랙
-                # G2 재연관 창: 직전 프레임에 이어진 트랙은 기본 반경, 1프레임
-                # 이상 끊겼던 트랙은 reassoc_window 안에서 완화 반경으로 잇는다
-                # (같은 클래스 버킷 한정 — 승계 오염 방지는 클래스 조건이 담당).
-                gap = idx - t.matched_frame
-                radius = self.max_jump_px
-                if 1 < gap <= self.reassoc_window:
-                    radius *= self.reassoc_factor
-                dist = ((cx - t.last_cx) ** 2 + (cy - t.last_cy) ** 2) ** 0.5
-                if dist <= radius and dist < best_dist:
-                    best, best_dist = t, dist
+            # 같은 클래스 버킷 한정 매칭 — 승계 오염 방지는 클래스 조건이 담당.
+            best = self._nearest(tracks, cx, cy, idx)
             if best is None:
                 best = _Track(
                     last_cx=cx, last_cy=cy, first_cx=cx, first_cy=cy,
@@ -229,15 +221,15 @@ class MotionEvidence:
                 self._next_tid += 1
                 tracks.append(best)
             step = best.observe(cx, cy, size, idx)
-            if direction_config is not None:
-                coordinate = cx if direction_config.axis == "x" else cy
-                best.axis_observations.append((pos if pos is not None else idx, coordinate))
             # T2' 튜브 귀속 (클래스 무관) — 트랙과 병행. 귀속은 마지막 관측
             # 기준(한 트랙이 튜브를 갈아타는 드문 경우 최신이 이긴다).
             tube = self._observe_tube(camera, cx, cy, size, idx, d.class_id)
-            if direction_config is not None:
-                tube.observations.append((pos if pos is not None else idx, d))
             self._tube_of_tid[best.tid] = tube.aid
+            if direction_config is not None:
+                obs_pos = pos if pos is not None else idx
+                coordinate = cx if direction_config.axis == "x" else cy
+                best.axis_observations.append((obs_pos, coordinate))
+                tube.observations.append((obs_pos, d))
             if pos is not None:
                 if best.first_pos < 0:
                     best.first_pos = pos
@@ -267,12 +259,30 @@ class MotionEvidence:
             avg = t.size_sum / t.n if t.n else size
             dist = ((cx - t.last_cx) ** 2 + (cy - t.last_cy) ** 2) ** 0.5
             if dist <= 0.5 * avg:
-                t.n += 1
-                t.size_sum += size
-                t.class_counts[class_id] = t.class_counts.get(class_id, 0) + 1
-                return t
+                best = t  # 같은 프레임 이중 박스 흡수 — 위치 갱신 없음
+                break
+        else:
+            best = self._nearest(tubes, cx, cy, idx)
+            if best is None:
+                best = _Tube(last_cx=cx, last_cy=cy, aid=self._next_aid)
+                self._tube_by_id[self._next_aid] = best
+                self._next_aid += 1
+                tubes.append(best)
+            best.last_cx, best.last_cy = cx, cy
+            best.matched_frame = idx
+        best.size_sum += size
+        best.n += 1
+        best.class_counts[class_id] = best.class_counts.get(class_id, 0) + 1
+        return best
+
+    def _nearest(self, items: Sequence, cx: float, cy: float, idx: int):
+        """최근접 중심 매칭 (트랙·튜브 공통) — 반경 내 최근접, 없으면 None.
+
+        이 프레임에서 이미 소비된 항목은 건너뛴다 (동일 프레임 다중 흡수 방지).
+        G2 재연관 창: 직전 프레임에 이어진 항목은 기본 반경, 1프레임 이상
+        끊겼던 항목은 reassoc_window 안에서 완화 반경으로 잇는다."""
         best, best_dist = None, float("inf")
-        for t in tubes:
+        for t in items:
             if t.matched_frame == idx:
                 continue
             gap = idx - t.matched_frame
@@ -282,16 +292,6 @@ class MotionEvidence:
             dist = ((cx - t.last_cx) ** 2 + (cy - t.last_cy) ** 2) ** 0.5
             if dist <= radius and dist < best_dist:
                 best, best_dist = t, dist
-        if best is None:
-            best = _Tube(last_cx=cx, last_cy=cy, aid=self._next_aid)
-            self._tube_by_id[self._next_aid] = best
-            self._next_aid += 1
-            tubes.append(best)
-        best.last_cx, best.last_cy = cx, cy
-        best.size_sum += size
-        best.n += 1
-        best.matched_frame = idx
-        best.class_counts[class_id] = best.class_counts.get(class_id, 0) + 1
         return best
 
     def tube_minority(self, tid: int) -> bool:
@@ -468,11 +468,7 @@ class MotionEvidence:
         out: dict[str, dict[int, dict]] = defaultdict(dict)
         for (camera, cid), tracks in self._tracks.items():
             best = max(tracks, key=lambda t: max(t.path, t.max_disp))
-            thr = (
-                max(self.floor_px, self.size_scale * (best.size_sum / best.n))
-                if best.n
-                else self.floor_px
-            )
+            thr = best.threshold(self.floor_px, self.size_scale)
             detail_tracks = sorted(tracks, key=lambda t: -t.n)[:8]
             detail = [
                 {

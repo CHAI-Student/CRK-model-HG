@@ -22,7 +22,7 @@ changepoint 가설이 유효). hazard 상수 H (기본 0.1 ≈ 평균 run 10샘�
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 
 from crk_model.core.profiles import SensorProfile
@@ -150,6 +150,15 @@ class BocpdAnalyzer:
         return merged
 
 
+def _step_segments(
+    samples: Sequence[LoadcellSample], channel: BocpdChannel, step: float
+) -> Iterator[WeightSegment]:
+    """인접 BOCPD 구간 사이 레벨 변화 중 |Δ| ≥ step인 것을 WeightSegment로 (시간순)."""
+    for prev, cur in zip(channel.segments, channel.segments[1:], strict=False):
+        if abs(cur.level - prev.level) >= step:
+            yield WeightSegment(samples[prev.end].ts, samples[cur.start].ts, cur.level - prev.level)
+
+
 def _logsumexp(vals: list[float]) -> float:
     m = max(vals)
     if m == -math.inf:
@@ -209,16 +218,9 @@ class BocpdLoadcellAnalyzer:
                 segments = tuple(
                     sorted(
                         (
-                            WeightSegment(
-                                samples[prev.end].ts,
-                                samples[cur.start].ts,
-                                cur.level - prev.level,
-                            )
+                            segment
                             for channel in moved_channels
-                            for prev, cur in zip(
-                                channel.segments, channel.segments[1:], strict=False
-                            )
-                            if abs(cur.level - prev.level) >= step
+                            for segment in _step_segments(samples, channel, step)
                         ),
                         key=lambda segment: segment.start_ts,
                     )
@@ -245,27 +247,19 @@ class BocpdLoadcellAnalyzer:
                 delta = level.end_median - c.segments[0].level
             if abs(delta) < min_change:
                 continue  # 평탄/노이즈 트레이 — baseline에만 기여
-            if len(c.segments) >= 2 and c.segments[-1].level - c.segments[-2].level >= step:
-                last = c.segments[-1]
-                if samples[last.end].ts - samples[last.start].ts < self._stab_wait:
-                    trailing_return_stabilized = False
-            if delta > 0:
+            last = c.segments[-1]
+            unsettled = samples[last.end].ts - samples[last.start].ts < self._stab_wait
+            if len(c.segments) >= 2 and last.level - c.segments[-2].level >= step and unsettled:
+                trailing_return_stabilized = False
+            if delta > 0 and unsettled:
                 # 반품 안정화 대기 (QA Q3 ①): 마지막 레벨이 충분히 지속돼야
                 # 구간화 — plateau 경로와 동일 계약.
-                last = c.segments[-1]
-                duration = samples[last.end].ts - samples[last.start].ts
-                if duration < self._stab_wait:
-                    pending = True
-                    pending_delta += delta
-                    continue
-            segs = tuple(
-                WeightSegment(
-                    samples[prev.end].ts, samples[cur.start].ts, cur.level - prev.level
-                )
-                for prev, cur in zip(c.segments, c.segments[1:], strict=False)
-                if abs(cur.level - prev.level) >= step
+                pending = True
+                pending_delta += delta
+                continue
+            events.append(
+                ChannelWeightEvent(c.channel, delta, tuple(_step_segments(samples, c, step)))
             )
-            events.append(ChannelWeightEvent(c.channel, delta, segs))
         if pending:
             delta = pending_delta + sum(e.delta_grams for e in events)
             return LoadcellAnalysis(

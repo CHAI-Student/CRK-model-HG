@@ -163,8 +163,9 @@ def _int_key_counts(raw: Any) -> dict[int, int] | None:
 def _normalize_multi_zone(body: Any, name_to_class: Mapping[str, int] | None = None) -> dict:
     """wire(dict 또는 Node 배열) → 도메인 계약
     {state, active_products, seq_watermark, expected_triggers}."""
+    products, signal, seq_watermark, expected = [], None, None, None
     if isinstance(body, list):
-        products, signal, seq_watermark, expected = body, None, None, None
+        products = body
     elif isinstance(body, Mapping):
         products = body.get("products", [])
         signal = body.get("session_id")
@@ -172,8 +173,6 @@ def _normalize_multi_zone(body: Any, name_to_class: Mapping[str, int] | None = N
         # 엣지 워터마크 (issue #8): Node가 close 시점에 세션 녹화 디렉토리를
         # 세어 보내는 존별 기대 트리거 수 — {"expected_triggers": {"4": 2}}.
         expected = _int_key_counts(body.get("expected_triggers"))
-    else:
-        products, signal, seq_watermark, expected = [], None, None, None
     return {
         "state": _door_state(signal),
         "active_products": [_active_product_fields(p, name_to_class) for p in products],
@@ -196,7 +195,7 @@ def _wire_trigger_response(resp: dict, service: ModelService) -> dict:
         **resp,
         "success": status in ("queued", "duplicate"),
         "session_id": trigger_id,
-        "door_session_id": door_session_id if door_session_id is not None else None,
+        "door_session_id": door_session_id,
         "message": "Trigger accepted" if status == "queued" else "Trigger duplicate (dropped)",
         "waiting_for": None,
     }
