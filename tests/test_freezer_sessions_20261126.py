@@ -24,7 +24,7 @@ from crk_model.ingest.loadcell import LoadcellSample
 from crk_model.judgment.interfaces import JudgmentContext
 from crk_model.judgment.router import JudgmentRouter
 from crk_model.ledger.cross_zone import CrossZonePenaltyConfig
-from crk_model.ledger.events import FreezerMovementEvidence, TriggerEvent
+from crk_model.ledger.events import FreezerMovementEvidence, FreezerReturnEvidence, TriggerEvent
 from crk_model.ledger.freezer_returns import take_measurement
 from crk_model.ledger.journal import event_from_dict
 from crk_model.ledger.settler import CloseSettler
@@ -88,6 +88,42 @@ def _mixed(zone, ts, take, ret, take_g=-505.0, return_g=525.0):
         vision_candidates=(*take, *ret),
         freezer_movement=FreezerMovementEvidence(tuple(take), tuple(ret), True, (net,)),
     )
+
+
+def _floor_event(zone, steps, take, ret):
+    """파이프라인 출력 모양의 냉동 트리거: 순변화 50g 미만이면 D2 무청구, 50g 이상
+    양수면 반납 증거(반납 방향 후보, 없으면 영상 후보)를 단다."""
+    net = sum(steps)
+    segments = tuple(WeightSegment(10 + 2 * i, 11 + 2 * i, d) for i, d in enumerate(steps))
+    small = abs(net) < 50
+    freezer_return = None if small or net < 0 else FreezerReturnEvidence(
+        tuple(ret or take), True, "return_direction" if ret else "video")
+    return TriggerEvent(
+        "s", zone, 10.0, net, segments,
+        JudgmentResult(JudgmentStatus.NO_DETECTION,
+                       reason="freezer_masked_movement" if small else "freezer_return_candidate"),
+        vision_candidates=(*take, *ret), freezer_return=freezer_return,
+        freezer_movement=FreezerMovementEvidence(tuple(take), tuple(ret), True, (net,)),
+    )
+
+
+@pytest.mark.parametrize("steps,take,ret,expected,review", [
+    # ses-1-1795670038 5층 모양: 들고 온 11이 취출 방향 1위(11표), 7은 5표
+    ([32.5, -515, 210, 320], (vc(11, 11), vc(7, 5)), (vc(11, 10),), {"7": 1}, []),
+    ([530, -470], (vc(11, 11), vc(7, 5)), (vc(11, 10),), {"7": 1}, []),  # 반납 → 취출
+    ([-470, 500], (vc(11, 11), vc(7, 5)), (), {"7": 1}, []),  # 반납 방향 없음, +30g
+    ([-470, 530], (vc(11, 11), vc(7, 5)), (), {"7": 1}, []),  # 반납 방향 없음, +60g
+    ([-470, 530], (vc(7, 5),), (vc(11, 10),), {"7": 1}, []),
+    ([-470, 530], (vc(11, 11),), (vc(11, 10),), {}, [5]),  # 7 미검출 → 무청구 review
+    ([165, -690], (vc(11, 11),), (vc(11, 10),), {"11": 1}, [5]),  # 누름 + 취출은 반납 아님
+], ids=["take_then_return", "return_then_take", "no_direction_small_net",
+        "no_direction_large_net", "only_real_take_seen", "real_take_unseen", "press_not_return"])
+def test_other_floor_item_returned_while_taking_here(steps, take, ret, expected, review):
+    """2층 11 취출 → 5층에서 7 취출 + 11 반납. 들고 온 11은 5층 취출 후보에서 빼고
+    반납으로 2층 청구를 지운다 (공유 카메라라 들고 오는 모습이 취출 방향으로 잡힌다)."""
+    result = settle([_take(2, 0.0, 11, -525.0), _floor_event(5, steps, take, ret)])
+    assert class_counts(result) == expected
+    assert [z.zone for z in result.zones if z.status != "complete"] == review
 
 
 def test_carried_in_item_seen_as_take_is_returned_not_billed():

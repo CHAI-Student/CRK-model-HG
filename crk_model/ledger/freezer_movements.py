@@ -99,23 +99,29 @@ def _split_mixed(
     taking = tuple(c for c in movement.take_candidates if c.vote_count >= 3)
     returning = tuple(c for c in movement.return_candidates if c.vote_count >= 3)
     segments = sorted(event.segments, key=lambda segment: segment.end_ts)
-    # 반납 방향 후보가 없어도 순변화가 작고 상품 크기 하강·상승이 모두 있으면(D2와
-    # 같은 조건) 반납 SKU를 세션 무게 반납과 같은 조건으로만 찾는다 (2026-11-26).
-    masked = (not returning
-              and abs(event.delta_weight) < (profile.min_trigger_delta_grams
-                                             or profile.min_weight_change_grams)
-              and has_masked_movement(segments, floor))
+    # 반납 방향 후보가 없어도 상품 크기 하강·상승이 모두 있으면 반납 SKU를 세션 무게
+    # 반납과 같은 조건으로만 찾는다 (2026-11-26: D2 상쇄 움직임, 순변화 50g 이상도 포함 —
+    # 7 취출 + 11 반납은 순변화가 +60g 안팎이다).
+    masked = not returning and has_masked_movement(segments, floor)
     if not taking or (not returning and not masked):
         return None
-    last_take = next((i for i in range(len(segments) - 1, -1, -1)
-                      if segments[i].delta_grams < 0), None)
-    if last_take is None:
+    takes = [i for i, segment in enumerate(segments) if segment.delta_grams < 0]
+    if not takes:
         return None
-    suffix = segments[last_take + 1:]
-    if not suffix or any(segment.delta_grams <= 0 for segment in suffix):
+    last_take = takes[-1]
+    suffix, prefix = segments[last_take + 1:], segments[:takes[0]]
+    if suffix and all(segment.delta_grams > 0 for segment in suffix) and sum(
+            segment.delta_grams for segment in suffix) >= floor:
+        returned_part = suffix  # 취출 → 반납
+    elif returning and prefix and all(segment.delta_grams > 0 for segment in prefix):
+        # 반납 → 취출: 들고 온 상품을 먼저 놓고 이 층 상품을 꺼냈다 (2026-11-26). 손으로
+        # 누른 하중도 첫 하강 앞 상승이라, 반납 방향 SKU의 앞선 취출 이력과 무게가 직접
+        # 맞을 때만 인정한다(세션 무게 보완 없음).
+        returned_part = prefix
+    else:
         return None
-    returned_weight = sum(segment.delta_grams for segment in suffix)
-    if returned_weight < profile.min_weight_change_grams:
+    returned_weight = sum(segment.delta_grams for segment in returned_part)
+    if returned_weight < max(floor, profile.min_weight_change_grams):
         return None
     tolerance = return_tolerance(profile)
     if returning:
@@ -126,7 +132,7 @@ def _split_mixed(
             tuple(c for c in event.vision_candidates if c.vote_count >= 3), True, "video",
         )
         allocation, reason = [], "no_prior_take"
-    by_session_weight = not allocation
+    by_session_weight = not allocation and returned_part is suffix
     if by_session_weight:
         # 반납 SKU를 이 세션에서 꺼낸 적 없거나(비전 혼동) 정하지 못했으면, 세션 취출
         # 이력 중 무게가 맞는 SKU가 하나뿐이고 영상에 관측됐을 때만 연결한다.
@@ -150,27 +156,29 @@ def _split_mixed(
     if taken_weight < profile.min_weight_change_grams:
         return None
     returned_classes = {lot.product.class_id for lot, _ in allocation}
-    carried_in = ({c.class_id for c in taking} <= returned_classes
-                  and all(lot.zone != event.zone for lot, _ in allocation))
-    if carried_in:
-        # 카메라를 모든 층이 공유해, 다른 층에서 꺼내 들고 온 반납 SKU가 이 층 클립에
-        # 취출 방향으로도 잡힌다 (ses-1-1795659665: 3층 10 → 2층 반납). 취출 방향
-        # 후보가 반납 SKU뿐이면 반납만 연결하고, 이 층에서 꺼낸 상품은 영상 근거가
-        # 없으므로 청구하지 않는다 — 남은 무게는 정산에서 review로 드러난다 (2026-11-26).
+    # 다른 층에서 꺼내 들고 온 반납 SKU. 카메라를 모든 층이 공유해 이 층 클립에 취출
+    # 방향으로도 잡히므로(들고 오는 모습), 이 층 취출 후보에서 뺀다 (2026-11-26:
+    # ses-1-1795659665 3층 10 → 2층 반납, ses-1-1795670038 2층 11 → 5층 7 취출 + 11 반납).
+    carried = ({lot.product.class_id for lot, _ in allocation if lot.zone != event.zone}
+               - {lot.product.class_id for lot, _ in allocation if lot.zone == event.zone})
+    take_candidates = tuple(c for c in taking if c.class_id not in carried)
+    if not take_candidates:
+        # 취출 방향 후보가 들고 온 SKU뿐이면 반납만 연결하고, 이 층에서 꺼낸 상품은 영상
+        # 근거가 없으므로 청구하지 않는다 — 남은 무게는 정산에서 review로 드러난다.
         judgment = JudgmentResult(JudgmentStatus.NO_DETECTION, reason="carried_in_unidentified")
-        take_candidates: tuple = ()
     else:
         judgment = router.judge(JudgmentContext(
             zone=event.zone, profile=profile, delta_weight=-taken_weight, segments=(),
-            vision_candidates=taking, active_products=tuple(products), vision_only=False,
+            vision_candidates=take_candidates, active_products=tuple(products),
+            vision_only=False,
         ))
         if judgment.status is not JudgmentStatus.COMPLETE:
-            judgment = _derived_take(taking, taken_weight, products, profile) or judgment
+            judgment = (_derived_take(take_candidates, taken_weight, products, profile)
+                        or judgment)
         if judgment.status is not JudgmentStatus.COMPLETE or not judgment.products:
             return None
         if any(pc.product.class_id in returned_classes for pc in judgment.products):
             return None  # 같은 SKU의 반복/개수 혼합은 이 증거만으로 분해하지 않는다.
-        take_candidates = taking
     taken = replace(
         event, ts=segments[last_take].end_ts, delta_weight=-taken_weight, segments=(),
         judgment=replace(judgment, reason="freezer_mixed_take:" + judgment.reason),
@@ -178,11 +186,11 @@ def _split_mixed(
         freezer_return=None, freezer_movement=None,
     )
     returned = replace(
-        event, ts=suffix[-1].end_ts, delta_weight=returned_weight, segments=(),
+        event, ts=returned_part[-1].end_ts, delta_weight=returned_weight, segments=(),
         judgment=JudgmentResult(JudgmentStatus.NO_DETECTION, reason="freezer_mixed_return"),
         # 세션 무게로 찾았으면 정산의 반납 매칭도 같은 관측 근거를 보도록 원래 후보를 남긴다.
         vision_candidates=event.vision_candidates if by_session_weight else returning,
-        change_timestamps=(suffix[-1].end_ts,),
+        change_timestamps=(returned_part[-1].end_ts,),
         freezer_return=evidence, freezer_movement=None,
     )
     return taken, returned, allocation
