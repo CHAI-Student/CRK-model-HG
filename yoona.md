@@ -7,7 +7,8 @@
 11-25 무게 신뢰 기반 보완(같은 층 반납, 청구 없이 빠진 무게의 review),
 [2026-11-26 반납 보완](#freezer-20261126)(반납 허용오차 25g, 세션 무게 반납, 정산 입력 보완)을 더했다.
 Edge 쪽 로드셀 영점 확인 규칙은 [2026-11-26 Edge 로드셀 영점 확인](#zeroset-20261126)에 있다.
-11-26 실기에서 나온 반납 층 오청구는 [2026-11-26 들고 온 상품 규칙](#freezer-carried-in-20261126)에 있다.
+11-26 실기에서 나온 반납 층 오청구는 [2026-11-26 들고 온 상품 규칙](#freezer-carried-in-20261126),
+두 트레이에 걸친 상품의 미청구는 [2026-11-26 두 트레이에 걸친 상품](#freezer-tray-spanning-20261126)에 있다.
 아래 날짜별 기록은 당시 구현 이력이며, 이후 철회·보완된 설명이 포함되어 있다.
 최신 절의 구현 완료, 저장 데이터 검증, 실제 장비에서 확인할 항목을 구분해서 읽는다.
 
@@ -2864,6 +2865,97 @@ ses-1-1795661722는 class_id만 −91 변환). 규칙을 빼면 ses-1-1795659665
 |---|---|
 | [ledger/freezer_movements.py](crk_model/ledger/freezer_movements.py) | `_split_mixed` 들고 온 상품 규칙 |
 | `tests/test_freezer_sessions_20261126.py`, `tests/fixtures/freezer_sessions_20261126.json` | 신규 |
+| `docs/03-judgment-and-settlement.md`, `crk_model/ledger/README.md`, `tests/README.md` | 규칙·테스트 수 |
+
+이 절의 변경도 작업 트리에만 있고 커밋·push하지 않았다.
+
+<a id="freezer-tray-spanning-20261126"></a>
+
+# 2026-11-26 두 트레이에 걸친 상품: ses-1-1795668469
+
+상품 번호는 1~12(구 92~103 −91)로 쓴다. YAML은 구 번호(102·99)로 기록돼 있다.
+
+## 1. 배경
+
+| 세션 | 동작 | 정답 | 기기 청구 |
+|---|---|---|---|
+| ses-1-1795668469 | 5층 11 취출, 2층 8 취출 + 11 반납 | 8 | 없음 (2·5층 review) |
+
+## 2. 원인
+
+5층(트레이 2개)의 11이 두 트레이에 걸쳐 놓여 있었다. 채널별로 보면 다음과 같다.
+
+| 채널 | 움직임 | 끝값 |
+|---|---|---|
+| ch0 | +37.5 → −448.3 (+32.5 → −416) | −410.8 |
+| ch1 | +50 → −35 → −70 | −55 |
+
+- 꺼내는 순간 두 채널이 함께 빠졌고 합은 −518.3g으로 11(530g)과 맞는다.
+- 시작→끝 합은 −465.8g이다. 놓여 있던 동안 상품 일부(약 60g)가 로드셀 밖(트레이 사이 프레임·벽 등)에 걸쳐 있었던 것으로 보인다.
+
+판정 결과는 다음과 같았다.
+1. 트레이별 판정: ch0 −410, ch1 −55 모두 무게가 맞는 상품이 없어 둘 다 11 PARTIAL이었다.
+2. 같은 정체성의 PARTIAL이 겹치면 대칭 오염으로 보고 모두 빼는 가드 때문에 청구가 없었다.
+3. 5층 취출 이력이 없으니 2층 혼합 분해(−500 뒤 +525)가 반납을 연결하지 못해, 2층 8도 청구되지 않았다.
+
+사용자 제안대로 층 전체로 보되, **시작→끝 합(−465.8g)으로 판정하면 4(핫도그 475g, 3표)로 잘못 바뀐다**.
+그래서 두 트레이가 같은 순간 함께 빠진 하강 합을 쓴다.
+
+## 3. 변경
+
+| 위치 | 내용 |
+|---|---|
+| `freezer_returns.spanning_drop` | 두 채널 이상의 하강이 같은 시간 창에 겹치면 그 합(상품 크기 100g 이상) 중 가장 큰 것. 한 채널의 세그먼트는 겹치지 않으므로 겹치는 하강은 다른 채널이다 |
+| `pipeline.tray_spanning_judgment` | 냉동 멀티 트레이 판정이 COMPLETE가 아니고, 판정한 트레이가 **모두 같은 한 상품 PARTIAL**이며, 함께 빠진 하강이 있으면 그 합으로 1회 재판정한다. **같은 상품 1개 COMPLETE일 때만** 채택하고, 아니면 기존 판정을 유지한다. reason `multi_tray_spanning[...]:drop=…g`, reason code `freezer_tray_spanning` |
+| `freezer_returns.take_measurement` | 취출 이력 무게 측정값 후보에 함께 빠진 하강 합을 추가(등록 무게와 개수 게이트 안일 때만 선택). 11 이력이 518.3g으로 기록돼 2층 반납 525g과 맞는다 |
+| `freezer_movements._split_mixed` | 혼합 분해가 세션 무게로 반납 SKU를 정했으면 그 SKU만 정산의 반납 증거로 넘긴다. 정산 시점에는 분해가 만든 같은 층 취출 이력(8, 500g — 반납 525g과 정확히 25g)도 후보로 겹쳐 세션 무게 반납이 거부됐다 |
+| `settler` | 함께 빠진 무게로 판정한 층은 note `freezer_tray_spanning:trigger_ts=…`과 함께 review(시작→끝 순변화와 다름) |
+
+보고용 층 무게(`weight_delta`)는 원본(−467.5g) 그대로다. 새 env·상수는 없다.
+
+## 4. 검증
+
+저장 YAML 30세션 CLOSE 재정산(영상 재추론 아님)이다. 트리거 단계 규칙은 기기 코드에 없었으므로, 멀티 트레이 미확정 트리거를
+저장 후보로 채널별 재판정한 뒤 같은 함수(`tray_spanning_judgment`)로 근사 적용했다. HEAD 대비 바뀐 세션은 하나다.
+
+| 세션 | HEAD | 지금 |
+|---|---|---|
+| ses-1-1795668469 | 청구 없음, 2·5층 review | **8**, 2·5층 review (5층 11은 2층 반납으로 취소) |
+
+다른 멀티 트레이 트리거에서 함께 빠진 하강이 있는 경우는 이 세션 5층뿐이다.
+ses-8-1795594034 4층(+50/−780)과 ses-7-1795593955 1층(+45/+261.7)은 부호가 달라 해당하지 않는다.
+
+```text
+.venv/bin/python -m pytest -q
+758 passed, 25 skipped (783 collected)
+```
+
+- **새 테스트:** `tests/test_freezer_sessions_20261126.py` +5건. fixture에 이 세션을 추가했다(5층 트리거는 위 근사 재판정, `trigger_rejudged_tray_spanning_zones`).
+- **실제 파이프라인 확인:** BOCPD 채널 분석에서도 두 채널 구간이 같은 시간 창으로 나와 규칙이 동작하는 것을 확인했다. 하강 시점이 다르면 합치지 않는다.
+- **규칙을 빼고 확인:** 트리거 규칙을 끄면 파이프라인 테스트가, 정한 SKU 전달을 끄면 세션 재생 테스트가 실패한다.
+
+## 5. 남은 것
+
+- **5층에서 11 무게가 계속 60~70g 덜 잡힌다.** 두 세션 모두 11이 두 트레이에 걸쳐 놓였다.
+
+  | 세션 | 동작 | 측정 | 11 무게 대비 |
+  |---|---|---|---|
+  | ses-1-1795661722 | 반납 | +427.5/+30 = 457.5g | −67.5g |
+  | 이번 세션 | 시작→끝 | −465.8g | −64.2g |
+
+  트레이 사이나 벽에 상품이 걸치지 않게 5층 진열 위치·트레이 간격을 확인해야 한다.
+- **ses-1-1795661722는 그대로다.** 반납 때 함께 오른 합도 457.5g이라 이 규칙으로 맞지 않는다(반납 허용오차 25g 초과).
+- **트레이 정체성이 다르면 적용하지 않는다.** 한 상품이 두 트레이에 걸쳤는데 트레이별 정체성이 다르게 나오거나, 함께 빠진 합으로도 맞지 않으면 지금처럼 review로 남는다.
+
+## 6. 변경 파일
+
+| 파일 | 변경 |
+|---|---|
+| [service/pipeline.py](crk_model/service/pipeline.py) | `tray_spanning_judgment`, `_judge_tray_events`에서 호출 |
+| [ledger/freezer_returns.py](crk_model/ledger/freezer_returns.py) | `spanning_drop`, `take_measurement`·`record_take_measured`에 `segments` |
+| [ledger/freezer_movements.py](crk_model/ledger/freezer_movements.py) | 취출 이력에 `segments` 전달, 세션 무게로 정한 반납 SKU만 넘김 |
+| [ledger/settler.py](crk_model/ledger/settler.py) | 취출 이력에 `segments` 전달, `freezer_tray_spanning` review |
+| `tests/test_freezer_sessions_20261126.py`, fixture | 5건 추가, 세션 추가 |
 | `docs/03-judgment-and-settlement.md`, `crk_model/ledger/README.md`, `tests/README.md` | 규칙·테스트 수 |
 
 이 절의 변경도 작업 트리에만 있고 커밋·push하지 않았다.

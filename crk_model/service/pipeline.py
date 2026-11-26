@@ -39,6 +39,7 @@ from crk_model.ledger.events import (
     TriggerEvent,
 )
 from crk_model.ledger.freezer_close_checks import has_masked_movement
+from crk_model.ledger.freezer_returns import spanning_drop
 from crk_model.perception.detector import HAND_CLASS_ID, Detector
 from crk_model.perception.filters import DetectionFilterChain
 from crk_model.perception.motion_direction import MotionDirectionConfig
@@ -480,6 +481,13 @@ class TriggerPipeline:
         else:
             status = JudgmentStatus.NO_DETECTION
             confidence = 0.0
+        if status is not JudgmentStatus.COMPLETE and not ctx.profile.weight_is_discriminative:
+            spanning = tray_spanning_judgment(
+                self._router, ctx, [j for _, j in results], analysis.segments,
+            )
+            if spanning is not None:
+                trace.reason_codes.append("freezer_tray_spanning")
+                return spanning
         return JudgmentResult(
             status,
             tuple(merged.values()),
@@ -995,6 +1003,34 @@ class TriggerPipeline:
             freezer_movement=trace.freezer_movement,
         )
         return TriggerOutcome(event, trace)
+
+
+def tray_spanning_judgment(
+    router: JudgmentRouter, ctx: JudgmentContext, tray_judgments: Sequence[JudgmentResult],
+    segments: Sequence,
+) -> JudgmentResult | None:
+    """냉동 멀티 트레이에서 판정한 트레이가 모두 같은 한 상품을 PARTIAL로 봤고(가드 ②가
+    대칭 오염으로 둘 다 빼는 모양) 그 트레이들이 같은 순간 함께 빠졌으면, 한 상품이 두
+    트레이에 걸쳐 있던 것으로 보고 함께 빠진 무게로 1회 재판정한다 (2026-11-26,
+    ses-1-1795668469 5층 11: ch0 −410 / ch1 −55 → 함께 빠진 −518.3g). 같은 상품 1개
+    COMPLETE일 때만 채택하고, 아니면 None(기존 판정 유지)."""
+    if len(tray_judgments) < 2 or not ctx.active_products:
+        return None
+    if any(j.status is not JudgmentStatus.PARTIAL for j in tray_judgments):
+        return None
+    identities = {frozenset(pc.product.class_id for pc in j.products) for j in tray_judgments}
+    if len(identities) != 1 or len(identity := next(iter(identities))) != 1:
+        return None
+    drop = spanning_drop(segments, product_size_floor(p.unit_weight for p in ctx.active_products))
+    if drop is None:
+        return None
+    retry = router.judge(replace(ctx, delta_weight=drop, segments=()))
+    if (retry.status is not JudgmentStatus.COMPLETE
+            or {pc.product.class_id for pc in retry.products} != identity
+            or sum(pc.count for pc in retry.products) != 1):
+        return None
+    return replace(retry, reason=f"multi_tray_spanning[{retry.reason}]:drop={drop:.1f}g",
+                   strategy=f"multi_tray_spanning[{retry.strategy}]")
 
 
 def _freezer_masked_movement(

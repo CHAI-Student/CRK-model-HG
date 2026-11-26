@@ -5,7 +5,7 @@ import math
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 
-from crk_model.core.types import ActiveProduct, ProductCount, VisionCandidate
+from crk_model.core.types import ActiveProduct, ProductCount, VisionCandidate, WeightSegment
 from crk_model.ledger.events import FreezerMovementEvidence, FreezerReturnEvidence
 
 
@@ -302,9 +302,29 @@ def cancel_unbilled_take(
 
 # ---- 2026-11-26 실기 6세션 보완 (yoona.md #freezer-20261126) ----
 
+def spanning_drop(segments: Sequence[WeightSegment], floor: float) -> float | None:
+    """두 트레이 이상이 같은 시간 창에서 함께 빠진 하강의 합(g, 음수) 중 가장 큰 것.
+
+    한 상품이 두 트레이에 걸쳐 놓였다 들린 모양이다 (ses-1-1795668469 5층 11:
+    −448.3 −70 = −518.3g). 놓여 있던 동안 상품 일부가 로드셀 밖에 걸쳐 있으면 시작→끝
+    순변화(−467.5g)는 상품 무게보다 작다. 합이 상품 크기(floor) 미만이면 None.
+    채널 하나의 세그먼트는 서로 겹치지 않으므로 겹치는 하강은 다른 채널이다."""
+    best = None
+    for a in segments:
+        if a.delta_grams >= 0:
+            continue
+        together = [b.delta_grams for b in segments
+                    if b.delta_grams < 0 and b.start_ts < a.end_ts and a.start_ts < b.end_ts]
+        total = sum(together)
+        if len(together) >= 2 and total <= -floor and (best is None or total < best):
+            best = total
+    return best
+
+
 def take_measurement(
     delta: float, products: Sequence[ProductCount],
     movement: FreezerMovementEvidence | None, gate: float, slack: float, floor: float,
+    segments: Sequence[WeightSegment] = (),
 ) -> tuple[float, float | None] | None:
     """② 단일 SKU 취출의 단위 무게 (unit, stable_unit). 대상이 아니면 None(기존 record_take).
 
@@ -333,6 +353,8 @@ def take_measurement(
                     and movement.stable_channel_deltas[i] < 0):
                 stable = -movement.stable_channel_deltas[i]
             options.append((-movement.channel_deltas[i], stable))
+    if (drop := spanning_drop(segments, floor)) is not None:
+        options.append((-drop, None))  # 두 트레이에 걸친 상품이 들린 순간의 하강 합
     gate_n = gate + slack * (n - 1)
     verified = sorted(((abs(m - n * w), m, s) for m, s in options if abs(m - n * w) <= gate_n),
                       key=lambda option: option[0])
@@ -350,9 +372,10 @@ def take_measurement(
 def record_take_measured(
     lots: list[TakeLot], zone: int, delta: float, products: Sequence[ProductCount],
     movement: FreezerMovementEvidence | None, gate: float, slack: float, floor: float,
+    segments: Sequence[WeightSegment] = (),
 ) -> None:
     """record_take + ② 상품 채널 실측. 여러 SKU 취출은 기존 record_take 그대로."""
-    measured = take_measurement(delta, products, movement, gate, slack, floor)
+    measured = take_measurement(delta, products, movement, gate, slack, floor, segments)
     if measured is None:
         record_take(lots, zone, delta, products, stable_delta=stable_movement_delta(movement))
         return

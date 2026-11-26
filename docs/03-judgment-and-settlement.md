@@ -357,6 +357,12 @@ SKU가 하나뿐이고 그 SKU가 이번 영상에 3표 이상 관측됐을 때�
 - 상쇄 움직임: 순변화가 50g 미만이어도 상품 크기 하강·상승이 모두 있으면 트리거 단계에서 영상
   추론을 돌리고(판정은 무청구), 청구가 끝내 없으면 그 층을 `review`로 둔다
   (`freezer_masked_movement`).
+- 두 트레이에 걸친 상품: 멀티 트레이에서 판정한 트레이가 모두 같은 한 상품을 PARTIAL로 봤고
+  그 트레이들이 같은 순간 함께 빠졌으면, 함께 빠진 하강 합으로 1회 재판정해 같은 상품 1개
+  COMPLETE일 때만 채택한다(`pipeline.tray_spanning_judgment`, judgment reason
+  `multi_tray_spanning[...]`, 정산 note `freezer_tray_spanning` → review). 시작→끝 순변화는 상품
+  일부가 로드셀 밖에 걸쳐 있으면 작게 나오므로 쓰지 않는다. 취출 이력 무게도 이 하강 합을 측정값
+  후보로 쓴다(`freezer_returns.spanning_drop`, 2026-11-26).
 - 작은 채널 판정 제외: 멀티 트레이에서 50g 미만 채널은 상품으로 판정하지 않는다
   (`freezer_small_channel:chN`, 11-18 `4390e7a` 복원).
 

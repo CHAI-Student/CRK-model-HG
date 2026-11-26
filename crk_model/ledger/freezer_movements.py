@@ -73,7 +73,7 @@ def resolve_mixed_movements(
             # ② 혼합 해석의 취출 이력도 상품 채널 실측으로 기록한다 (정산과 같은 기준).
             record_take_measured(
                 lots, event.zone, event.delta_weight, event.judgment.products,
-                movement, profile.count_gate, count_unit_slack, floor,
+                movement, profile.count_gate, count_unit_slack, floor, event.segments,
             )
         elif event.delta_weight > 0 and event.freezer_return is not None:
             matched = match_movement_return(
@@ -134,6 +134,14 @@ def _split_mixed(
                     if c.vote_count >= 3}
         allocation = match_session_weight_return(
             evidence, returned_weight, event.zone, lots, tolerance, reason, observed,
+        )
+        # 정한 SKU만 정산에 넘긴다 — 정산 시점에는 이 분해가 만든 취출 이력도 있어, 같은
+        # 무게대의 그 SKU가 세션 무게 후보로 다시 겹친다 (ses-1-1795668469 2층: 반납 525g
+        # 대 11 518.3g·같은 트리거 8 500g).
+        chosen = {lot.product.class_id for lot, _ in allocation}
+        seen = {c.class_id: c for c in (*event.vision_candidates, *returning) if c.vote_count >= 3}
+        evidence = FreezerReturnEvidence(
+            tuple(seen[cid] for cid in sorted(chosen) if cid in seen), True, evidence.source,
         )
     if not allocation:
         return None

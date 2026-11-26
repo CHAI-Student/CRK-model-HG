@@ -336,6 +336,7 @@ def _pass_returns(
                 record_take_measured(
                     take_lots, e.zone, e.delta_weight, e.judgment.products,
                     e.freezer_movement, prof.count_gate, count_unit_slack, take_floor,
+                    e.segments,
                 )
                 if (not e.judgment.products
                         and -e.delta_weight >= _unbilled_drop_threshold(prof)):
@@ -670,6 +671,14 @@ class CloseSettler:
                 notes.append(
                     f"zone{zone}:refit_identity_replaced:trigger_ts={e.ts:.3f}"
                 )
+            # 2026-11-26: 두 트레이에 걸친 상품은 함께 빠진 무게로 판정했다 — 시작→끝
+            # 순변화와 다르므로(놓여 있던 동안 일부가 로드셀 밖에 걸침) review로 올린다.
+            spanning_events = [
+                e for e in concluded_events
+                if (e.judgment.reason or "").startswith("multi_tray_spanning[")
+            ]
+            for e in spanning_events:
+                notes.append(f"zone{zone}:freezer_tray_spanning:trigger_ts={e.ts:.3f}")
             # 2026-11-25: 무게는 빠졌는데 청구가 없으면 complete로 숨기지 않는다
             # (50g 미만·같은 층 반납으로 상쇄된 무게는 무시).
             unbilled_drop = _unbilled_weight_drop(
@@ -682,7 +691,7 @@ class CloseSettler:
                 )
             if any(j.status is JudgmentStatus.PARTIAL for j in concluded_judgments):
                 zone_status = JudgmentStatus.PARTIAL.value
-            elif (ambiguous_events or refit_events or unbilled_drop is not None
+            elif (ambiguous_events or refit_events or spanning_events or unbilled_drop is not None
                   or zone in return_review
                   # ④ 순변화로 상쇄된 상품 크기 움직임 — 청구가 없으면 숨기지 않는다.
                   or (zone in masked and not (baskets.get(zone) and baskets[zone].items()))
