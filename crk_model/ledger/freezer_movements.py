@@ -68,9 +68,14 @@ def resolve_mixed_movements(
                     f"net={event.delta_weight:.1f}g"
                 )
                 continue
-        if (event.delta_weight < 0
-                and event.judgment.status is JudgmentStatus.COMPLETE):
+        if event.delta_weight < 0 and (
+                event.judgment.status is JudgmentStatus.COMPLETE
+                or _floor_weight_verified(event, profile, count_unit_slack)):
             # ② 혼합 해석의 취출 이력도 상품 채널 실측으로 기록한다 (정산과 같은 기준).
+            # 층 무게로 확인된 PARTIAL도 넣는다 — 작은 채널을 빼고 판정해 PARTIAL이 됐어도
+            # 층 순변화가 청구 상품과 맞으면 실제 취출이다 (2026-11-26 ses-1-1795681459
+            # 3층: ch1 −557.5g만으로 11 PARTIAL, 층 −526.25g은 11과 3.75g — 이력이 없어
+            # 2층 11 반납 +510g을 맞추지 못하고 2층 8 취출 분해가 빠졌다).
             record_take_measured(
                 lots, event.zone, event.delta_weight, event.judgment.products,
                 movement, profile.count_gate, count_unit_slack, floor, event.segments,
@@ -89,6 +94,19 @@ def resolve_mixed_movements(
             lots.clear()  # 종류 증거 없는 구 반납 이후의 잔여 SKU는 재구성하지 않는다.
         out.append(event)
     return sorted(out, key=lambda event: event.ts)
+
+
+def _floor_weight_verified(
+    event: TriggerEvent, profile: SensorProfile, count_unit_slack: float,
+) -> bool:
+    """PARTIAL 취출의 청구 상품 합이 층 순변화를 개수 게이트(gate_n) 안에서 설명하는가."""
+    products = event.judgment.products
+    if event.judgment.status is not JudgmentStatus.PARTIAL or not products:
+        return False
+    count = sum(pc.count for pc in products)
+    billed = sum(pc.product.unit_weight * pc.count for pc in products)
+    gate_n = profile.count_gate + count_unit_slack * max(0, count - 1)
+    return billed > 0 and abs(-event.delta_weight - billed) <= gate_n
 
 
 def _split_mixed(

@@ -7,6 +7,7 @@
 """
 import json
 from collections import Counter
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -482,3 +483,27 @@ def test_item_lifted_during_this_trigger_and_returned_here_later_nets_out():
     assert class_counts(result) == {}
     assert next(z for z in result.zones if z.zone == 2).status == "review"
     assert any(n.endswith(":lifted_during_trigger") for n in result.notes)
+
+
+# ---- 층 무게로 확인된 PARTIAL 취출도 혼합 분해의 취출 이력 (ses-1-1795681459) ----
+
+def _session(source):
+    return [event_from_dict(e) for e in
+            next(c for c in FIXTURE["sessions"] if c["source"] == source)["events"]]
+
+
+def test_floor_verified_partial_take_is_matched_by_a_return_elsewhere():
+    """3층 11은 작은 채널(+31g)을 빼고 ch1 −557.5g만으로 판정해 PARTIAL이었지만 층 순변화
+    −526.25g은 11(530g)과 맞는다. 이 취출을 이력에 넣어야 2층 반납 +510g이 11로 맞고,
+    2층 −525/+510 움직임이 8 취출 + 11 반납으로 분해된다."""
+    result = settle(_session("ses-1-1795681459"))
+    assert class_counts(result) == {"8": 1}
+    assert "zone2:freezer_mixed_resolved:take=-490.0g:return=510.0g:net=20.0g" in result.notes
+
+
+def test_partial_take_not_verified_by_floor_weight_stays_out_of_the_mixed_ledger():
+    # 같은 세션에서 3층 순변화가 11과 60g 어긋나면(−470g) 층 무게로 확인된 취출이 아니다
+    events = [replace(e, delta_weight=-470.0) if e.zone == 3 else e
+              for e in _session("ses-1-1795681459")]
+    result = settle(events)
+    assert not any("freezer_mixed_resolved" in n for n in result.notes)
