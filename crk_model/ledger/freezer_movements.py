@@ -99,14 +99,20 @@ def resolve_mixed_movements(
 def _floor_weight_verified(
     event: TriggerEvent, profile: SensorProfile, count_unit_slack: float,
 ) -> bool:
-    """PARTIAL 취출의 청구 상품 합이 층 순변화를 개수 게이트(gate_n) 안에서 설명하는가."""
+    """PARTIAL 취출의 청구 상품 합이 층 순변화를 근접 밴드(2·gate_n) 안에서 설명하는가.
+
+    근접 밴드는 트리거가 정체성·개수를 보존해 청구하는 범위(near_factor 2.0,
+    `freezer_vision_first_near_gate`)이자 `_weight_decisively_inconsistent`와 같은
+    기준이다. 청구한 취출은 반납되면 취소될 수 있어야 한다 (2026-11-26
+    ses-1-1795682705 2층: −510g에 11 near-gate 청구 — 20g 차로 gate_n 15g 밖이라 이력에
+    빠져, 3층 6 취출 + 11 반납을 분해하지 못하고 11이 청구됐다)."""
     products = event.judgment.products
     if event.judgment.status is not JudgmentStatus.PARTIAL or not products:
         return False
     count = sum(pc.count for pc in products)
     billed = sum(pc.product.unit_weight * pc.count for pc in products)
     gate_n = profile.count_gate + count_unit_slack * max(0, count - 1)
-    return billed > 0 and abs(-event.delta_weight - billed) <= gate_n
+    return billed > 0 and abs(-event.delta_weight - billed) <= 2.0 * gate_n
 
 
 def _split_mixed(

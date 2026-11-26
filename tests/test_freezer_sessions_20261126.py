@@ -507,3 +507,23 @@ def test_partial_take_not_verified_by_floor_weight_stays_out_of_the_mixed_ledger
               for e in _session("ses-1-1795681459")]
     result = settle(events)
     assert not any("freezer_mixed_resolved" in n for n in result.notes)
+
+
+# ---- 근접 밴드로 청구된 PARTIAL 취출도 혼합 분해의 취출 이력 (ses-1-1795682705) ----
+
+def test_near_gate_take_is_cancelled_by_a_return_inside_a_mixed_trigger():
+    """2층 −510g은 11(530g)과 20g 차 — gate_n(15g) 밖·근접 밴드(30g) 안이라 트리거가
+    11을 PARTIAL로 청구했다. 이 취출이 이력에 있어야 3층 −370/+530 움직임이 6 취출 +
+    11 반납으로 분해되고, 2층 11이 취소된다 (실제 2층 상품은 10 — 영상은 취출·반납 모두
+    11로 봤다)."""
+    result = settle(_session("ses-1-1795682705"))
+    assert class_counts(result) == {"6": 1}
+    assert "zone3:freezer_mixed_resolved:take=-375.0g:return=530.0g:net=155.0g" in result.notes
+
+
+def test_take_outside_the_near_band_stays_out_of_the_mixed_ledger():
+    # 같은 세션에서 2층 순변화가 11과 35g 어긋나면(−495g) 근접 밴드(30g) 밖이다
+    events = [replace(e, delta_weight=-495.0) if e.zone == 2 else e
+              for e in _session("ses-1-1795682705")]
+    result = settle(events)
+    assert not any("freezer_mixed_resolved" in n for n in result.notes)
