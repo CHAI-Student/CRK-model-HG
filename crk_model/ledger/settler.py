@@ -564,17 +564,19 @@ class CloseSettler:
             }
         )
         ok = sorted(ok, key=lambda e: e.ts)
-        # 2026-11-19 carried-over 억제: 교차존 보정 뒤(어느 과금이 살아남았는지
-        # 확정된 뒤), 반납·혼합 분해 전에 앞선 과금 상품을 손에 든 채 열린
-        # 층의 무게 불일치 identity partial만 걷어낸다.
-        ok = suppress_carried_over_partials(
-            ok, profiles, self.default_profile, notes,
-            count_unit_slack=self.count_unit_slack,
-        )
         # 2026-11-26 냉동 CLOSE 보완 (freezer_close_checks, yoona.md #freezer-20261126).
         # 상품 크기 기준 = 가장 가벼운 등록 상품의 절반 (현재 100g).
         products = tuple(self._products_provider()) if self._products_provider else ()
         floor = product_size_floor(p.unit_weight for p in products)
+        # 2026-11-19 carried-over 억제: 교차존 보정 뒤(어느 과금이 살아남았는지
+        # 확정된 뒤), 반납·혼합 분해 전에 앞선 과금 상품을 손에 든 채 열린
+        # 층의 무게 불일치 identity partial만 걷어낸다. 11-26: 다른 층에서 이 층
+        # 트리거가 열린 동안 꺼낸 상품도 같은 지문으로 본다(floor = 혼합 판단 기준).
+        ok = suppress_carried_over_partials(
+            ok, profiles, self.default_profile, notes,
+            count_unit_slack=self.count_unit_slack,
+            floor=floor if products else None,
+        )
         ok = suppress_partial_fingerprint_duplicates(
             ok, profiles, products, self.default_profile, notes, self.cross_zone,
             count_unit_slack=self.count_unit_slack,
@@ -671,14 +673,18 @@ class CloseSettler:
                 notes.append(
                     f"zone{zone}:refit_identity_replaced:trigger_ts={e.ts:.3f}"
                 )
-            # 2026-11-26: 두 트레이에 걸친 상품은 함께 빠진 무게로 판정했다 — 시작→끝
-            # 순변화와 다르므로(놓여 있던 동안 일부가 로드셀 밖에 걸침) review로 올린다.
-            spanning_events = [
-                e for e in concluded_events
-                if (e.judgment.reason or "").startswith("multi_tray_spanning[")
-            ]
-            for e in spanning_events:
-                notes.append(f"zone{zone}:freezer_tray_spanning:trigger_ts={e.ts:.3f}")
+            # 2026-11-26: 트리거 단계에서 다시 판정한 청구는 처음부터 확정된 판정이 아니므로
+            # review로 올린다 — 두 트레이에 걸친 상품(함께 빠진 무게로 판정, 시작→끝 순변화와
+            # 다름)과 손에 든 후보를 뺀 재판정(held 오판 가능성).
+            retried_events = []
+            for e in concluded_events:
+                for prefix, tag in (("multi_tray_spanning[", "freezer_tray_spanning"),
+                                    ("carried_retry[", "freezer_carried_retry"),
+                                    ("multi_tray_shared_identity[",
+                                     "freezer_tray_shared_identity")):
+                    if (e.judgment.reason or "").startswith(prefix):
+                        retried_events.append(e)
+                        notes.append(f"zone{zone}:{tag}:trigger_ts={e.ts:.3f}")
             # 2026-11-25: 무게는 빠졌는데 청구가 없으면 complete로 숨기지 않는다
             # (50g 미만·같은 층 반납으로 상쇄된 무게는 무시).
             unbilled_drop = _unbilled_weight_drop(
@@ -691,7 +697,7 @@ class CloseSettler:
                 )
             if any(j.status is JudgmentStatus.PARTIAL for j in concluded_judgments):
                 zone_status = JudgmentStatus.PARTIAL.value
-            elif (ambiguous_events or refit_events or spanning_events or unbilled_drop is not None
+            elif (ambiguous_events or refit_events or retried_events or unbilled_drop is not None
                   or zone in return_review
                   # ④ 순변화로 상쇄된 상품 크기 움직임 — 청구가 없으면 숨기지 않는다.
                   or (zone in masked and not (baskets.get(zone) and baskets[zone].items()))
@@ -1045,14 +1051,19 @@ class CloseSettler:
         (session ses-5: 원판정은 69였지만 68이 표 28개·conf 1.0인데도 이
         가능성 자체를 검토하지 않았다). 2종 조합과 같은 실존 증거 하한
         (combo_min_vote_ratio/combo_min_conf, ghost·타존 뒷받침 제외)을
-        재사용하되, 실패한 원래 클래스(exclude_class)는 후보에서 뺀다."""
+        재사용하되, 실패한 원래 클래스(exclude_class)는 후보에서 뺀다.
+
+        증거 하한은 원래 클래스를 풀에 둔 채 계산한다 (2026-11-26
+        ses-1-1795676588 5층: 용가리 7이 29표·conf 1.0인데, 7을 먼저 빼면 남은
+        핫도그 4 8표·conf 0.31이 풀 1위가 되어 하한을 통과해 7을 4로 바꿨다 —
+        "vision이 강하게 지목한 다른 종"이 아니라 무게가 약한 후보를 고른 것)."""
         if self._products_provider is None:
             return None
         votes, confs = self._zone_evidence(zone, events)
-        votes.pop(exclude_class, None)
         excluded: dict[int, str] = {}
         _exclude_session_explained(zone, votes, ghosts, backed_zones, excluded)
         self._exclude_low_evidence(votes, confs, excluded)
+        votes.pop(exclude_class, None)
         if not votes:
             return None
         best: tuple[tuple, ActiveProduct, int] | None = None

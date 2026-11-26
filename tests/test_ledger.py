@@ -670,6 +670,29 @@ class TestVisionComboResolve:
         assert billed == {"P69": 2}
         assert any("freezer_close_gate_failed:zone9" in n for n in result.notes)
 
+    def test_single_species_swap_needs_evidence_against_the_original(self):
+        # 2026-11-26 ses-1-1795676588 5층: 용가리(460g, 29표·conf 1.0) 취출이 존 순변화
+        # −480g(작은 채널 −5g 포함)이라 스냅 게이트(15g)를 20g 넘었다. 원래 클래스를
+        # 먼저 빼고 증거 하한을 재면 남은 핫도그(475g, 8표·conf 0.31)가 1위가 되어
+        # 통과했다 — 하한은 원래 클래스를 포함한 풀 기준이어야 한다.
+        p7 = ActiveProduct(
+            "P7", "용가리7", class_id=7, unit_weight=460.0, unit_price=5, stock_qty=10,
+        )
+        p4 = ActiveProduct(
+            "P4", "핫도그4", class_id=4, unit_weight=475.0, unit_price=5, stock_qty=10,
+        )
+        s = self.settler(p7, p4)
+        e = self.removal_with_cands(
+            "s1", 9, 1.0, p7, 1, -480.0,
+            [cand(7, conf=1.0, votes=29), cand(4, conf=0.31, votes=8)],
+            conf=1.0,
+        )
+        result = s.settle("s1", [e], PROFILES)
+        billed = {pc.product.product_id: pc.count for z in result.zones for pc in z.products}
+        assert billed == {"P7": 1}
+        assert any("freezer_close_gate_failed:zone9" in n for n in result.notes)
+        assert not any("freezer_close_resolve_swap" in n for n in result.notes)
+
     def test_combo_vote_top_billed_stays_eligible(self):
         # ④의 반대 방향 보존: 판정이 득표 1위(44)를 과금한 경우(보호 케이스
         # 시그니처)는 제외가 걸리지 않아 조합 구제가 그대로 동작한다 —

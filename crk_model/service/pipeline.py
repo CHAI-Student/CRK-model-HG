@@ -13,6 +13,7 @@ yolo_calls / reason_codes.
 """
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 
@@ -378,6 +379,14 @@ class TriggerPipeline:
         else:
             judgment = self._router.judge(ctx)
             judgment = self._segment_target_retry(ctx, judgment, analysis, trace)
+            retried = carried_take_retry(
+                self._router, ctx, judgment, trace.vote_summary,
+                self._voting_params.get("min_vote_share", 0.0),
+            )
+            if retried is not None:
+                judgment, revived = retried
+                candidates = (*candidates, *revived)
+                trace.reason_codes.append("freezer_carried_retry")
         top_code = _vision_top_not_billed(candidates, judgment)
         if top_code:
             trace.reason_codes.append(top_code)
@@ -488,6 +497,15 @@ class TriggerPipeline:
             if spanning is not None:
                 trace.reason_codes.append("freezer_tray_spanning")
                 return spanning
+            if not billable:
+                shared = tray_shared_identity_judgment(
+                    ctx, [j for _, j in results], [ev.delta_grams for ev, _ in results],
+                    trace.vote_summary,
+                    count_unit_slack=getattr(self._router, "_count_unit_slack", 5.0),
+                )
+                if shared is not None:
+                    trace.reason_codes.append("freezer_tray_shared_identity")
+                    return shared
         return JudgmentResult(
             status,
             tuple(merged.values()),
@@ -1003,6 +1021,131 @@ class TriggerPipeline:
             freezer_movement=trace.freezer_movement,
         )
         return TriggerOutcome(event, trace)
+
+
+def carried_take_retry(
+    router: JudgmentRouter, ctx: JudgmentContext, judgment: JudgmentResult,
+    vote_summary: Mapping | None, min_share: float,
+) -> tuple[JudgmentResult, tuple[VisionCandidate, ...]] | None:
+    """냉동 취출 판정이 COMPLETE가 아니면, 손에 들고 들어온 후보를 빼고 1회 재판정한다.
+
+    공유 카메라라 다른 층에서 꺼내 손에 든 상품이 이 층 클립을 덮는다 (2026-11-26
+    ses-7-1795671117 1층: 4층 핫도그 163표가 클립 시작부터 보여 실제 취출한 만두
+    5·6표가 share 하한에 탈락 → 12×2 PARTIAL). 손에 든 후보는 T2 held 판정(프리롤부터
+    관측되고 앞부분에서 움직인 트랙, held_shadow)이 후보 표의 절반 이상인 클래스다.
+    그 후보를 뺀 최다 득표 x min_share로 share 탈락 후보를 되살려 같은 무게로 다시
+    판정하고, COMPLETE일 때만 채택한다(아니면 None — 기존 판정 유지). held 판정이
+    꺼져 있으면(held_shadow 없음) 동작하지 않는다. 채택한 층은 정산에서 review다."""
+    if (judgment.status is JudgmentStatus.COMPLETE or ctx.delta_weight >= 0
+            or ctx.profile.weight_is_discriminative or not vote_summary):
+        return None
+    carried = _carried_classes(ctx.vision_candidates, vote_summary)
+    keep = [c for c in ctx.vision_candidates if c.class_id not in carried]
+    if not carried or not keep:
+        return None
+    floor = max(c.vote_count for c in keep) * min_share
+    revived = tuple(
+        VisionCandidate(int(cid), row["weighted_conf"], row["votes"], row["ratio"])
+        for cid, row in (vote_summary.get("classes") or {}).items()
+        if row.get("rejected_by") == "share" and int(cid) not in carried
+        and row["votes"] >= floor
+    )
+    retry = router.judge(replace(ctx, vision_candidates=(*keep, *revived)))
+    if retry.status is not JudgmentStatus.COMPLETE or not retry.products:
+        return None
+    return (replace(retry, reason=f"carried_retry[{retry.reason}]",
+                    strategy=f"carried_retry[{retry.strategy}]"), revived)
+
+
+def _carried_classes(
+    candidates: Sequence[VisionCandidate], vote_summary: Mapping | None,
+) -> set[int]:
+    """손에 든 후보: T2 held 표(held_shadow, 카메라 합)가 후보 표의 절반 이상인 클래스.
+    held 판정이 꺼져 있으면(held_shadow 없음) 빈 집합이다."""
+    held_votes: Counter[int] = Counter()
+    for by_class in ((vote_summary or {}).get("held_shadow") or {}).values():
+        for cid, (held, _total) in by_class.items():
+            held_votes[int(cid)] += held
+    return {c.class_id for c in candidates
+            if c.vote_count > 0 and held_votes[c.class_id] * 2 >= c.vote_count}
+
+
+_SEEN_VOTES = 3  # 영상이 그 상품을 봤다고 볼 최소 표 (정산 _COMBO_VOTE_FLOOR·혼합 분해와 같다)
+
+
+def _distinct_product_fits(weight: float, product: ActiveProduct,
+                           products: Sequence[ActiveProduct], tol: float) -> bool:
+    """무게가 product와 확실히 다른(단위무게 차 > tol) 다른 상품 1개가 이 무게를 허용오차 안에서
+    설명하는가. 무게가 같은 쌍(5·6, 10·11)은 무게로 가를 수 없으므로 근거로 쓰지 않는다."""
+    return any(
+        p.class_id != product.class_id and p.unit_weight > 0
+        and abs(p.unit_weight - product.unit_weight) > tol
+        and abs(weight - p.unit_weight) <= tol
+        for p in products
+    )
+
+
+def tray_shared_identity_judgment(
+    ctx: JudgmentContext, tray_judgments: Sequence[JudgmentResult],
+    tray_deltas: Sequence[float], vote_summary: Mapping | None, *,
+    count_unit_slack: float = 5.0,
+) -> JudgmentResult | None:
+    """냉동 멀티 트레이의 상품 트레이가 모두 같은 한 상품 C를 PARTIAL로 봐서 가드 ②가
+    전부 뺐고 트레이 걸침 재판정도 안 될 때, 트레이 무게가 뒷받침하는 개수만큼 C를
+    PARTIAL로 청구한다 (2026-11-26 ses-4-1795673607 3층: ch0 −405 / ch1 −490 둘 다 6
+    PARTIAL → 청구 없음. 6은 99표·손에 든 흔적 없음).
+
+    영상이 C 하나만 봤을 때만 쓴다 — 다른 후보는 모두 3표 미만이거나 투표 필터에서
+    탈락했다. 다른 상품도 영상에 보였으면 다른 트레이가 그 상품일 수 있다.
+
+    개수는 트레이마다 센다. 트레이 무게가 C n개(n≥1)의 근접 밴드(2×gate_n, 트리거
+    near-gate와 같은 폭) 안이고, 무게가 C와 확실히 다른 다른 상품 1개가 그 무게를 허용오차
+    안에서 설명하지 않으면 n개다 — 두 트레이에서 C를 하나씩 꺼냈는데 각각 15~30g 어긋나
+    PARTIAL이 된 경우는 2개다. 무게가 비슷한 다른 상품을 모델이 못 본 트레이(8 500g 옆
+    1 523g)는 세지 않는다. 센 트레이가 없으면, 한 트레이라도 C 1개 무게(허용오차 포함)만큼
+    빠졌을 때만 1개다(ses-4: −405는 35g, −490은 120g 어긋남 → 1개, 남은 무게는 reason에).
+    다음이면 청구하지 않는다(가드 ② 유지).
+    - C가 손에 든 후보다(held 다수).
+    - 센 트레이가 없고 C 1개만큼 빠진 트레이도 없다 — 어느 트레이에서도 C를 들어 올렸다고
+      볼 수 없다(가드 ②가 막는 대칭 오염 모양).
+    존 상태는 PARTIAL이고 정산 note를 남긴다."""
+    if (ctx.profile.weight_is_discriminative or ctx.delta_weight >= 0
+            or len(tray_judgments) < 2 or len(tray_deltas) != len(tray_judgments)):
+        return None
+    if any(j.status is not JudgmentStatus.PARTIAL or not j.products for j in tray_judgments):
+        return None
+    identities = {frozenset(pc.product.class_id for pc in j.products) for j in tray_judgments}
+    if len(identities) != 1 or len(identity := next(iter(identities))) != 1:
+        return None
+    (class_id,) = identity
+    if any(c.class_id != class_id and c.vote_count >= _SEEN_VOTES
+           for c in ctx.vision_candidates):
+        return None
+    product = tray_judgments[0].products[0].product
+    unit = product.unit_weight
+    if unit <= 0 or class_id in _carried_classes(ctx.vision_candidates, vote_summary):
+        return None
+    gate, tol = ctx.profile.count_gate, ctx.profile.tolerance_grams
+    count = 0
+    for delta in tray_deltas:
+        n = round(-delta / unit)
+        if (n >= 1 and abs(-delta - n * unit) <= 2.0 * (gate + count_unit_slack * (n - 1))
+                and not _distinct_product_fits(-delta, product, ctx.active_products, tol)):
+            count += n
+    if count == 0:
+        deepest = max((-d for d in tray_deltas), default=0.0)
+        if deepest + tol < unit:
+            return None
+        count = 1
+    count = min(count, product.stock_qty) if product.stock_qty > 0 else count
+    reasons = "+".join(j.reason or j.status.value for j in tray_judgments)
+    return JudgmentResult(
+        JudgmentStatus.PARTIAL, (ProductCount(product, count),),
+        min(j.confidence for j in tray_judgments),
+        reason=(f"multi_tray_shared_identity[{reasons}]"
+                f":unexplained={-ctx.delta_weight - count * unit:.1f}g"),
+        strategy="multi_tray_shared_identity",
+    )
 
 
 def tray_spanning_judgment(

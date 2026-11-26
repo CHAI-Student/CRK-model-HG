@@ -1,5 +1,6 @@
-"""2026-11-26 실기 냉동 세션, 들고 온 상품 규칙(yoona.md #freezer-carried-in-20261126)과
-두 트레이에 걸친 상품 판정(#freezer-tray-spanning-20261126)의 회귀 검증.
+"""2026-11-26 실기 냉동 세션, 들고 온 상품 규칙(yoona.md #freezer-carried-in-20261126),
+두 트레이에 걸친 상품 판정(#freezer-tray-spanning-20261126), 손에 든 후보를 뺀 취출
+재판정(#freezer-carried-retry-20261126)의 회귀 검증.
 
 저장 판정·비전 후보 재생이며 영상 재추론이 아니다. 상품 번호는 1~12(구 92~103 −91)이고,
 정답과 다른 세션은 fixture의 known_gap에 원인을 남긴다.
@@ -221,3 +222,263 @@ def test_take_lot_uses_the_shared_drop_of_a_spanning_product():
     one = (ProductCount(BY_CLASS[11], 1),)
     assert take_measurement(-467.5, one, movement, 15, 5, 100, segments)[0] == pytest.approx(518.3)
     assert take_measurement(-467.5, one, movement, 15, 5, 100) == (467.5, None)
+
+
+# ---- 손에 든 후보를 뺀 취출 재판정 (ses-7-1795671117 1층 만두) ----
+
+_CARRIED_HELD = {"top": {4: [62, 83]}, "side": {4: [51, 80]}}
+
+
+def _carried_outcome(monkeypatch, *, drop=370, held=_CARRIED_HELD):
+    """4층에서 꺼낸 핫도그(4)를 손에 든 채 1층에서 만두를 꺼냈다. 핫도그가 163표로
+    클립을 덮어 만두(5: 5표, 6: 6표)는 share 하한(1위 x 0.1)에 탈락했다."""
+    def vision(pipeline, request, profile, snapshot, delta, trace):
+        trace.vote_summary = {
+            "classes": {
+                4: {"votes": 163, "ratio": .38, "weighted_conf": 1.0, "rejected_by": None},
+                12: {"votes": 23, "ratio": .054, "weighted_conf": 1.0, "rejected_by": None},
+                5: {"votes": 5, "ratio": .012, "weighted_conf": 1.0, "rejected_by": "share"},
+                6: {"votes": 6, "ratio": .014, "weighted_conf": 1.0, "rejected_by": "share"},
+            },
+            "held_shadow": held,
+        }
+        trace.directional_candidates["take"] = (vc(4, 59), vc(12, 10))
+        return (VisionCandidate(4, 1.0, 163, .38, 56, .54, 0.0),
+                VisionCandidate(12, 1.0, 23, .054, 0, .34, .42))
+
+    monkeypatch.setattr(TriggerPipeline, "_run_vision", vision)
+    store = ActiveProductStore()
+    store.update(PRODUCTS)
+    pipeline = TriggerPipeline(
+        _EmptyDetector(), PROFILES, store, analyzer_factory=BocpdLoadcellAnalyzer,
+        voting_params={"min_vote_share": 0.1},
+    )
+    samples = [LoadcellSample(i * .1, (1000 if i < 30 else 1000 - drop, 500)) for i in range(70)]
+    return pipeline.process("s", TriggerRequest(1, {}, samples, 7))
+
+
+def test_take_hidden_by_a_carried_item_is_rejudged_without_it(monkeypatch):
+    outcome = _carried_outcome(monkeypatch)
+    judgment = outcome.event.judgment
+    assert judgment.status is JudgmentStatus.COMPLETE
+    assert [(pc.product.class_id, pc.count) for pc in judgment.products] == [(6, 1)]
+    assert judgment.reason.startswith("carried_retry[")
+    assert "freezer_carried_retry" in outcome.trace.reason_codes
+    assert {c.class_id for c in outcome.event.vision_candidates} >= {4, 12, 5, 6}
+
+
+def test_carried_rejudge_needs_held_evidence(monkeypatch):
+    outcome = _carried_outcome(monkeypatch, held=None)  # HELD_TRACK_DEMOTION=off
+    assert outcome.event.judgment.status is not JudgmentStatus.COMPLETE
+    assert "freezer_carried_retry" not in outcome.trace.reason_codes
+
+
+def test_carried_rejudge_keeps_the_original_unless_it_completes(monkeypatch):
+    outcome = _carried_outcome(monkeypatch, drop=260)  # 어떤 남은 후보로도 무게가 안 맞음
+    assert not outcome.event.judgment.reason.startswith("carried_retry[")
+    assert "freezer_carried_retry" not in outcome.trace.reason_codes
+
+
+def test_rejudged_take_is_billed_with_review():
+    event = TriggerEvent(
+        "s", 1, 1.0, -370.0, (WeightSegment(1, 2, -370.0),),
+        JudgmentResult(JudgmentStatus.COMPLETE, (ProductCount(BY_CLASS[6], 1),), 1.0,
+                       reason="carried_retry[freezer_vision_first_single]"),
+        vision_candidates=(vc(6, 6),),
+    )
+    result = settle([event])
+    assert class_counts(result) == {"6": 1}
+    assert result.zones[0].status == "review"
+    assert "zone1:freezer_carried_retry:trigger_ts=1.000" in result.notes
+
+
+def test_close_does_not_swap_a_confident_take_for_a_weak_weight_fit():
+    # ses-1-1795676588 5층: 트리거가 용가리 7(29표·conf 1.0)을 채널 −475g으로 확정했다.
+    # 존 순변화 −480g(작은 채널 −5g 포함)이 스냅 게이트를 넘어도, 8표·conf 0.31인 핫도그 4가
+    # 무게만 더 맞는다는 이유로 마감 정산이 7을 4로 바꾸면 안 된다.
+    case = next(c for c in FIXTURE["sessions"] if c["source"] == "ses-1-1795676588")
+    result = settle([event_from_dict(e) for e in case["events"]])
+    zone5 = next(z for z in result.zones if z.zone == 5)
+    assert [(pc.product.class_id, pc.count) for pc in zone5.products] == [(7, 1)]
+    assert not any("freezer_close_resolve_swap" in n for n in result.notes)
+    assert "freezer_close_gate_failed:zone5:keep_incremental" in result.notes
+
+
+# ---- 다른 층에서 이 트리거가 열린 동안 꺼낸 상품 (ses-3-1795673059 2층) ----
+
+def _lifted_events(*, source_end=67.2, source_delta=-740.0, target_delta=-210.0,
+                   target_segments=None):
+    """1층에서 2(750g)를 꺼낸 순간(하강 66.3~67.2초)이 2층 트리거(65.6초 시작) 안이라 2층
+    클립에 2가 꺼내는 방향으로 찍혔다(head_votes 0). 2층 무게 −210g은 2와 맞지 않는다."""
+    source = TriggerEvent(
+        "s", 1, 61.0, source_delta, (WeightSegment(66.3, source_end, source_delta),),
+        JudgmentResult(JudgmentStatus.COMPLETE, (ProductCount(BY_CLASS[2], 1),), .9),
+        vision_candidates=(vc(2, 148),), change_timestamps=(source_end,),
+    )
+    target = TriggerEvent(
+        "s", 2, 65.6, target_delta,
+        target_segments or (WeightSegment(67.9, 68.8, target_delta),),
+        JudgmentResult(JudgmentStatus.PARTIAL, (ProductCount(BY_CLASS[2], 1),), .5,
+                       reason="vision_first_identity_partial"),
+        vision_candidates=(vc(2, 182),), change_timestamps=(68.8,),
+    )
+    return [source, target]
+
+
+def test_item_lifted_on_another_floor_during_this_trigger_is_not_billed_again():
+    result = settle(_lifted_events())
+    zones = {z.zone: z for z in result.zones}
+    assert [(pc.product.class_id, pc.count) for pc in zones[1].products] == [(2, 1)]
+    assert not zones[2].products
+    assert zones[2].status == "review"
+    assert any(n.startswith("zone2:freezer_carried_over_suppressed:")
+               and n.endswith(":lifted_during_trigger") for n in result.notes)
+
+
+@pytest.mark.parametrize("kwargs", [
+    {"source_end": 65.0},  # 1층 하강이 2층 트리거보다 먼저 끝났다 (손에 든 채 시작 = head 지문 몫)
+    {"target_segments": (WeightSegment(67.0, 67.5, 300.0), WeightSegment(67.9, 68.8, -510.0))},
+    {"target_delta": -65.0},  # 상품 크기 미만 — 다른 CLOSE 규칙 몫
+    {"source_delta": -400.0},  # 출처 청구 자체가 무게와 어긋난다
+    {"target_delta": -745.0},  # 2층 무게가 2와 맞는다 — 같은 상품을 하나 더 꺼냈을 수 있다
+])
+def test_lifted_fingerprint_needs_every_condition(kwargs):
+    result = settle(_lifted_events(**kwargs))
+    assert not any("lifted_during_trigger" in n for n in result.notes)
+
+
+@pytest.mark.parametrize("target_delta", [
+    -745.0,   # 무게가 2와 맞음
+    -715.0,   # 35g 덜 읽힘 (근접 밴드 30g 밖)
+    -680.0,   # 70g 덜 읽힘 (일부가 로드셀 밖에 걸침)
+    -1000.0,  # 2 + 다른 상품을 함께 꺼냄
+])
+def test_same_product_taken_on_two_floors_is_billed_on_both(target_delta):
+    """1층과 2층에서 2를 하나씩 꺼냈다. 2층 하강이 2 1개보다 상품 크기(100g) 이상 가볍지
+    않으면 2층에서도 2가 빠졌을 수 있으므로 지우지 않는다."""
+    result = settle(_lifted_events(target_delta=target_delta))
+    assert class_counts(result) == {"2": 2}
+    assert not any("lifted_during_trigger" in n for n in result.notes)
+
+
+# ---- 두 트레이가 같은 한 상품만 보였을 때 (ses-4-1795673607 3층) ----
+
+def _shared_outcome(monkeypatch, *, ch0=405, ch1=490, held=None, cands=None):
+    """3층 ch0 −405, ch1 −490이 다른 순간 빠졌다. 영상은 6(370g)만 후보로 남아 두 트레이
+    모두 6 PARTIAL — 가드 ②가 둘 다 뺀다. 실제로 함께 꺼낸 10은 영상이 거의 못 봤다."""
+    def vision(pipeline, request, profile, snapshot, delta, trace):
+        trace.vote_summary = {"classes": {}, "held_shadow": held} if held else {"classes": {}}
+        return cands or (VisionCandidate(6, 1.0, 99, .2, 0, .26, .44),)
+
+    monkeypatch.setattr(TriggerPipeline, "_run_vision", vision)
+    store = ActiveProductStore()
+    store.update(PRODUCTS)
+    pipeline = TriggerPipeline(
+        _EmptyDetector(), PROFILES, store, analyzer_factory=BocpdLoadcellAnalyzer,
+    )
+    levels = [(1000 if i < 30 else 1000 - ch0, 1000 if i < 60 else 1000 - ch1) for i in range(100)]
+    samples = [LoadcellSample(i * .1, level) for i, level in enumerate(levels)]
+    return pipeline.process("s", TriggerRequest(3, {}, samples, 7))
+
+
+def test_two_trays_seeing_only_one_product_bill_it_once(monkeypatch):
+    outcome = _shared_outcome(monkeypatch)
+    judgment = outcome.event.judgment
+    assert judgment.status is JudgmentStatus.PARTIAL
+    assert [(pc.product.class_id, pc.count) for pc in judgment.products] == [(6, 1)]
+    assert judgment.reason.startswith("multi_tray_shared_identity[")
+    assert judgment.reason.endswith(":unexplained=525.0g")
+    assert "freezer_tray_shared_identity" in outcome.trace.reason_codes
+
+
+@pytest.mark.parametrize("ch0, ch1, unexplained", [
+    (390, 395, 45.0),    # 트레이마다 6 1개에서 20·25g 더 빠짐 (near-gate PARTIAL 둘)
+    (345, 340, -55.0),   # 트레이마다 25·30g 덜 읽힘
+])
+def test_same_product_from_two_trays_is_billed_twice(monkeypatch, ch0, ch1, unexplained):
+    """두 트레이에서 6을 하나씩 꺼냈는데 트레이마다 15~30g 어긋나 둘 다 PARTIAL이 됐다.
+    트레이 무게가 각각 6 1개의 근접 밴드(2×gate) 안이므로 2개다."""
+    judgment = _shared_outcome(monkeypatch, ch0=ch0, ch1=ch1).event.judgment
+    assert judgment.status is JudgmentStatus.PARTIAL
+    assert [(pc.product.class_id, pc.count) for pc in judgment.products] == [(6, 2)]
+    assert judgment.reason.endswith(f":unexplained={unexplained:.1f}g")
+
+
+@pytest.mark.parametrize("cid, ch0, ch1", [
+    (8, 520, 523),  # 너겟(500g) 20g 더 빠짐 + 오리로스 1(523g)을 모델이 못 봄
+    (2, 770, 720),  # 매운오리(750g) 20g 더 빠짐 + 대패오리 3(720g)을 모델이 못 봄
+    (4, 495, 500),  # 핫도그(475g) 20g 더 빠짐 + 너겟 8(500g)을 모델이 못 봄
+])
+def test_tray_explained_by_a_different_weight_product_is_not_counted(monkeypatch, cid, ch0, ch1):
+    """영상은 한 상품만 봤지만, 무게가 그 상품과 확실히 다른(15g 넘게 차이) 다른 상품이 트레이
+    무게를 허용오차 안에서 설명하면 그 트레이는 세지 않는다 — 1개만 청구하고 나머지는 partial."""
+    cands = (VisionCandidate(cid, 1.0, 60, .2, 0, .3, .4),)
+    judgment = _shared_outcome(monkeypatch, ch0=ch0, ch1=ch1, cands=cands).event.judgment
+    assert judgment.status is JudgmentStatus.PARTIAL
+    assert [(pc.product.class_id, pc.count) for pc in judgment.products] == [(cid, 1)]
+
+
+def test_shared_identity_needs_vision_to_see_only_that_product(monkeypatch):
+    # 10이 7표로 영상에 보였다 — 다른 트레이가 10일 수 있으므로 쓰지 않는다
+    cands = (VisionCandidate(6, 1.0, 99, .2, 0, .26, .44), VisionCandidate(10, 1.0, 7, .01))
+    outcome = _shared_outcome(monkeypatch, cands=cands)
+    assert outcome.event.judgment.products == ()
+    assert "freezer_tray_shared_identity" not in outcome.trace.reason_codes
+
+
+def test_shared_identity_ignores_noise_level_candidates(monkeypatch):
+    # 다른 상품 2표(노이즈 수준)는 "영상에 보였다"로 치지 않는다
+    cands = (VisionCandidate(6, 1.0, 99, .2, 0, .26, .44), VisionCandidate(12, 1.0, 2, .005))
+    outcome = _shared_outcome(monkeypatch, cands=cands)
+    assert [(pc.product.class_id, pc.count) for pc in outcome.event.judgment.products] == [(6, 1)]
+
+
+def test_two_exact_trays_of_the_same_product_stay_complete(monkeypatch):
+    # 무게가 맞으면 원래 경로(트레이별 COMPLETE 합산)로 2개 — 이 규칙은 관여하지 않는다
+    outcome = _shared_outcome(monkeypatch, ch0=370, ch1=372)
+    assert outcome.event.judgment.status is JudgmentStatus.COMPLETE
+    assert [(pc.product.class_id, pc.count) for pc in outcome.event.judgment.products] == [(6, 2)]
+    assert "freezer_tray_shared_identity" not in outcome.trace.reason_codes
+
+
+def test_shared_identity_skips_a_carried_item(monkeypatch):
+    outcome = _shared_outcome(monkeypatch, held={"top": {6: [60, 70]}})
+    assert outcome.event.judgment.products == ()
+    assert "freezer_tray_shared_identity" not in outcome.trace.reason_codes
+
+
+def test_shared_identity_needs_a_tray_dropping_one_unit(monkeypatch):
+    # 어느 트레이도 6(370g) 1개만큼 빠지지 않았다 — 가드 ②의 대칭 오염 모양
+    outcome = _shared_outcome(monkeypatch, ch0=300, ch1=300)
+    assert outcome.event.judgment.products == ()
+    assert "freezer_tray_shared_identity" not in outcome.trace.reason_codes
+
+
+def test_shared_identity_bill_is_partial_with_a_note():
+    event = TriggerEvent(
+        "s", 3, 1.0, -895.0, (WeightSegment(1, 2, -405.0), WeightSegment(3, 4, -490.0)),
+        JudgmentResult(JudgmentStatus.PARTIAL, (ProductCount(BY_CLASS[6], 1),), .5,
+                       reason="multi_tray_shared_identity[vision_first_identity_partial"
+                              "+vision_first_identity_partial]:unexplained=525.0g"),
+        vision_candidates=(vc(6, 99),),
+    )
+    result = settle([event])
+    assert class_counts(result) == {"6": 1}
+    assert result.zones[0].status == "partial"
+    assert "zone3:freezer_tray_shared_identity:trigger_ts=1.000" in result.notes
+
+
+def test_item_lifted_during_this_trigger_and_returned_here_later_nets_out():
+    """1층 2를 2층 트리거 중 꺼내(2층 −210g은 닭발) 나중에 2층에 되돌려 놓았다. 2층 2 재청구는
+    지워지고, 반납은 1층 2 취출 이력과 맞아 2는 청구되지 않는다(닭발은 영상 미검출 → review)."""
+    source, target = _lifted_events()
+    back = TriggerEvent(
+        "s", 2, 80.0, 750.0, (WeightSegment(80.5, 81.4, 750.0),),
+        JudgmentResult(JudgmentStatus.NO_DETECTION), vision_candidates=(vc(2, 80),),
+        freezer_return=FreezerReturnEvidence((vc(2, 80),), True, "video"),
+        change_timestamps=(81.4,),
+    )
+    result = settle([source, target, back])
+    assert class_counts(result) == {}
+    assert next(z for z in result.zones if z.zone == 2).status == "review"
+    assert any(n.endswith(":lifted_during_trigger") for n in result.notes)

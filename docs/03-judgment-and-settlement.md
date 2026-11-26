@@ -361,6 +361,11 @@ SKU가 하나뿐이고 그 SKU가 이번 영상에 3표 이상 관측됐을 때�
 - 상쇄 움직임: 순변화가 50g 미만이어도 상품 크기 하강·상승이 모두 있으면 트리거 단계에서 영상
   추론을 돌리고(판정은 무청구), 청구가 끝내 없으면 그 층을 `review`로 둔다
   (`freezer_masked_movement`).
+- 손에 든 후보를 뺀 취출 재판정: 트레이 1개 취출 판정이 COMPLETE가 아니고, 영상 후보 중 T2 held
+  판정(프리롤부터 관측되고 앞부분에서 움직인 트랙, `held_shadow`) 표가 절반 이상인 손에 든 후보가
+  있으면, 그 후보를 빼고 share 하한을 다시 계산해 탈락 후보를 되살린 뒤 같은 무게로 1회 재판정한다.
+  COMPLETE일 때만 채택한다(`pipeline.carried_take_retry`, judgment reason `carried_retry[...]`,
+  정산 note `freezer_carried_retry` → review). held 판정이 꺼져 있으면 동작하지 않는다(2026-11-26).
 - 두 트레이에 걸친 상품: 멀티 트레이에서 판정한 트레이가 모두 같은 한 상품을 PARTIAL로 봤고
   그 트레이들이 같은 순간 함께 빠졌으면, 함께 빠진 하강 합으로 1회 재판정해 같은 상품 1개
   COMPLETE일 때만 채택한다(`pipeline.tray_spanning_judgment`, judgment reason
@@ -369,6 +374,28 @@ SKU가 하나뿐이고 그 SKU가 이번 영상에 3표 이상 관측됐을 때�
   후보로 쓴다(`freezer_returns.spanning_drop`, 2026-11-26).
 - 작은 채널 판정 제외: 멀티 트레이에서 50g 미만 채널은 상품으로 판정하지 않는다
   (`freezer_small_channel:chN`, 11-18 `4390e7a` 복원).
+- 같은 한 상품만 보인 두 트레이: 멀티 트레이의 상품 트레이가 모두 같은 한 상품 C를 PARTIAL로
+  봐서 가드 ②(PARTIAL끼리 같은 정체성이면 전부 제외)가 모두 빼고 걸침 재판정도 안 되면, 트레이
+  무게가 뒷받침하는 개수만큼 C를 PARTIAL로 청구한다. **영상이 C 하나만 봤을 때만** 쓴다(다른
+  후보는 모두 3표 미만이거나 투표 필터에서 탈락). 트레이마다 무게가 C n개의 근접 밴드
+  (2×gate_n, 트리거 near-gate와 같은 폭) 안이고, 무게가 C와 확실히 다른(단위무게 차 > 허용오차)
+  다른 상품 1개가 그 트레이 무게를 허용오차 안에서 설명하지 않으면 n개로 센다 — 두 트레이에서
+  C를 하나씩 꺼냈는데 각각 15~30g 어긋난 경우는 2개고, 무게가 비슷한 다른 상품을 모델이 못 본
+  트레이(너겟 500g 옆 오리로스 523g)는 세지 않는다. 무게가 같은 쌍(5·6, 10·11)은 무게로 가를 수
+  없어 거부 근거로 쓰지 않는다. 센 트레이가 없으면, 한 트레이라도 C 1개 무게(허용오차 포함)만큼
+  빠졌을 때만 1개다. C가 손에 든 후보(held 다수)이거나 어느 트레이도
+  밴드 안이 아니고 C 1개만큼도 빠지지 않았으면 쓰지 않는다 — 가드 ②가 막는 대칭 오염 모양이다
+  (`pipeline.tray_shared_identity_judgment`, judgment reason
+  `multi_tray_shared_identity[...]:unexplained=Xg`, 정산 note `freezer_tray_shared_identity`,
+  존 상태 partial, 2026-11-26). 무게가 맞는 두 트레이는 원래대로 트레이별 COMPLETE 합산이다.
+- 다른 층에서 이 트리거가 열린 동안 꺼낸 상품: carried-over 억제(앞서 청구된 상품이 무게가 어떤
+  개수로도 맞지 않는 PARTIAL로 다시 청구되면 뺀다)의 "다른 층에서 온 상품" 지문은 head_votes ≥ 5
+  외에, 앞서 그 상품을 청구한 다른 층의 무게 하강이 이 트리거가 열린 동안(ts ~ 마지막 변화) 끝난
+  경우도 인정한다. 층끼리 같은 로드셀 시계라 영상-무게 시각 맞춤이 필요 없다. 이 층 하강이 C 1개보다
+  상품 크기(100g) 이상 가벼울 때만 쓴다 — 두 층에서 C를 하나씩 꺼낸 진짜 취출은 무게가 C에
+  가깝거나(덜 읽혀도) C + 다른 상품으로 더 무거우므로 지우지 않는다. 이 층 하강이 상품 크기
+  미만이거나, 상품 크기 이상 올라간 구간이 있거나(혼합), 출처 층 청구가 그 층 무게와 맞지 않아도
+  쓰지 않는다(`freezer_carried_over_suppressed:...:lifted_during_trigger` → review, 2026-11-26).
 
 청구 없이 빠진 무게: 냉동 층에 50g(`min_trigger_delta_grams`) 이상 빠졌는데 청구 상품이
 없는 판정(상품 없는 PARTIAL·NO_DETECTION)이 있고, 반납·층간 이동을 반영한 층 순변화가
@@ -432,6 +459,11 @@ flowchart TD
   `1 ≤ count ≤ stock_qty` (I12) ∧ 잔차 ≤ `gate_n(count)` (I3)일 때만 스냅 확정
   (`freezer_close_resolve:zone{N}:{상품ID}={n}`). 이것이 **정상 경로**입니다 —
   증분 합보다 net이 정확합니다.
+- 스냅과 2종 조합이 모두 실패하면 마지막으로 다른 한 종 교체를 봅니다
+  (`_single_species_swap`, `freezer_close_resolve_swap`). 교체 후보의 실존 증거 하한
+  (`combo_min_vote_ratio` 득표율 또는 `combo_min_conf`)은 **원래 판정 클래스를 포함한 풀**
+  기준으로 잽니다. 원래 클래스를 먼저 빼면, 약한 후보가 남은 풀 1위가 되어 무게만으로
+  교체됩니다(2026-11-26 ses-1-1795676588: 용가리 29표·conf 1.0 → 핫도그 8표·conf 0.31).
 - 존 2품목 이상은 재solve하지 않습니다.
 
 정산 층의 tolerance·게이트는 전부 존 프로파일에서 옵니다. 존이 `profiles` 맵에

@@ -407,9 +407,7 @@ class TestMultiTrayEvents:
         assert "partial_billed:ch1" in j.reason
         assert "partial_billed:ch1" in outcome.trace.reason_codes
 
-    def test_mutual_duplicate_partials_not_billed(self):
-        # 가드 ②: PARTIAL끼리 같은 정체성이면 대칭 오염 가능성 — 과청구가
-        # 미청구보다 나쁘다(I13/D9) → 전부 제외 (현행 보수 동작 유지).
+    def _mutual_partials(self, ch0, ch1):
         prod130 = ActiveProduct(
             "P30", "요맘때", class_id=30, unit_weight=130.0, unit_price=2500, stock_qty=5
         )
@@ -421,14 +419,25 @@ class TestMultiTrayEvents:
         pipe = TriggerPipeline(detector, {2: FREEZER}, store)
         outcome = pipe.process(
             "s1",
-            TriggerRequest(
-                2,
-                {"top": moving_frames(20)},
-                dual_tray_samples((500, 395), (400, 295)),  # ch0 −105 / ch1 −105
-                1.0,
-            ),
+            TriggerRequest(2, {"top": moving_frames(20)}, dual_tray_samples(ch0, ch1), 1.0),
         )
-        j = outcome.event.judgment
+        return outcome.event.judgment
+
+    def test_mutual_duplicate_partials_billed_by_tray_weight(self):
+        # 가드 ②는 PARTIAL끼리 같은 정체성이면 대칭 오염으로 보고 둘 다 뺀다. 2026-11-26
+        # (로드셀 무게 신뢰): 트레이마다 무게가 그 상품 1개의 근접 밴드(2×gate) 안이면 두
+        # 트레이에서 하나씩 꺼낸 것이므로 트레이 무게만큼 PARTIAL로 청구한다
+        # (pipeline.tray_shared_identity_judgment). 이전 기대값은 무청구였다.
+        j = self._mutual_partials((500, 395), (400, 295))  # ch0 −105 / ch1 −105 (각 25g 차)
+        assert j.status is JudgmentStatus.PARTIAL
+        assert [(pc.product.product_id, pc.count) for pc in j.products] == [("P30", 2)]
+        assert j.reason.startswith("multi_tray_shared_identity[")
+
+    def test_mutual_duplicate_partials_not_billed_when_no_tray_holds_one(self):
+        # 가드 ② 유지: 트레이마다 상품 1개보다 확실히 가볍다(대칭 오염 모양) → 전부 제외
+        # — 과청구가 미청구보다 나쁘다(I13/D9). 합 −160g도 130g 1개와 맞지 않아 두 트레이
+        # 걸침 판정도 아니다.
+        j = self._mutual_partials((500, 420), (400, 320))  # ch0 −80 / ch1 −80
         assert j.status is JudgmentStatus.NO_DETECTION
         assert j.products == ()
 
