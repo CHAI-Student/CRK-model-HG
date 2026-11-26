@@ -131,15 +131,22 @@ def test_same_floor_return_without_vision_identity_matches_by_weight(candidates,
     assert not any("freezer_return_unresolved" in note for note in result.notes)
 
 
-@pytest.mark.parametrize("candidates,reason", [
-    ((), "missing_identity"),
-    ((VisionCandidate(95, .9, 20, .5), VisionCandidate(98, .9, 19, .5)), "ambiguous_identity"),
-])
-def test_other_floor_return_without_vision_identity_stays_unresolved(candidates, reason):
-    result = settle([taken(), returned(zone=5, candidates=candidates)])
+def test_other_floor_return_without_vision_identity_stays_unresolved():
+    result = settle([taken(), returned(zone=5, candidates=())])
     assert counts(result) == {HOTDOG.product_id: 1}
     assert result.zones[0].status in ("review", "partial")
-    assert any(f"freezer_return_unresolved:{reason}" in note for note in result.notes)
+    assert any("freezer_return_unresolved:missing_identity" in note for note in result.notes)
+
+
+def test_other_floor_ambiguous_return_matches_unique_session_weight_for_review():
+    """2026-11-26 E2: 비전이 1·2위를 가르지 못한 다른 층 반납은, 세션 취출 이력 중
+    무게가 맞는 SKU가 하나뿐이고 영상에 관측됐을 때 그 SKU로 차감하고 review로 둔다."""
+    candidates = (VisionCandidate(95, .9, 20, .5), VisionCandidate(98, .9, 19, .5))
+    result = settle([taken(), returned(zone=5, candidates=candidates)])
+    assert counts(result) == {}
+    assert "zone5:freezer_return_session_weight:vision=ambiguous_identity" in result.notes
+    statuses = {z.zone: z.status for z in result.zones}
+    assert statuses[5] == "review" and statuses[2] in ("review", "partial")
 
 
 def test_same_floor_weight_match_refuses_two_equal_weight_skus():
@@ -156,13 +163,15 @@ def test_same_floor_weight_match_refuses_candidate_not_seen_on_video():
 
 
 def test_catalog_weight_alone_cannot_override_disagreeing_measured_delta():
-    result = settle([taken(), returned(delta=490)])
+    # 등록 무게 490g과는 1g 차이지만 실측 취출 465g과는 반납 허용오차(25g)를 넘는다.
+    result = settle([taken(), returned(delta=491)])
     assert counts(result) == {HOTDOG.product_id: 1}
     assert any("weight_mismatch" in note for note in result.notes)
 
 
-@pytest.mark.parametrize("difference,matched", [(15, True), (15.1, False)])
+@pytest.mark.parametrize("difference,matched", [(15, True), (25, True), (25.1, False)])
 def test_measured_return_tolerance_boundary(difference, matched):
+    # 냉동 반납 허용오차 FREEZER_RETURN_TOLERANCE_GRAMS = 25g (2026-11-26, 취출 판정은 15g 유지)
     result = settle([taken(), returned(delta=465 + difference)])
     assert counts(result) == ({} if matched else {HOTDOG.product_id: 1})
 

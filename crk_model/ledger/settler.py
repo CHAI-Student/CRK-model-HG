@@ -18,7 +18,12 @@ from collections import defaultdict
 from collections.abc import Callable, Iterable, Mapping, Sequence
 
 from crk_model.core.policy import ErrorSessionPolicy
-from crk_model.core.profiles import REFRIGERATOR, SensorProfile
+from crk_model.core.profiles import (
+    REFRIGERATOR,
+    SensorProfile,
+    product_size_floor,
+    return_tolerance,
+)
 from crk_model.core.types import (
     ActiveProduct,
     FinalizedSettlement,
@@ -33,6 +38,13 @@ from crk_model.ledger.cross_zone import (
 )
 from crk_model.ledger.events import EventLog, TriggerEvent
 from crk_model.ledger.freezer_carried_over import suppress_carried_over_partials
+from crk_model.ledger.freezer_close_checks import (
+    fold_contact_release,
+    masked_movement_zones,
+    recover_partial_count,
+    split_tray_movements,
+    suppress_partial_fingerprint_duplicates,
+)
 from crk_model.ledger.freezer_movements import resolve_mixed_movements
 from crk_model.ledger.freezer_returns import (
     ReturnMatch,
@@ -42,8 +54,8 @@ from crk_model.ledger.freezer_returns import (
     consume_take,
     match_movement_return,
     match_same_floor_return,
-    record_take,
-    stable_movement_delta,
+    match_session_weight_return,
+    record_take_measured,
 )
 from crk_model.ledger.ghost_ledger import (
     GhostLedgerConfig,
@@ -182,6 +194,8 @@ def _pass_returns(
     *,
     freezer_cross_zone: bool = False,
     notes: list[str] | None = None,
+    take_floor: float = float("inf"),
+    count_unit_slack: float = 5.0,
 ) -> tuple[dict[int, _Basket], list[tuple[int, float]], dict[int, float], set[int], set[int]]:
     """시간순 반납 매칭. 냉동 이동량은 출발 존에 +, 반납 존에 -로 보존한다.
 
@@ -198,7 +212,7 @@ def _pass_returns(
     for e in sorted(events, key=lambda e: e.ts):
         b = baskets[e.zone]
         prof = _profile(profiles, e.zone, default_profile)
-        tol = prof.tolerance_grams
+        tol = return_tolerance(prof)  # 냉동 25g (2026-11-26), 그 외 tolerance_grams
         if (e.freezer_return is not None and e.delta_weight > 0
                 and not prof.weight_is_discriminative):
             eligible = [lot for lot in take_lots
@@ -243,6 +257,26 @@ def _pass_returns(
                             f"vision={reason}"
                         )
                     continue
+                elif session_fit := match_session_weight_return(
+                    e.freezer_return, e.delta_weight, e.zone, take_lots, tol, reason,
+                    {c.class_id for c in (*e.vision_candidates, *e.freezer_return.candidates)
+                     if c.vote_count >= 3},
+                ):
+                    # ⑤ 2026-11-26: 비전 반납 SKU가 세션 취출 이력에 없거나(no_prior_take)
+                    # 정하지 못했으면(ambiguous_identity), 모든 층 취출 이력 중 무게가 맞는
+                    # SKU가 하나뿐이고 영상에 관측됐을 때 그 SKU로 차감한다. 무게가 고른
+                    # 연결이므로 반납·출발 층 모두 review로 올린다.
+                    if notes is not None:
+                        notes.append(
+                            f"zone{e.zone}:freezer_return_session_weight:vision={reason}"
+                        )
+                    review.add(e.zone)
+                    review.update(lot.zone for lot, _ in session_fit)
+                    matched = ReturnMatch(
+                        session_fit, "matched_session_weight", e.delta_weight,
+                        sum(lot.unit_weight * n for lot, n in session_fit), "bocpd_total",
+                    )
+                    allocation, reason = matched.allocation, matched.reason
             if not allocation:
                 affected = {z for z in baskets
                             if not _profile(profiles, z, default_profile).weight_is_discriminative}
@@ -299,9 +333,9 @@ def _pass_returns(
             for pc in e.judgment.products:
                 b.add(pc.product, pc.count)
             if not prof.weight_is_discriminative:
-                record_take(
+                record_take_measured(
                     take_lots, e.zone, e.delta_weight, e.judgment.products,
-                    stable_delta=stable_movement_delta(e.freezer_movement),
+                    e.freezer_movement, prof.count_gate, count_unit_slack, take_floor,
                 )
                 if (not e.judgment.products
                         and -e.delta_weight >= _unbilled_drop_threshold(prof)):
@@ -536,15 +570,31 @@ class CloseSettler:
             ok, profiles, self.default_profile, notes,
             count_unit_slack=self.count_unit_slack,
         )
-        ok = resolve_mixed_movements(
-            ok, profiles,
-            tuple(self._products_provider()) if self._products_provider else (),
-            self.default_profile, notes,
+        # 2026-11-26 냉동 CLOSE 보완 (freezer_close_checks, yoona.md #freezer-20261126).
+        # 상품 크기 기준 = 가장 가벼운 등록 상품의 절반 (현재 100g).
+        products = tuple(self._products_provider()) if self._products_provider else ()
+        floor = product_size_floor(p.unit_weight for p in products)
+        ok = suppress_partial_fingerprint_duplicates(
+            ok, profiles, products, self.default_profile, notes, self.cross_zone,
+            count_unit_slack=self.count_unit_slack,
         )
+        ok = split_tray_movements(
+            ok, profiles, self.default_profile, floor, notes,
+            count_unit_slack=self.count_unit_slack,
+        )
+        ok = resolve_mixed_movements(
+            ok, profiles, products, self.default_profile, notes,
+            count_unit_slack=self.count_unit_slack,
+        )
+        ok = recover_partial_count(ok, profiles, self.default_profile, notes)
+        ok, folded_review = fold_contact_release(ok, profiles, self.default_profile, floor, notes)
 
         baskets, unmatched, net_adjustments, protected, return_review = _pass_returns(
-            ok, profiles, self.default_profile, freezer_cross_zone=True, notes=notes
+            ok, profiles, self.default_profile, freezer_cross_zone=True, notes=notes,
+            take_floor=floor, count_unit_slack=self.count_unit_slack,
         )
+        return_review |= folded_review
+        masked = masked_movement_zones(ok, profiles, self.default_profile, floor, notes)
         self._pass_net_delta(
             baskets, ok, profiles, unmatched, notes, self.default_profile,
             net_adjustments=net_adjustments,
@@ -633,13 +683,17 @@ class CloseSettler:
             if any(j.status is JudgmentStatus.PARTIAL for j in concluded_judgments):
                 zone_status = JudgmentStatus.PARTIAL.value
             elif (ambiguous_events or refit_events or unbilled_drop is not None
-                  or zone in return_review or any(
+                  or zone in return_review
+                  # ④ 순변화로 상쇄된 상품 크기 움직임 — 청구가 없으면 숨기지 않는다.
+                  or (zone in masked and not (baskets.get(zone) and baskets[zone].items()))
+                  or any(
                 note.startswith((
                     f"zone{zone}:cross_zone_fingerprint_ambiguous:",
                     # carried-over 억제 뒤 남은 무게는 설명되지 않은 취출일 수
                     # 있다(11-19 교자 세션 zone2 −205g = 실제 닭발) — 미청구로
                     # 두되 complete로 숨기지 않는다.
                     f"zone{zone}:freezer_carried_over_suppressed:",
+                    f"zone{zone}:freezer_fingerprint_partial_duplicate:",
                 ))
                 for note in notes
             )):

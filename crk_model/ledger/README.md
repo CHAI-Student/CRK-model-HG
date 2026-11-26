@@ -112,13 +112,25 @@ flowchart TD
 동존 매칭 실패 시 이미 취출된 다른 냉동 존의 장바구니에서 단품 또는 2품 합을 찾아
 차감한다. 미래 취출을 과거 반납과 연결하지 않는다. 위 무게 우선 경로는 구 기록용이다.
 신규 냉동 반납의 `freezer_return`은 비전 SKU를 먼저 확인하고, 같은 SKU의 앞선 취출
-실측 delta와 ±15g으로 비교한다. 등록490g/취출465g/반납466.7g이어도 같은 SKU라면
+실측 delta와 냉동 반납 허용오차 ±25g(`core/profiles.FREEZER_RETURN_TOLERANCE_GRAMS`,
+2026-11-26 — 취출 판정은 ±15g 유지)으로 비교한다. 등록490g/취출465g/반납466.7g이어도 같은 SKU라면
 차감할 수 있다. 같은 무게의 다른 SKU를 대체 차감하지 않는다. 미확정 반납은 검토로 남긴다.
 비전이 반납 SKU를 못 정한 경우(정체성 없음·모호)에만 같은 층 잔여 취출 중 실측 무게가
 맞는 SKU가 하나뿐이면 차감하고, 같은 층 미청구 취출과 무게가 같으면 상쇄한다
 (2026-11-25, `freezer_returns.match_same_floor_return`·`cancel_unbilled_take`).
 냉동 층에 청구 없이 50g 이상 빠진 무게가 순변화로도 남으면 그 층 status는 `review`다
 (`_unbilled_weight_drop`).
+
+2026-11-26 보완(`freezer_close_checks.py`, yoona.md #freezer-20261126): 반납 매칭 전에
+⑥ 다른 층 COMPLETE와 같은 영상 지문의 무게 불일치 PARTIAL 재청구 제거 → ① 트레이 분리
+(한 트리거 안 상품 크기 채널 하나 감소·하나 증가 → 취출·반납) → 혼합 분해 → ⑧ 정체성만
+보존한 count=1 PARTIAL의 개수를 층 최종 무게로 복원 → ⑦ 반납 직후 손 떼기 감소를 반납 무게에
+합산 순서로 정산 입력 복사본을 고친다. 반납 매칭에서는 ② 단일 SKU 취출을 상품 채널 실측으로
+기록하고, ⑤ 비전 반납 SKU가 취출 이력에 없거나(`no_prior_take`) 모호하면(`ambiguous_identity`)
+모든 층 취출 이력 중 무게가 맞는 SKU가 하나뿐이고 영상에 관측됐을 때만 그 SKU로 차감한다
+(`freezer_returns.match_session_weight_return`). ④ 순변화가 작아도 상품 크기 하강·상승이 모두
+있던 무청구 층은 `review`다. 상품 크기 기준은 가장 가벼운 등록 상품의 절반이다
+(`core/profiles.product_size_floor`).
 
 이동이 성립하면 관측 반납 무게를 출발 존 net에는 더하고 반납 존 net에서는 뺀다.
 2층 보정과 4층 재solve는 이 보정 net을 함께 사용한다. 예를 들어 1층에서 200g 취출 후

@@ -167,13 +167,16 @@ def test_camera_identity_conflict_resolved_by_same_floor_take_weight():
     assert "zone1:freezer_return_same_floor_weight:vision=ambiguous_identity" in result.notes
 
 
-def test_camera_identity_conflict_on_other_floor_keeps_prior_take_for_review():
+def test_camera_identity_conflict_on_other_floor_resolves_by_session_weight_for_review():
+    # 2026-11-26 E2: top은 A, side는 B로 봐 정체성이 갈렸지만(ambiguous_identity),
+    # 세션 취출 이력 중 반납 무게(105g)가 맞는 SKU는 영상에도 관측된 B 하나뿐이다.
     top = [[detection(1, 100, y)] for y in [300, 260, 220]]
     side = [[detection(2, 100, y)] for y in [300, 260, 220]]
     outcome, _ = pipeline_event(top, [500, 605], side=side)
     result = settle([take(2, 1, (B, 1)), outcome.event])
-    assert counts(result) == {"b": 1}
-    assert any("ambiguous_identity" in note for note in result.notes)
+    assert counts(result) == {}
+    assert "zone1:freezer_return_session_weight:vision=ambiguous_identity" in result.notes
+    assert {z.zone: z.status for z in result.zones} == {1: "review", 2: "review"}
 
 
 @pytest.mark.parametrize("analyzer", [LoadcellAnalyzer, BocpdLoadcellAnalyzer])
@@ -279,7 +282,10 @@ def test_calibrated_slanted_side_camera_records_x_axis_without_vetoing_weight_re
     assert counts(settle([take(2, 1, (B, 1)), outcome.event])) == {}
 
 
-def test_overlapping_segments_keep_existing_zero_weight_skip():
+def test_overlapping_segments_run_vision_but_bill_nothing_at_trigger():
+    # 2026-11-26 D2: 순변화 0이어도 상품 크기(가장 가벼운 상품의 절반 = 50g) 이상
+    # 하강·상승이 모두 있으면 같은 층 취출+반납 상쇄일 수 있어 영상 추론을 돌린다.
+    # 트리거 판정은 그대로 무청구이고, 청구는 CLOSE 혼합 분해만 만든다.
     class OverlapAnalyzer:
         def analyze(self, _samples):
             return LoadcellAnalysis(0, (
@@ -288,5 +294,24 @@ def test_overlapping_segments_keep_existing_zero_weight_skip():
 
     scene = [[detection(1, 50, y)] for y in [200, 240, 280]]
     outcome, detector = pipeline_event(scene, [500, 400, 500], analyzer=lambda _: OverlapAnalyzer())
+    assert detector.calls > 0
+    assert "freezer_masked_movement" in outcome.trace.reason_codes
+    assert outcome.event.judgment.reason == "freezer_masked_movement"
+    assert not outcome.event.judgment.products
+    assert outcome.event.freezer_return is None  # 작은 순변화를 반납 증거로 만들지 않는다
+    assert outcome.event.freezer_movement is not None
+    assert counts(settle([outcome.event])) == {}
+
+
+def test_overlapping_segments_below_product_size_keep_zero_weight_skip():
+    class SmallOverlapAnalyzer:
+        def analyze(self, _samples):
+            return LoadcellAnalysis(0, (
+                WeightSegment(0, 1, -45), WeightSegment(.5, 1.5, 45),
+            ), True, 500)
+
+    scene = [[detection(1, 50, y)] for y in [200, 240, 280]]
+    outcome, detector = pipeline_event(
+        scene, [500, 455, 500], analyzer=lambda _: SmallOverlapAnalyzer())
     assert detector.calls == 0
     assert outcome.event.judgment.reason == "below_min_weight_change"

@@ -242,6 +242,12 @@ curl -s http://localhost:8002/api/health
 | `freezer_close_multi_kind:zone{N}:keep_incremental` | ④ freezer | 냉동 존에 2품목 이상 — 단일 품목 재해석 불가라 증분 유지 | 다품목 청구가 아카이브 판정 근거와 일치하는지 |
 | `zone{N}:freezer_return_same_floor_weight:vision={사유}` | ① 반납 (2026-11-25) | 비전이 반납 SKU를 못 정해(`missing_identity`/`ambiguous_identity`) 같은 층 잔여 취출 중 실측 무게가 맞는 유일한 SKU로 차감 | 같은 층에 비슷한 무게 상품이 여러 개 꺼내졌던 세션이면 차감 SKU가 맞는지 |
 | `zone{N}:freezer_unbilled_take_returned:take=-Xg:return=+Yg:vision={사유}` | ① 반납 (2026-11-25) | 청구 없던 같은 층 취출과 반납 무게가 ±15g 안이라 서로 상쇄 — 청구 변화 없음, review 아님 | 같은 상품을 꺼냈다 넣은 것인지 |
+| `zone{N}:freezer_return_session_weight:vision={사유}` | ① 반납 (2026-11-26) | 비전 반납 SKU가 취출 이력에 없거나(`no_prior_take`) 모호해(`ambiguous_identity`) 모든 층 취출 중 무게가 맞고 영상에 관측된 유일한 SKU로 차감 — 반납·출발 층 `review` | 차감된 SKU가 실제 반납 상품인지(비슷한 무게 상품이 함께 꺼내졌는지) |
+| `zone{N}:freezer_tray_split:take=-Xg:return=+Yg` | 정산 입력 (2026-11-26) | 한 트리거 안 트레이 하나는 빠지고 하나는 늘어 취출·반납으로 나눠 정산 | 늘어난 트레이에 실제로 다른 층 상품을 넣었는지 |
+| `zone{N}:freezer_fingerprint_partial_duplicate:class{C}:source=zone{M}[:adopted=…]` | 정산 입력 (2026-11-26) | 다른 층 COMPLETE와 같은 영상 지문의 무게 불일치 PARTIAL 재청구 제거(`adopted`는 나머지 후보 재판정 결과) — `review` | 그 층에서 실제로 꺼낸 상품 |
+| `zone{N}:freezer_partial_count_from_weight:class{C}:count=n:zone_delta=-Xg` | 정산 입력 (2026-11-26) | 정체성만 보존한 1개 PARTIAL을 층 최종 무게로 n개로 복원 — 영상이 못 본 비슷한 상품이 섞였을 수 있어 PARTIAL 유지 | n개가 같은 상품인지(비슷한 상품 혼동) |
+| `zone{N}:freezer_return_contact_release:release=-Xg:return=+Yg` | 정산 입력 (2026-11-26) | 반납 직후 같은 층의 작은 감소를 손 떼기로 보고 반납 무게에 합산 — `review` | 감소가 실제 손 접촉이었는지 |
+| `zone{N}:freezer_masked_movement:net=±Xg:segments=…` | status (2026-11-26) | 순변화는 50g 미만인데 상품 크기 하강·상승이 모두 있었고 청구가 없음 — 같은 층 취출+다른 상품 반납 상쇄 가능성, `review` | 영상에서 꺼낸 상품과 넣은 상품 |
 | `zone{N}:freezer_unbilled_weight_drop:unexplained=Xg` | status (2026-11-25) | 50g 이상 빠졌는데 청구 상품이 없는 판정이 있고, 반납까지 반영한 순변화로도 X g이 설명되지 않아 `review` | 영상에서 무엇을 꺼냈는지 — 미청구 확인 대상 |
 | `error_zones_excluded:[존 목록]` | 에러 정책 | `FINALIZE_ERROR_FREE_ZONES` 정책에서 에러 존만 제외하고 확정 | 제외된 존의 매출 누락. 기본 정책(`BLOCK_PAYMENT`)에서는 발생하지 않는다 |
 

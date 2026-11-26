@@ -80,14 +80,18 @@ def test_afternoon_recorded_soup_return_is_resolved_without_inventing_duck_weigh
     assert next(z for z in result.zones if z.zone == 4).status == "review"
 
 
-def test_afternoon_failure_is_reproduced_without_paired_endpoint_measurements():
+def test_afternoon_soup_return_matches_by_return_tolerance_without_paired_endpoints():
+    # 11-16에는 끝점 측정이 없으면 삼계탕 반납(912.5g 대 취출 890g, 22.5g 차)이 15g
+    # 허용오차에 걸려 재현됐다. 2026-11-26 냉동 반납 허용오차 25g에서는 BOCPD 총
+    # delta로도 연결된다. 92의 실제 하중 부족(zone4)은 여전히 미해결로 남는다.
     events = [event_from_dict(e) for e in FIXTURE["events"]]
     events = [replace(e, freezer_movement=replace(e.freezer_movement, stable_channel_deltas=()))
               if e.freezer_movement else e for e in events]
     result = settle(events)
-    assert counts(result) == {"1": {"92": 1, "99": 1}, "3": {"100": 1}}
+    assert counts(result) == {"1": {"92": 1, "99": 1}}
+    assert any("take=890.0g:return=912.5g" in note for note in result.notes)
     assert "zone4:freezer_return_unresolved:weight_mismatch" in result.notes
-    assert "zone5:freezer_return_unresolved:weight_mismatch" in result.notes
+    assert "zone5:freezer_return_unresolved:weight_mismatch" not in result.notes
 
 
 @pytest.mark.parametrize("source_stable,return_stable", [
@@ -96,13 +100,16 @@ def test_afternoon_failure_is_reproduced_without_paired_endpoint_measurements():
 def test_endpoint_comparison_requires_both_sides_and_the_complete_channel_set(
     source_stable, return_stable,
 ):
-    result = settle([take(stable=source_stable), returned(stable=return_stable)])
+    # 총 925g(+35)·상품 채널 920g(+30)은 반납 허용오차 25g 밖, 끝점 905g만 맞는다.
+    result = settle([take(stable=source_stable),
+                     returned(delta=925, channels=(5, 920), stable=return_stable)])
     assert counts(result) == {"3": {"100": 1}}
     assert any("weight_mismatch" in note for note in result.notes)
 
 
-@pytest.mark.parametrize("end,matched", [(905, True), (905.1, False)])
-def test_endpoint_measurement_keeps_original_15g_tolerance(end, matched):
+@pytest.mark.parametrize("end,matched", [(905, True), (915, True), (915.1, False)])
+def test_endpoint_measurement_uses_freezer_return_tolerance(end, matched):
+    # 2026-11-26: 끝점 비교도 냉동 반납 허용오차 25g을 쓴다 (11-16의 15g에서 변경).
     result = settle([take(), returned(channels=(912.5,), stable=(end,))])
     assert counts(result) == ({} if matched else {"3": {"100": 1}})
 

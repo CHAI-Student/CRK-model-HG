@@ -298,3 +298,128 @@ def cancel_unbilled_take(
     best = min(fits, key=lambda u: abs(delta - u.weight))
     best.cancelled = True
     return best
+
+
+# ---- 2026-11-26 실기 6세션 보완 (yoona.md #freezer-20261126) ----
+
+def take_measurement(
+    delta: float, products: Sequence[ProductCount],
+    movement: FreezerMovementEvidence | None, gate: float, slack: float, floor: float,
+) -> tuple[float, float | None] | None:
+    """② 단일 SKU 취출의 단위 무게 (unit, stable_unit). 대상이 아니면 None(기존 record_take).
+
+    측정값 후보는 트리거 총 delta와, 상품 크기(floor 이상)로 빠진 채널이 하나일 때의
+    그 채널 delta다. 개수×등록무게와 개수 게이트 안으로 맞는 측정값 중 가장 가까운
+    것을 쓴다(ses-2-1795594482 2층: 총 −467.5g 대신 상품 채널 −475g).
+    - 여러 개를 한 번에 꺼냈으면 평균이 낱개 무게가 아니므로(비슷한 상품이 섞였을
+      수 있음) 등록 무게를 쓴다.
+    - 맞는 측정값이 없으면 기존처럼 총 delta를 쓰되, 등록 무게의 절반을 넘게 더
+      무거우면(다른 상품 무게가 섞임) 1개 무게로 쓸 수 없으므로 등록 무게를 쓴다.
+    """
+    if len(products) != 1 or products[0].count <= 0:
+        return None
+    n, w = products[0].count, products[0].product.unit_weight
+    if w <= 0 or not math.isfinite(delta):
+        return None
+    stable_total = stable_movement_delta(movement)
+    options = [(abs(delta), abs(stable_total)
+                if stable_total is not None and stable_total * delta > 0 else None)]
+    if movement is not None and len(movement.channel_deltas) >= 2:
+        takes = [i for i, d in enumerate(movement.channel_deltas) if d <= -floor]
+        if len(takes) == 1:
+            i = takes[0]
+            stable = None
+            if (len(movement.stable_channel_deltas) == len(movement.channel_deltas)
+                    and movement.stable_channel_deltas[i] < 0):
+                stable = -movement.stable_channel_deltas[i]
+            options.append((-movement.channel_deltas[i], stable))
+    gate_n = gate + slack * (n - 1)
+    verified = sorted(((abs(m - n * w), m, s) for m, s in options if abs(m - n * w) <= gate_n),
+                      key=lambda option: option[0])
+    if verified:
+        _, m, s = verified[0]
+        if n >= 2:
+            return w, None
+        return m, s
+    m, s = options[0]
+    if m - n * w > w / 2:
+        return w, None
+    return m / n, (s / n if s else None)
+
+
+def record_take_measured(
+    lots: list[TakeLot], zone: int, delta: float, products: Sequence[ProductCount],
+    movement: FreezerMovementEvidence | None, gate: float, slack: float, floor: float,
+) -> None:
+    """record_take + ② 상품 채널 실측. 여러 SKU 취출은 기존 record_take 그대로."""
+    measured = take_measurement(delta, products, movement, gate, slack, floor)
+    if measured is None:
+        record_take(lots, zone, delta, products, stable_delta=stable_movement_delta(movement))
+        return
+    unit, stable_unit = measured
+    pc = products[0]
+    lots.append(TakeLot(zone, pc.product, pc.count, unit, stable_unit))
+
+
+# 비전이 반납 SKU를 세션 취출 이력과 연결하지 못한 사유 중 세션 무게로 보완하는 것.
+# no_prior_take: 비전 1위 SKU를 이 세션에서 꺼낸 적 없음(비전 혼동, ses-6 용가리).
+# ambiguous_identity: 1·2위가 비슷해 정하지 못함(2026-11-26 사용자 결정 E2).
+# weight_mismatch(본 SKU의 무게가 반증)와 missing_identity(관측 부족)는 대상이 아니다.
+_SESSION_FALLBACK_REASONS = frozenset({"no_prior_take", "ambiguous_identity"})
+
+
+def match_session_weight_return(
+    evidence: FreezerReturnEvidence, delta: float, zone: int,
+    lots: Sequence[TakeLot], tolerance: float, reason: str, observed: set[int],
+) -> list[tuple[TakeLot, int]]:
+    """⑤ 세션 취출 이력(모든 층) 중 반납 무게가 맞는 SKU가 하나뿐이고, 그 SKU가 이번
+    영상에 3표 이상 관측됐으면 그 SKU로 차감한다.
+
+    - 같은 무게 SKU·개수 갈림(ambiguous_count/mapping)이면 확정하지 않는다.
+    - 여러 SKU를 섞은 조합도 같은 무게를 설명하면 확정하지 않는다.
+    - 영상에 한 번도 관측되지 않은 SKU를 무게만으로 고르지 않는다.
+    """
+    if reason not in _SESSION_FALLBACK_REASONS or not evidence.stabilized:
+        return []
+    if not math.isfinite(delta) or delta <= 0:
+        return []
+    available = [lot for lot in lots if lot.remaining > 0]
+    fits = []
+    for cid in sorted({lot.product.class_id for lot in available}):
+        allocation, fit_reason = _allocate(cid, delta, zone, available, tolerance)
+        if fit_reason in ("ambiguous_count", "ambiguous_mapping"):
+            return []
+        if allocation:
+            fits.append((cid, allocation))
+    if len(fits) != 1 or fits[0][0] not in observed:
+        return []
+    if _combination_count(delta, available, tolerance) != 1:
+        return []
+    return fits[0][1]
+
+
+def _combination_count(
+    delta: float, lots: Sequence[TakeLot], tolerance: float, slack: float = 5.0,
+) -> int:
+    """남은 취출 이력의 SKU 조합(개수 포함) 중 delta를 설명하는 조합 수."""
+    by_class: dict[int, tuple[float, int]] = {}
+    for lot in lots:
+        unit, n = by_class.get(lot.product.class_id, (lot.unit_weight, 0))
+        by_class[lot.product.class_id] = (unit, n + lot.remaining)
+    items = list(by_class.values())
+    found = 0
+
+    def walk(i: int, total: float, count: int) -> None:
+        nonlocal found
+        if i == len(items):
+            if count and abs(total - delta) <= tolerance + slack * (count - 1):
+                found += 1
+            return
+        unit, available = items[i]
+        for k in range(available + 1):
+            if total + unit * k > delta + tolerance + slack * (count + k):
+                break
+            walk(i + 1, total + unit * k, count + k)
+
+    walk(0, 0.0, 0)
+    return found

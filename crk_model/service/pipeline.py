@@ -16,8 +16,9 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 
-from crk_model.core.profiles import REFRIGERATOR, SensorProfile
+from crk_model.core.profiles import REFRIGERATOR, SensorProfile, product_size_floor
 from crk_model.core.types import (
+    ActiveProduct,
     JudgmentResult,
     JudgmentStatus,
     ProductCount,
@@ -37,6 +38,7 @@ from crk_model.ledger.events import (
     FreezerReturnEvidence,
     TriggerEvent,
 )
+from crk_model.ledger.freezer_close_checks import has_masked_movement
 from crk_model.perception.detector import HAND_CLASS_ID, Detector
 from crk_model.perception.filters import DetectionFilterChain
 from crk_model.perception.motion_direction import MotionDirectionConfig
@@ -303,7 +305,9 @@ class TriggerPipeline:
             profile.min_trigger_delta_grams is not None
             and abs(delta) < profile.min_trigger_delta_grams
         )
-        if below_profile_gate or below_pilot_gate:
+        masked = (below_profile_gate or below_pilot_gate) and _freezer_masked_movement(
+            profile, analysis.segments, snapshot.products, trace)
+        if (below_profile_gate or below_pilot_gate) and not masked:
             # 저무게 스킵: vision 전체 생략 = YOLO 호출 0 (QA Q8)
             trace.reason_codes.append("low_weight_skip")
             judgment = JudgmentResult(
@@ -339,6 +343,19 @@ class TriggerPipeline:
             if (analysis.stabilized and not analysis.trailing_return_stabilized
                     and trace.freezer_movement.return_candidates):
                 trace.reason_codes.append("mixed_return_stabilization_pending")
+        if masked:
+            # D2: 영상·채널 증거만 남기고 트리거 단계에서는 청구하지 않는다 — 순변화가
+            # 작아 무게로 개수를 검증할 수 없고(같은 상품을 꺼냈다 넣은 왕복도 같은 모양),
+            # 작은 순변화를 반납 증거로 만들지도 않는다. 청구는 CLOSE 혼합 분해가 반납
+            # 이력과 함께 검증할 때만 생긴다.
+            judgment = JudgmentResult(
+                JudgmentStatus.NO_DETECTION,
+                reason="freezer_masked_movement",
+                strategy="freezer_masked_movement",
+            )
+            return self._outcome(
+                session_id, req, delta, analysis.segments, judgment, trace, candidates
+            )
         if not profile.weight_is_discriminative and delta >= profile.min_weight_change_grams:
             # 양수 순변화의 반납 증거. 혼합 행동은 CLOSE에서 별도로 순변화를 검증한다.
             returning = trace.directional_candidates.get("return", ())
@@ -385,9 +402,19 @@ class TriggerPipeline:
         빼고 미확정 이벤트를 1회 재판정한다 (_pool_exhaustion_retry, 이슈 #16).
         """
         trace.reason_codes.append(f"multi_tray_events:{len(analysis.events)}")
-        results: list[tuple[ChannelWeightEvent, JudgmentResult]] = [
-            (ev, self._judge_event(ctx, ev, trace)) for ev in analysis.events
-        ]
+        results: list[tuple[ChannelWeightEvent, JudgmentResult]] = []
+        for ev in analysis.events:
+            # ③ 2026-11-26 (11-18 4390e7a 복원): 냉동의 작은 채널 변화(파일럿 50g 미만,
+            # 손 접촉 잔여)는 상품으로 판정하지 않는다 — 판정하면 공유 카메라의 다른 층
+            # 후보가 무게 불일치 PARTIAL로 청구된다. 채널 측정값은 movement에 그대로 남는다.
+            if (not ctx.profile.weight_is_discriminative
+                    and abs(ev.delta_grams) < (ctx.profile.min_trigger_delta_grams
+                                               or ctx.profile.min_weight_change_grams)):
+                trace.reason_codes.append(f"freezer_small_channel:ch{ev.channel}:{ev.delta_grams:+.1f}g")
+                continue
+            results.append((ev, self._judge_event(ctx, ev, trace)))
+        if not results:
+            return JudgmentResult(JudgmentStatus.NO_DETECTION, reason="no_product_channel")
         results = self._pool_exhaustion_retry(ctx, results, trace)
         results = self._collision_complete_retry(ctx, results, trace)
         results = self._collision_partial_retry(ctx, results, trace)
@@ -968,3 +995,21 @@ class TriggerPipeline:
             freezer_movement=trace.freezer_movement,
         )
         return TriggerOutcome(event, trace)
+
+
+def _freezer_masked_movement(
+    profile: SensorProfile, segments: Sequence, products: Sequence[ActiveProduct],
+    trace: TriggerTrace,
+) -> bool:
+    """D2 (2026-11-26): 냉동에서 순변화는 작아도 한 트리거 안에서 상품 크기
+    (가장 가벼운 상품의 절반) 이상 빠지고 올라간 구간이 모두 있으면, 같은 층 취출과
+    다른 상품 반납이 상쇄됐을 수 있으므로 영상 추론을 건너뛰지 않는다
+    (ses-2-1795594482 1층: 102 취출 + 99 반납 = −16.8g, 세그먼트 −905/+385).
+    트리거 판정은 무청구로 두고, 청구는 CLOSE 혼합 분해가 반납 이력과 함께
+    검증할 때만 생긴다."""
+    if profile.weight_is_discriminative:
+        return False
+    if has_masked_movement(segments, product_size_floor(p.unit_weight for p in products)):
+        trace.reason_codes.append("freezer_masked_movement")
+        return True
+    return False

@@ -4,7 +4,8 @@
 로드셀 무게를 신뢰하기로 하면서 [2026-11-18 비전 증거와 세션 전체 반납 연결](#freezer-20261118)(커밋 `4390e7a`·`8433acf`)을
 되돌렸다. 코드는 [2026-11-16 기록](#freezer-20261116)(커밋 `7bb4f25`) 상태를 바탕으로 한다.
 그 위에 [2026-11-19 CLOSE 정산 보완](#freezer-20261119), [2026-11-25 코드 경량화](#refactor-20261125),
-11-25 무게 신뢰 기반 보완(같은 층 반납, 청구 없이 빠진 무게의 review)을 더했다.
+11-25 무게 신뢰 기반 보완(같은 층 반납, 청구 없이 빠진 무게의 review),
+[2026-11-26 반납 보완](#freezer-20261126)(반납 허용오차 25g, 세션 무게 반납, 정산 입력 보완)을 더했다.
 아래 날짜별 기록은 당시 구현 이력이며, 이후 철회·보완된 설명이 포함되어 있다.
 최신 절의 구현 완료, 저장 데이터 검증, 실제 장비에서 확인할 항목을 구분해서 읽는다.
 
@@ -2584,5 +2585,127 @@ ruff: 기존 경고 2건만
   `--session X`의 파일이 매핑이 아닌 JSON/YAML이면 TypeError로 종료한다.
 - `config`: `MODEL__SESSION__ERROR_POLICY`만 빈 값·대소문자·공백을 기본값으로 넘기지 않고 오류를 낸다.
   bool env는 오타(`ture`)를 조용히 False로 읽는다. 숫자 env의 공백 값은 오류다.
+
+이 절의 변경도 작업 트리에만 있고 커밋·push하지 않았다.
+
+<a id="freezer-20261126"></a>
+
+# 2026-11-26 냉동 반납 보완: 11-25 실기 세션 검토
+
+## 1. 배경
+
+11-25 실기 6세션(기기 커밋 `7bb4f25`)에서 반납을 제대로 처리하지 못한 경우가 대부분이었다.
+같은 날 기기에서 맞았던 ses-4-1795593217·ses-7-1795593955·ses-1-1795594411 YAML도 받아 함께 검토했다.
+
+| 세션 | 정답 | 기기 청구 | 지금 (저장 데이터 재정산) |
+|---|---|---|---|
+| ses-3-1795592912 | 95 | 102 | **95** |
+| ses-5-1795593345 | 94+92 | 94+93 | 94+93 (4층 92를 영상이 93으로 봄) |
+| ses-6-1795593508 | 102 | 102+98 | **102** |
+| ses-8-1795594034 | 93+98 | 94+98 | 94+98 (1층 93을 94로 봄 — 2개 취출·1개 반납으로 정산) |
+| ses-2-1795594482 | 102+97+98 | 95+95+98 | 95+98, 1층 review — 1층 영상이 없는 저장 데이터 한계. 영상이 돌면 102+98 (4절) |
+| ses-3-1795594851 | 97+101+98 | 98+97+97+98 | **97+102+98** (101을 102로 봄) |
+| ses-4-1795593217 | 102 | 94+102 | **102** (1층 94를 2층에 반납 — 세션 총 −523g = 상품 1개. 사용자 확인) |
+| ses-7-1795593955 | 99+102 | 99+102 | 99+102 (유지) |
+| ses-1-1795594411 | 97+103+100 | 97+103+100 | 97+103+100 (유지 — 5층 닭발 중복을 교차존 대신 ③이 트리거 단계에서 뺌) |
+
+## 2. 사용자 결정
+
+- 반납 매칭 허용오차 25g. env가 아닌 코드 전역값 `core/profiles.FREEZER_RETURN_TOLERANCE_GRAMS`.
+  취출 판정 허용오차(`tolerance_grams` 15g)는 그대로 — 25g 이상에서는 무게가 맞는 후보가 늘어
+  공유 카메라에 오염된 영상 1위가 이긴다(ses-2-1795055845 94→93, ses-2-1794789461 102→99 등).
+- 상품 크기 기준(이전 검토의 185g = 최소 상품 − 15g)을 **가장 가벼운 등록 상품의 절반**(현재 100g)으로.
+  상품이 아닌 채널 변화는 최대 75g, 상품 채널은 최소 362g이고, 80~185g 어디든 24세션 결과가 같다(60g은 ses-3-1795594851 깨짐).
+- E2(모호한 반납도 세션 무게로), D2(상쇄 움직임이면 영상 추론) 반영. F(무게로 불가능한 partial 제거)는 취출이 사라져 제외.
+- 비슷한 상품(93/94, 101/102, 92/93, 96/97)은 모델 문제로 둔다. 다만 취출 자체는 청구에 나타나야 한다.
+- 11-19 5번은 계속 구현하지 않는다.
+
+## 3. 변경
+
+정산 입력 복사본만 고친다(아카이브·보고용 `weight_delta`는 원본). 모두 냉동 프로파일에만 적용.
+
+| 번호 | 내용 | 위치 | note | 해결 세션 |
+|---|---|---|---|---|
+| ① | 한 트리거 안 상품 크기 채널 하나 감소·하나 증가 → 취출·반납 두 이벤트 | `freezer_close_checks.split_tray_movements` | `freezer_tray_split` | ses-3-1795592912 4층 |
+| ② | 단일 SKU 취출 이력을 상품 채널 실측으로 기록(여러 개면 등록 무게, 다른 상품이 섞여 절반 넘게 무거우면 등록 무게) | `freezer_returns.take_measurement` | — | ses-2-1795594482 2층 (−467.5 → −475g) |
+| ③ | 멀티 트레이에서 50g 미만 채널은 판정하지 않음(11-18 `4390e7a` 복원) | `pipeline._judge_tray_events` | `freezer_small_channel:chN` (reason code) | ⑥과 함께여야 함 |
+| ④ | 순변화 50g 미만인데 상품 크기 하강·상승이 모두 있던 무청구 층 → review | `freezer_close_checks.masked_movement_zones` | `freezer_masked_movement` | ses-2-1795594482 1층 |
+| ⑤+E2 | 비전 반납 SKU가 취출 이력에 없거나(`no_prior_take`) 모호하면(`ambiguous_identity`) 모든 층 취출 중 무게가 맞는 유일한 SKU로 차감 — 그 SKU가 영상에 3표 이상, 여러 SKU 조합으로도 설명되면 거부, 반납·출발 층 review | `freezer_returns.match_session_weight_return` | `freezer_return_session_weight` | ses-6 4층, ses-8 3층, ses-3-1795594851 1층, ses-4 2층 |
+| ⑥ | 다른 층 무게 검증 COMPLETE와 같은 지문인 무게 불일치 PARTIAL 재청구 제거 | `freezer_close_checks.suppress_partial_fingerprint_duplicates` | `freezer_fingerprint_partial_duplicate` | ses-3-1795594851 1층 98 |
+| ⑦ | 반납 직후 같은 층 무청구 작은 감소(상품 크기 미만)를 반납 무게에 합산 | `freezer_close_checks.fold_contact_release` | `freezer_return_contact_release` | ses-3-1795594851 1층 (+786.7 −65 = +721.7g) |
+| ⑧ | 정체성만 보존한 count=1 PARTIAL이 층의 유일한 청구면 층 최종 무게로 개수 복원(n≥2, 오차 ≤ n×25g, 재고 이하, PARTIAL 유지) | `freezer_close_checks.recover_partial_count` | `freezer_partial_count_from_weight` | ses-8 1층 (−1473.3g → 94×2) |
+| D2 | 저무게 스킵 대상이어도 상품 크기 하강·상승이 모두 있으면 영상 추론. 트리거 판정은 무청구, 작은 순변화를 반납 증거로 만들지 않음 | `pipeline._freezer_masked_movement` | `freezer_masked_movement` (reason code·judgment reason) | ses-2-1795594482 1층 |
+| 혼합 | 혼합 분해: 취출 이력 ② 적용, 반납 SKU가 이력에 없거나 반납 방향이 없으면 ⑤와 같은 조건으로 찾기, 반납 실측 − 순변화로 구한 취출 무게는 취출 방향 1위 SKU로 tolerance×2·재고 안이면 인정 | `freezer_movements._split_mixed`, `_derived_take` | `freezer_mixed_resolved` | ses-2-1795594482 1층 |
+| 25g | 냉동 반납 매칭 전부(정산·혼합 분해·같은 층 보완·세션 무게)에 25g | `profiles.return_tolerance` | — | ses-3-1794808045, ses-6-1794796052, ses-4 |
+
+정산 순서: 교차존·carried-over → ⑥ → ① → 혼합 분해 → ⑧ → ⑦ → 반납 매칭(②·⑤·25g) → ④ → net/교차존/freezer resolve.
+
+## 4. 검증
+
+저장 YAML 27세션(11-12~11-25, ses-4·ses-7·ses-1 포함)을 CLOSE만 다시 정산했다. 트리거 단계의 ③은 저장 후보로
+멀티 트레이 판정을 근사 재판정해 적용했다(영상 재추론 아님). 시제품 결과와 repo 결과가 25세션 모두 같다(ses-7·ses-1은 repo로만 확인).
+
+HEAD 대비 청구가 바뀐 세션:
+
+| 세션 | HEAD | 지금 | 정답 대비 |
+|---|---|---|---|
+| ses-3-1795592912 | 102 | 95 | 정답 |
+| ses-6-1795593508 | 102+98 | 102 | 정답 |
+| ses-3-1795594851 | 98+97+97+98 | 97+102+98 | 101→102만 다름(비슷한 상품) |
+| ses-4-1795593217 | 94+102 | 102 | 정답 |
+| ses-3-1794808045 | 92+99+100 | 92+99 | 삼계탕 반납 연결(912.5 대 취출 890g). 92는 11-16부터 남은 문제(반납 하중 부족, 정답은 99만) |
+| ses-6-1794796052 | 95×2 | 95 | 정답 |
+| ses-2-1794812242 | 92+92 | 94 | 11-16 기대값 복귀 |
+
+ses-8은 청구가 같다(94+98). HEAD는 1개 청구 + 반납 미해결이었고, 지금은 2개 취출 − 3층 반납 1개다.
+ses-8을 포함한 나머지 20세션은 청구가 같고 status·notes만 바뀐다(review 추가 등).
+
+ses-2-1795594482 1층은 기기가 영상을 건너뛰어 후보가 없다. D2로 영상이 돌았다고 가정한 6가지
+(반납을 99로 봄 / 95로 혼동 / 반납 방향 없음 × 트레이 1·2개)에서 모두 102+98이 된다(3층 97은 아래 6절).
+같은 상품을 꺼냈다 넣은 왕복(−10g)은 D2로 영상이 돌아도 청구하지 않고 review만 남는다.
+
+```text
+.venv/bin/python -m pytest -q
+748 passed, 25 skipped (773 collected)
+ruff (crk_model): 기존 경고 1건만 (gateway/state_machine.py:365 E501)
+```
+
+## 5. 기대값이 바뀐 기존 테스트 (14건)
+
+| 원인 | 테스트 | 변경 |
+|---|---|---|
+| E2 | `test_freezer_return_matching.py::test_other_floor_return_without_vision_identity_stays_unresolved[ambiguous]` | 모호 반납은 세션 무게 차감 + review로 분리(`test_other_floor_ambiguous_return_matches_unique_session_weight_for_review`) |
+| E2 | `test_freezer_returns.py::test_camera_identity_conflict_on_other_floor_keeps_prior_take_for_review` | 차감 + 두 층 review |
+| D2 | `test_freezer_returns.py::test_overlapping_segments_keep_existing_zero_weight_skip` | 영상 추론은 돌고 트리거 무청구. 상품 크기 미만 상쇄는 기존 스킵 유지 테스트 추가 |
+| 25g | `test_measured_return_tolerance_boundary` | 15.1g 거부 → 25.1g 거부 |
+| 25g | `test_catalog_weight_alone_cannot_override_disagreeing_measured_delta` | 반납 490 → 491g (실측과 26g 차) |
+| 25g | `test_freezer_return_measurements.py` 5건 | 끝점 경계 905.1 → 915.1g, 끝점이 필요한 경우를 총 925g·채널 920g으로, 11-16 오후 재현 테스트는 25g에서 삼계탕이 연결됨으로 |
+| 25g | `test_freezer_session_returns.py` 4건 | 채널 잔차 24.2g → 30g(25g 밖) |
+
+새 테스트: `tests/test_freezer_sessions_20261125.py` 39건(`fixtures/freezer_sessions_20261125.json` 9세션 포함).
+
+## 6. 남은 것
+
+- **ses-2-1795594482 3층 97**: 영상에 97·96 검출은 있었지만(top 튜브 진단에 97이 24·23회) 신뢰도가 투표 진입 기준 미만이라
+  후보가 없다. 무게 365g은 96(373)·97(370) 모두 맞아 무게로 정할 수 없다 → 미청구 + review. 모델 문제.
+- 비슷한 상품: ses-5 92→93, ses-8 93→94, ses-3-1795594851 101→102. 취출은 청구에 나타난다.
+- ses-2-1795594482 1층 D2 결과는 가정값 검증이다. 실기에서 같은 동작(같은 층 취출 + 다른 상품 반납)을 다시 확인해야 한다.
+- 25g의 대가: 25g 안쪽 상품(95 475 / 98 460 / 99 500, 92 523 / 101·102 530)은 반납 무게로 더 구분되지 않는다.
+  영상이 정체성을 못 정하면 ⑤의 조합 가드로 차감하지 않고 review로 남는다.
+
+## 7. 변경 파일
+
+| 파일 | 변경 |
+|---|---|
+| [core/profiles.py](crk_model/core/profiles.py) | `FREEZER_RETURN_TOLERANCE_GRAMS`, `return_tolerance`, `product_size_floor` |
+| [ledger/freezer_close_checks.py](crk_model/ledger/freezer_close_checks.py) | 신규 — ①④⑥⑦⑧ |
+| [ledger/freezer_returns.py](crk_model/ledger/freezer_returns.py) | ② `take_measurement`·`record_take_measured`, ⑤ `match_session_weight_return` |
+| [ledger/freezer_movements.py](crk_model/ledger/freezer_movements.py) | 혼합 분해 보완 |
+| [ledger/settler.py](crk_model/ledger/settler.py) | 정산 순서 연결, 25g, ⑤, review 조건 |
+| [service/pipeline.py](crk_model/service/pipeline.py) | D2, ③ |
+| 테스트 | 5절, 신규 `test_freezer_sessions_20261125.py`·fixture |
+| `docs/03`, `docs/05`, `crk_model/ledger/README.md`, `tests/README.md` | 규칙·note·테스트 수 |
+
+`crk_model` Python 코드: 13,365 → 13,948줄. 새 env는 없다.
 
 이 절의 변경도 작업 트리에만 있고 커밋·push하지 않았다.

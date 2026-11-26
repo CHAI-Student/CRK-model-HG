@@ -231,8 +231,9 @@ def test_two_weight_fitting_alternative_skus_remain_unresolved():
 
 
 @pytest.mark.parametrize("channels,total,matched", [
-    ((465, 24.2), 489.2, True), ((465, -24.2), 440.8, True),
-    ((), 489.2, False), ((465, 24.2), 500, False),
+    # 잔차 30g: 총 delta는 반납 허용오차(25g) 밖, 상품 채널 465g만 맞는다.
+    ((465, 30), 495, True), ((465, -30), 435, True),
+    ((), 495, False), ((465, 30), 500, False),
     ((465, 50), 515, False), ((465, 200), 665, False),
     ((465, 30, 30), 525, False),
 ])
@@ -280,15 +281,15 @@ def test_pipeline_preserves_channel_measurements_for_close(monkeypatch, profile)
     pipeline = TriggerPipeline(
         EmptyDetector(), {5: profile}, store, analyzer_factory=BocpdLoadcellAnalyzer,
     )
-    samples = [LoadcellSample(i * .1, (500, 100) if i < 20 else (965, 125))
+    samples = [LoadcellSample(i * .1, (500, 100) if i < 20 else (965, 130))
                for i in range(40)]
     outcome = pipeline.process("s", TriggerRequest(5, {}, samples, 7))
-    assert outcome.event.delta_weight == 490
+    assert outcome.event.delta_weight == 495
     if profile is FREEZER:
-        assert outcome.event.freezer_movement.channel_deltas == (465, 25)
+        assert outcome.event.freezer_movement.channel_deltas == (465, 30)
         result = settle([taken(DINO, delta=-465), outcome.event])
         assert counts(result) == {}
-        assert any("+25.0g:total=+490.0g" in note for note in result.notes)
+        assert any("+30.0g:total=+495.0g" in note for note in result.notes)
     else:
         assert outcome.event.freezer_movement is None
 

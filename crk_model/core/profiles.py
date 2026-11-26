@@ -11,6 +11,8 @@ IO-BOARD 엣지 단이 5g 양자화를 적용한다(CRK-IO-BOARD 2.0.2). 따라�
 """
 from __future__ import annotations
 
+import math
+from collections.abc import Iterable
 from dataclasses import dataclass
 
 
@@ -78,3 +80,30 @@ FREEZER = SensorProfile(
     min_trigger_delta_grams=50.0,  # 파일럿: 200g 이상 상품 구성에서 50g 미만 흔들림 추론 억제
     motion_evidence_floor_px=12.0,  # 원본 FREEZER_MOTION_MIN_DISPLACEMENT_PX
 )
+
+
+# 냉동 반납 매칭 허용오차 (2026-11-26 사용자 결정 — env가 아닌 코드 전역값).
+# 같은 상품도 꺼낼 때와 넣을 때 실측이 20~25g 다르다(삼계탕 890→912.5g,
+# 용가리 465→489.2g). 취출 판정 허용오차(tolerance_grams 15g)는 그대로 둔다 —
+# 25g 이상에서는 무게가 맞는 후보가 늘어 공유 카메라에 오염된 영상 1위가 이긴다.
+FREEZER_RETURN_TOLERANCE_GRAMS = 25.0
+
+
+def return_tolerance(profile: SensorProfile) -> float:
+    """반납 매칭 허용오차. 냉동(무게가 판별자가 아닌 프로파일)만 전역값을 쓴다."""
+    if profile.weight_is_discriminative:
+        return profile.tolerance_grams
+    return FREEZER_RETURN_TOLERANCE_GRAMS
+
+
+def product_size_floor(unit_weights: Iterable[float]) -> float:
+    """'상품 1개가 움직였다'고 볼 최소 무게 = 가장 가벼운 등록 상품의 절반.
+
+    2026-11-26 검토: 상품이 아닌 채널 변화(손 접촉 잔여·떼는 변화)는 최대 75g,
+    상품 채널은 최소 362g(가장 가벼운 상품은 닭발 200g)이다. 80~185g 어디로 두어도
+    24세션 결과가 같고 60g에서 손 떼는 변화(−65g)를 상품으로 본다. 절반은 그
+    간격의 가운데이자 "0.5개 이상이면 1개"인 개수 반올림과 같은 기준이다.
+    순간 세그먼트에는 손 누름도 750g까지 나오므로, 세그먼트에 쓸 때는 영상 추론을
+    여는 조건(D2)과 review 표시(④)에만 쓰고 청구를 직접 만들지 않는다."""
+    units = [w for w in unit_weights if w > 0]
+    return min(units) / 2 if units else math.inf
