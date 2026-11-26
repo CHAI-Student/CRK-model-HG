@@ -141,21 +141,32 @@ def _split_mixed(
     taken_weight = returned_weight - event.delta_weight
     if taken_weight < profile.min_weight_change_grams:
         return None
-    judgment = router.judge(JudgmentContext(
-        zone=event.zone, profile=profile, delta_weight=-taken_weight, segments=(),
-        vision_candidates=taking, active_products=tuple(products), vision_only=False,
-    ))
-    if judgment.status is not JudgmentStatus.COMPLETE:
-        judgment = _derived_take(taking, taken_weight, products, profile) or judgment
-    if judgment.status is not JudgmentStatus.COMPLETE or not judgment.products:
-        return None
     returned_classes = {lot.product.class_id for lot, _ in allocation}
-    if any(pc.product.class_id in returned_classes for pc in judgment.products):
-        return None  # 같은 SKU의 반복/개수 혼합은 이 증거만으로 분해하지 않는다.
+    carried_in = ({c.class_id for c in taking} <= returned_classes
+                  and all(lot.zone != event.zone for lot, _ in allocation))
+    if carried_in:
+        # 카메라를 모든 층이 공유해, 다른 층에서 꺼내 들고 온 반납 SKU가 이 층 클립에
+        # 취출 방향으로도 잡힌다 (ses-1-1795659665: 3층 10 → 2층 반납). 취출 방향
+        # 후보가 반납 SKU뿐이면 반납만 연결하고, 이 층에서 꺼낸 상품은 영상 근거가
+        # 없으므로 청구하지 않는다 — 남은 무게는 정산에서 review로 드러난다 (2026-11-26).
+        judgment = JudgmentResult(JudgmentStatus.NO_DETECTION, reason="carried_in_unidentified")
+        take_candidates: tuple = ()
+    else:
+        judgment = router.judge(JudgmentContext(
+            zone=event.zone, profile=profile, delta_weight=-taken_weight, segments=(),
+            vision_candidates=taking, active_products=tuple(products), vision_only=False,
+        ))
+        if judgment.status is not JudgmentStatus.COMPLETE:
+            judgment = _derived_take(taking, taken_weight, products, profile) or judgment
+        if judgment.status is not JudgmentStatus.COMPLETE or not judgment.products:
+            return None
+        if any(pc.product.class_id in returned_classes for pc in judgment.products):
+            return None  # 같은 SKU의 반복/개수 혼합은 이 증거만으로 분해하지 않는다.
+        take_candidates = taking
     taken = replace(
         event, ts=segments[last_take].end_ts, delta_weight=-taken_weight, segments=(),
         judgment=replace(judgment, reason="freezer_mixed_take:" + judgment.reason),
-        vision_candidates=taking, change_timestamps=(segments[last_take].end_ts,),
+        vision_candidates=take_candidates, change_timestamps=(segments[last_take].end_ts,),
         freezer_return=None, freezer_movement=None,
     )
     returned = replace(
