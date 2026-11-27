@@ -37,6 +37,10 @@ from crk_model.ledger.cross_zone import (
     apply_cross_zone_penalty,
 )
 from crk_model.ledger.events import EventLog, TriggerEvent
+from crk_model.ledger.freezer_carried_out import (
+    adopt_carried_out_identity,
+    ghost_exempt_classes,
+)
 from crk_model.ledger.freezer_carried_over import suppress_carried_over_partials
 from crk_model.ledger.freezer_close_checks import (
     fold_contact_release,
@@ -591,11 +595,20 @@ class CloseSettler:
         )
         ok = recover_partial_count(ok, profiles, self.default_profile, notes)
         ok, folded_review = fold_contact_release(ok, profiles, self.default_profile, floor, notes)
+        # 2026-11-26 carried-out 정체성 (freezer_carried_out, yoona.md
+        # #freezer-carried-out-20261126): 같은 무게대 두 상품 중 다음 층으로 들려
+        # 나간 쪽으로 1개 청구의 정체성을 바꾼다. 반납 매칭이 바뀐 정체성을 보도록
+        # 반납 정산 전에 두고, 바꾼 층은 CLOSE 재solve가 무게 스냅으로 되돌리지
+        # 않게 보존한다.
+        ok, carried_out_zones = adopt_carried_out_identity(
+            ok, profiles, products, self.default_profile, notes,
+        )
 
         baskets, unmatched, net_adjustments, protected, return_review = _pass_returns(
             ok, profiles, self.default_profile, freezer_cross_zone=True, notes=notes,
             take_floor=floor, count_unit_slack=self.count_unit_slack,
         )
+        protected |= carried_out_zones
         return_review |= folded_review
         masked = masked_movement_zones(ok, profiles, self.default_profile, floor, notes)
         self._pass_net_delta(
@@ -847,14 +860,24 @@ class CloseSettler:
         # 별개 — 실패 방향은 콤보 미형성 = 비전 판정 유지로 안전).
         ghosts: dict[int, tuple[int, ...]] = {}
         backed_zones: dict[int, set[int]] = {}
+        ghost_exempt: dict[int, frozenset[int]] = {}
         if self.combo_session_guard and self.vision_combo:
             if self.ghost.mode != "off":
                 ghosts = detect_ghosts(events, self.ghost, self.cross_zone)
+                # 2026-11-26 ses-8-1795685730: 꺼낸 층에서는 유령이 아니다 —
+                # 다른 층의 표가 전부 이 층에서 꺼낸 상품을 손에 든 흔적일 때.
+                if ghosts:
+                    ghost_exempt = ghost_exempt_classes(events, profiles, default_profile)
             backed_zones = weight_backed_zones(events)
+        all_ghosts = ghosts
         for zone, b in list(baskets.items()):
             if zone in (protected_zones or ()):
                 notes.append(f"zone{zone}:freezer_identity_ledger_preserved")
                 continue
+            exempt = ghost_exempt.get(zone, frozenset()) & set(all_ghosts)
+            ghosts = {c: zs for c, zs in all_ghosts.items() if c not in exempt}
+            for cid in sorted(exempt):
+                notes.append(f"zone{zone}:freezer_carried_out_not_ghost:class{cid}")
             prof = _profile(profiles, zone, default_profile)
             if prof.weight_is_discriminative:
                 continue

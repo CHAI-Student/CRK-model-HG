@@ -400,6 +400,16 @@ SKU가 하나뿐이고 그 SKU가 이번 영상에 3표 이상 관측됐을 때�
   가깝거나(덜 읽혀도) C + 다른 상품으로 더 무거우므로 지우지 않는다. 이 층 하강이 상품 크기
   미만이거나, 상품 크기 이상 올라간 구간이 있거나(혼합), 출처 층 청구가 그 층 무게와 맞지 않아도
   쓰지 않는다(`freezer_carried_over_suppressed:...:lifted_during_trigger` → review, 2026-11-26).
+- 다음 층으로 들려 나간 상품(carried-out): 냉동 취출 이벤트 E에서 상품 C가 첫 프레임에는 손에
+  없었고(head_votes < 5) 취출 방향 후보(3표 이상)이며, E 뒤 C가 처음 보인 다른 층에서 첫 프레임부터
+  손에 있었으면(head_votes ≥ 5) C는 E 층에서 꺼낸 것이다(`ledger/freezer_carried_out.py`, 2026-11-26).
+  두 곳에 쓴다. ① 유령 예외: C가 E 층 밖에서 보인 곳이 전부 그 뒤의 손에 든 모습이면 E 층 CLOSE
+  재solve(콤보·한 종 교체)에서 C를 유령으로 빼지 않는다(`freezer_carried_out_not_ghost:classC`).
+  ② 정체성 교체: E가 D 1개로 청구됐고, 들려 나간 상품이 D가 아닌 C 하나뿐이며, D는 다음 층에 들려 간
+  흔적이 없고, C가 세션 어디에도 청구되지 않았고, C 표 ≥ D 표이고, 꺼낸 무게가 C의 근접 밴드
+  (2×count gate) 안이면 C 1개 PARTIAL로 바꾼다(`freezer_carried_out_identity:billed=classD:adopted=classC`,
+  존 상태 partial). 반납 정산 전에 바꾸고, 바꾼 층은 CLOSE 재solve가 무게 스냅으로 되돌리지 않게
+  보존한다. 무게는 거부권만 쓴다 — 같은 무게대 쌍(93/94, 95/99)의 정체성은 영상이 정한다.
 
 청구 없이 빠진 무게: 냉동 층에 50g(`min_trigger_delta_grams`) 이상 빠졌는데 청구 상품이
 없는 판정(상품 없는 PARTIAL·NO_DETECTION)이 있고, 반납·층간 이동을 반영한 층 순변화가

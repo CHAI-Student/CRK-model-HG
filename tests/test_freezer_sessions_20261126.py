@@ -527,3 +527,76 @@ def test_take_outside_the_near_band_stays_out_of_the_mixed_ledger():
               for e in _session("ses-1-1795682705")]
     result = settle(events)
     assert not any("freezer_mixed_resolved" in n for n in result.notes)
+
+
+# ---- 다음 층으로 들려 나간 상품 (yoona.md #freezer-carried-out-20261126) ----
+
+def _with_candidate(events, zone, cid, **fields):
+    """zone 이벤트의 비전 후보 cid 값을 바꾼다 (조건 하나씩 빼 보는 확인용)."""
+    return [replace(e, vision_candidates=tuple(
+        replace(c, **fields) if c.class_id == cid else c for c in e.vision_candidates))
+        if e.zone == zone else e for e in events]
+
+
+def test_item_carried_to_the_next_floor_is_not_a_ghost_where_it_was_taken():
+    """1층 −681g = 12(200g) + 8(500g). 8은 1층 영상 첫 프레임엔 없고 취출 방향 5표,
+    5층 영상엔 첫 프레임부터 손에 있었다(head 5). 두 층에 보였다고 유령으로 빼면 조합
+    12+8이 막혀 12만 청구된다."""
+    result = settle(_session("ses-8-1795685730"))
+    assert class_counts(result) == {"12": 1, "8": 1, "7": 1}
+    assert "zone1:freezer_carried_out_not_ghost:class8" in result.notes
+
+
+def test_item_seen_on_another_floor_without_a_hand_stays_a_ghost():
+    # 5층에서 8이 첫 프레임에 손에 없었다면(head 0) 들고 간 흔적이 아니다 — 기존대로 12만
+    events = _with_candidate(_session("ses-8-1795685730"), 5, 8, head_votes=0)
+    result = settle(events)
+    assert class_counts(result) == {"12": 1, "7": 1}
+    assert not any("freezer_carried_out" in n for n in result.notes)
+
+
+@pytest.mark.parametrize("source, zone, expected, note", [
+    # 1층 −732.5g: 3(720g)이 무게로 더 가깝지만 2(750g)가 243표·취출 방향 47표이고
+    # 2층 영상 첫 프레임부터 손에 있었다(head 22). 3은 2층에 보이지 않았다.
+    ("ses-9-1795685842", 1, {"2": 1, "1": 1},
+     "zone1:freezer_carried_out_identity:billed=class3:adopted=class2:trigger_ts=1795685843.414"),
+    # 1층 −480g: 4(475g)·8(500g) 표 48 동률. 8은 4층(head 6)·5층(head 8)에 들려 갔고
+    # 4는 4층에서 첫 프레임엔 없었다(head 0, 4층 4 취출).
+    ("ses-10-1795685937", 1, {"8": 1, "4": 1, "9": 1},
+     "zone1:freezer_carried_out_identity:billed=class4:adopted=class8:trigger_ts=1795685938.181"),
+])
+def test_same_weight_take_is_billed_as_the_item_carried_to_the_next_floor(
+        source, zone, expected, note):
+    result = settle(_session(source))
+    assert class_counts(result) == expected
+    assert note in result.notes
+    assert next(z for z in result.zones if z.zone == zone).status == "partial"
+
+
+def _ses9_adopted(events):
+    return any("freezer_carried_out_identity" in n for n in settle(events).notes)
+
+
+def test_carried_out_identity_needs_every_condition():
+    events = _session("ses-9-1795685842")
+    assert _ses9_adopted(events)
+    # 2층에서 2가 첫 프레임에 손에 없었다 → 들려 나간 흔적 없음
+    assert not _ses9_adopted(_with_candidate(events, 2, 2, head_votes=0))
+    # 1층에서 2가 이미 첫 프레임부터 손에 있었다 → 이 층에서 꺼낸 게 아니다
+    assert not _ses9_adopted(_with_candidate(events, 1, 2, head_votes=5))
+    # 2의 표가 청구된 3(71표)보다 적다
+    assert not _ses9_adopted(_with_candidate(events, 1, 2, vote_count=50))
+    # 청구된 3도 2층에 손에 든 채 들어갔다 → 어느 쪽이 나갔는지 못 가른다
+    held3 = VisionCandidate(3, 1.0, 10, .1, head_votes=10)
+    assert not _ses9_adopted([replace(e, vision_candidates=(*e.vision_candidates, held3))
+                              if e.zone == 2 else e for e in events])
+    # 무게 거부권: 꺼낸 무게가 2(750g)와 근처 범위(30g) 밖
+    assert not _ses9_adopted([replace(e, delta_weight=-715.0) if e.zone == 1 else e
+                              for e in events])
+
+
+def test_carried_out_identity_does_not_bill_an_item_billed_elsewhere():
+    # 2가 이미 2층에 청구돼 있으면 1층을 2로 바꾸지 않는다 (같은 상품을 겹쳐 세지 않음)
+    events = [replace(e, judgment=replace(e.judgment, products=(ProductCount(BY_CLASS[2], 1),)))
+              if e.zone == 2 and e.delta_weight < 0 else e for e in _session("ses-9-1795685842")]
+    assert not _ses9_adopted(events)
